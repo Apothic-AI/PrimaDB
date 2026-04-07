@@ -1,0 +1,51 @@
+[package]
+name = "primadb"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust-native local-first graph database inspired by Gun."
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+async-channel = "2.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+anyhow = "1.0"
+futures-util = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "BinaryType",
+    "CloseEvent",
+    "DomException",
+    "ErrorEvent",
+    "Event",
+    "EventTarget",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbObjectStore",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbVersionChangeEvent",
+    "MessageEvent",
+    "Storage",
+    "WebSocket",
+    "Window",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

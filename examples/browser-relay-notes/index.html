@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Primadb Relay Notes</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Primadb Relay Example</p>
+        <h1>Shared Relay Notes</h1>
+        <p class="lede">
+          A browser-first note board that persists locally in IndexedDB and syncs
+          across browsers through a lightweight WebSocket relay.
+        </p>
+      </section>
+
+      <section class="panel dashboard">
+        <div>
+          <span class="label">Replica</span>
+          <strong id="replica-id">booting</strong>
+        </div>
+        <div>
+          <span class="label">Persistence</span>
+          <strong id="persistence-status">starting</strong>
+        </div>
+        <div>
+          <span class="label">Relay</span>
+          <strong id="relay-status">disconnected</strong>
+        </div>
+        <div>
+          <span class="label">Inflight</span>
+          <strong id="inflight-count">0</strong>
+        </div>
+      </section>
+
+      <section class="panel relay-config">
+        <label class="field grow">
+          <span>Relay URL</span>
+          <input id="relay-url" type="url" value="ws://127.0.0.1:9010" />
+        </label>
+        <button id="connect-button" class="primary-button" type="button">Connect</button>
+      </section>
+
+      <section class="panel composer">
+        <form id="note-form" class="note-form">
+          <label class="field">
+            <span>Title</span>
+            <input
+              id="note-title"
+              type="text"
+              maxlength="120"
+              autocomplete="off"
+              placeholder="Document sync protocol"
+              required
+            />
+          </label>
+          <label class="field">
+            <span>Body</span>
+            <textarea
+              id="note-body"
+              rows="4"
+              maxlength="400"
+              placeholder="Add a shared note"
+            ></textarea>
+          </label>
+          <button class="primary-button" type="submit">Add note</button>
+        </form>
+      </section>
+
+      <section class="panel controls">
+        <div class="filters" id="filter-group">
+          <button class="filter-button is-active" data-filter="all" type="button">All</button>
+          <button class="filter-button" data-filter="active" type="button">Active</button>
+          <button class="filter-button" data-filter="done" type="button">Done</button>
+        </div>
+        <label class="field search">
+          <span>Search</span>
+          <input id="search-input" type="search" placeholder="Search titles or bodies" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <div id="empty-state" class="empty-state" hidden>
+          <h2>No notes match the current filter</h2>
+          <p>Try a different filter or create a new note.</p>
+        </div>
+        <ul id="note-list" class="note-list"></ul>
+      </section>
+    </main>
+
+    <template id="note-template">
+      <li class="note-card">
+        <div class="note-main">
+          <button class="toggle-button" type="button" aria-label="Toggle done"></button>
+          <div class="note-copy">
+            <h2 class="note-title"></h2>
+            <p class="note-body"></p>
+          </div>
+        </div>
+        <div class="note-footer">
+          <span class="note-updated"></span>
+          <button class="ghost-button archive-button" type="button">Archive</button>
+        </div>
+      </li>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
