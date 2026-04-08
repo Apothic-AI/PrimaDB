@@ -110,21 +110,11 @@ pub struct PullResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteResult {
-    Get {
-        value: Option<JsonValue>,
-    },
-    Map {
-        entries: Vec<MapEntry>,
-    },
-    Query {
-        entries: Vec<MapEntry>,
-    },
-    Lex {
-        entries: Vec<LexEntry>,
-    },
-    Snapshot {
-        snapshot: DatabaseSnapshot,
-    },
+    Get { value: Option<JsonValue> },
+    Map { entries: Vec<MapEntry> },
+    Query { entries: Vec<MapEntry> },
+    Lex { entries: Vec<LexEntry> },
+    Snapshot { snapshot: DatabaseSnapshot },
 }
 
 impl PullRequestKind {

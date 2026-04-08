@@ -1,7 +1,7 @@
 use crate::{
     Chain, ChangeSubscription, HybridClock, LexEntry, LexSpec, MapEntry, Operation,
     PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody,
-    RemotePath, RemoteResult, QuerySpec, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    QuerySpec, RemotePath, RemoteResult, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
     Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame,
 };
 use async_channel::{Sender, bounded};
@@ -14,6 +14,20 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
+
+#[cfg(feature = "wasm-threads")]
+#[allow(unused_imports)]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
+#[wasm_bindgen(js_name = parallelEnabled)]
+pub fn parallel_enabled_js() -> bool {
+    crate::parallel_enabled()
+}
+
+#[wasm_bindgen(js_name = parallelThreadCount)]
+pub fn parallel_thread_count_js() -> usize {
+    crate::parallel_thread_count()
+}
 
 #[wasm_bindgen(js_name = Primadb)]
 pub struct WasmPrimadb {
@@ -497,7 +511,8 @@ impl WasmPrimadb {
                 )
             };
             if let RoutePayload::Presence { peer } = &mut route.payload {
-                peer.metadata.insert("relay_url".to_owned(), relay_url.clone());
+                peer.metadata
+                    .insert("relay_url".to_owned(), relay_url.clone());
             }
             let _ = send_route_state(&onopen_state, &route);
             let _ = retry_inflight_state(&onopen_state);
@@ -508,14 +523,20 @@ impl WasmPrimadb {
         let onclose_state = state.clone();
         let onclose = Closure::wrap(Box::new(move |_event: web_sys::CloseEvent| {
             requeue_inflight_state(&onclose_state);
-            fail_pending_requests_state(&onclose_state, "websocket closed while requests were pending");
+            fail_pending_requests_state(
+                &onclose_state,
+                "websocket closed while requests were pending",
+            );
         }) as Box<dyn FnMut(_)>);
         socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
         let onerror_state = state.clone();
         let onerror = Closure::wrap(Box::new(move |_event: web_sys::Event| {
             requeue_inflight_state(&onerror_state);
-            fail_pending_requests_state(&onerror_state, "websocket errored while requests were pending");
+            fail_pending_requests_state(
+                &onerror_state,
+                "websocket errored while requests were pending",
+            );
         }) as Box<dyn FnMut(_)>);
         socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
@@ -561,7 +582,11 @@ impl WasmPrimadb {
         retry_interval_ms: Option<i32>,
     ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
         let signaling = web_sys::BroadcastChannel::new(&format!("primadb-mesh-{room}"))?;
-        let peer_id = format!("mesh:{}:{}", self.inner.replica_id(), js_sys::Date::now() as u64);
+        let peer_id = format!(
+            "mesh:{}:{}",
+            self.inner.replica_id(),
+            js_sys::Date::now() as u64
+        );
         let state = Rc::new(RefCell::new(WebRtcMeshState {
             db: self.inner.clone(),
             router: Router::new(RouterConfig {
@@ -649,8 +674,8 @@ pub fn sea_pair_from_private_keys(
 #[cfg(feature = "crypto")]
 #[wasm_bindgen(js_name = seaSign)]
 pub fn sea_sign(pair: JsValue, payload: JsValue) -> std::result::Result<JsValue, JsValue> {
-    let pair: crate::SeaPair =
-        serde_wasm_bindgen::from_value(pair).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let pair: crate::SeaPair = serde_wasm_bindgen::from_value(pair)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let payload = js_to_json(payload)?;
     let signed = pair.sign_payload(payload).map_err(to_js_error)?;
     to_js(&signed)
@@ -675,8 +700,8 @@ pub fn sea_secret(
     pair: JsValue,
     other_epub_base64: String,
 ) -> std::result::Result<String, JsValue> {
-    let pair: crate::SeaPair =
-        serde_wasm_bindgen::from_value(pair).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let pair: crate::SeaPair = serde_wasm_bindgen::from_value(pair)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let shared = pair
         .derive_secret_box(&other_epub_base64)
         .map_err(to_js_error)?;
@@ -685,21 +710,17 @@ pub fn sea_secret(
 
 #[cfg(feature = "crypto")]
 #[wasm_bindgen(js_name = seaEncrypt)]
-pub fn sea_encrypt(
-    key_base64: String,
-    payload: JsValue,
-) -> std::result::Result<JsValue, JsValue> {
+pub fn sea_encrypt(key_base64: String, payload: JsValue) -> std::result::Result<JsValue, JsValue> {
     let key = crate::SecretBoxKey::from_base64(&key_base64).map_err(to_js_error)?;
-    let encrypted = key.encrypt_json(&js_to_json(payload)?).map_err(to_js_error)?;
+    let encrypted = key
+        .encrypt_json(&js_to_json(payload)?)
+        .map_err(to_js_error)?;
     to_js(&encrypted)
 }
 
 #[cfg(feature = "crypto")]
 #[wasm_bindgen(js_name = seaDecrypt)]
-pub fn sea_decrypt(
-    key_base64: String,
-    payload: JsValue,
-) -> std::result::Result<JsValue, JsValue> {
+pub fn sea_decrypt(key_base64: String, payload: JsValue) -> std::result::Result<JsValue, JsValue> {
     let key = crate::SecretBoxKey::from_base64(&key_base64).map_err(to_js_error)?;
     let payload: crate::EncryptedPayload = serde_wasm_bindgen::from_value(payload)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -886,7 +907,9 @@ impl WasmWebSocketSync {
     ) -> std::result::Result<JsValue, JsValue> {
         let path: RemotePath = serde_wasm_bindgen::from_value(path)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Get { path }).await? {
+        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Get { path })
+            .await?
+        {
             RemoteResult::Get { value } => match value {
                 Some(value) => to_js(&value),
                 None => Ok(JsValue::NULL),
@@ -908,8 +931,12 @@ impl WasmWebSocketSync {
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Query { path, spec })
-            .await?
+        match request_remote_result_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::Query { path, spec },
+        )
+        .await?
         {
             RemoteResult::Query { entries } => to_js(&entries),
             other => Err(JsValue::from_str(&format!(
@@ -945,12 +972,8 @@ impl WasmWebSocketSync {
         peer_id: String,
         root: Option<String>,
     ) -> std::result::Result<JsValue, JsValue> {
-        match request_remote_result_state(
-            &self.state,
-            peer_id,
-            PullRequestKind::Snapshot { root },
-        )
-        .await?
+        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Snapshot { root })
+            .await?
         {
             RemoteResult::Snapshot { snapshot } => to_js(&snapshot),
             other => Err(JsValue::from_str(&format!(
@@ -1120,15 +1143,20 @@ fn handle_route_payload(
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                store_peer_recommendations_state(state, vec![peer_recommendation_from_presence(&peer)]);
+                store_peer_recommendations_state(
+                    state,
+                    vec![peer_recommendation_from_presence(&peer)],
+                );
             }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
                 let response = {
                     let borrowed = state.borrow();
-                    borrowed
-                        .router
-                        .snapshot_response(root, borrowed.db.snapshot(), RouteTarget::Peer(from.clone()))
+                    borrowed.router.snapshot_response(
+                        root,
+                        borrowed.db.snapshot(),
+                        RouteTarget::Peer(from.clone()),
+                    )
                 };
                 send_route_state(state, &response)?;
             }
@@ -1300,13 +1328,11 @@ fn retry_inflight_state(
             .inflight
             .iter()
             .map(|(_, outbound)| {
-                state
-                    .router
-                    .wrap_sync(
-                        outbound.encoding.clone(),
-                        outbound.payload.clone(),
-                        outbound.target.clone(),
-                    )
+                state.router.wrap_sync(
+                    outbound.encoding.clone(),
+                    outbound.payload.clone(),
+                    outbound.target.clone(),
+                )
             })
             .collect::<Vec<_>>()
     };
@@ -1470,14 +1496,20 @@ fn accept_pull_response_state(
             }
         }
         PullResponseBody::Error { message } => {
-            let request = borrowed.pending_requests.remove(&response.request_id).unwrap();
+            let request = borrowed
+                .pending_requests
+                .remove(&response.request_id)
+                .unwrap();
             let _ = request.sender.try_send(Err(message.clone()));
             return Ok(());
         }
     }
 
     if response.is_final() {
-        let request = borrowed.pending_requests.remove(&response.request_id).unwrap();
+        let request = borrowed
+            .pending_requests
+            .remove(&response.request_id)
+            .unwrap();
         let result = request.accumulator.into_result().map_err(to_js_error)?;
         let _ = request.sender.try_send(Ok(result));
     }
@@ -1518,7 +1550,9 @@ fn peer_recommendation_from_presence(peer: &crate::PeerPresence) -> PeerRecommen
     PeerRecommendation {
         peer: peer.clone(),
         relay_urls,
-        score: 100 + peer.capabilities.len().min(MAX_HINTS) as u16 * 5 + peer.topics.len().min(MAX_TOPICS) as u16 * 5,
+        score: 100
+            + peer.capabilities.len().min(MAX_HINTS) as u16 * 5
+            + peer.topics.len().min(MAX_TOPICS) as u16 * 5,
         discovered_at_millis: crate::clock::now_millis(),
     }
 }
@@ -1549,9 +1583,15 @@ impl PullAccumulator {
     fn new(request: &PullRequestKind) -> Self {
         match request {
             PullRequestKind::Get { .. } => Self::Get { value: None },
-            PullRequestKind::Map { .. } => Self::Map { entries: Vec::new() },
-            PullRequestKind::Query { .. } => Self::Query { entries: Vec::new() },
-            PullRequestKind::Lex { .. } => Self::Lex { entries: Vec::new() },
+            PullRequestKind::Map { .. } => Self::Map {
+                entries: Vec::new(),
+            },
+            PullRequestKind::Query { .. } => Self::Query {
+                entries: Vec::new(),
+            },
+            PullRequestKind::Lex { .. } => Self::Lex {
+                entries: Vec::new(),
+            },
             PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
                 nodes: BTreeMap::new(),
@@ -1585,7 +1625,10 @@ impl PullAccumulator {
     }
 }
 
-fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> std::result::Result<(String, JsonValue), JsValue> {
+fn encode_sync_payload(
+    _db: &Primadb,
+    frame: SyncFrame,
+) -> std::result::Result<(String, JsonValue), JsValue> {
     #[cfg(feature = "crypto")]
     {
         let frame = _db.secure_sync_frame(frame).map_err(to_js_error)?;
@@ -1647,7 +1690,10 @@ fn handle_mesh_signal_state(
     };
 
     match signal {
-        MeshSignal::Join { room: join_room, from } => {
+        MeshSignal::Join {
+            room: join_room,
+            from,
+        } => {
             if join_room != room || from == peer_id {
                 return Ok(());
             }
@@ -1714,14 +1760,8 @@ fn handle_mesh_signal_state(
             }
             let state = state.clone();
             spawn_local(async move {
-                let _ = add_mesh_ice_candidate(
-                    &state,
-                    from,
-                    candidate,
-                    sdp_mid,
-                    sdp_mline_index,
-                )
-                .await;
+                let _ =
+                    add_mesh_ice_candidate(&state, from, candidate, sdp_mid, sdp_mline_index).await;
             });
         }
         MeshSignal::Leave {
@@ -1832,7 +1872,8 @@ async fn add_mesh_ice_candidate(
         init.set_sdp_m_line_index(Some(index));
     }
     let candidate = web_sys::RtcIceCandidate::new(&init)?;
-    JsFuture::from(connection.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate))).await?;
+    JsFuture::from(connection.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate)))
+        .await?;
     Ok(())
 }
 
@@ -1847,25 +1888,24 @@ fn ensure_mesh_peer(
     let connection = web_sys::RtcPeerConnection::new()?;
     let remote = remote_peer.to_owned();
     let state_for_ice = state.clone();
-    let onicecandidate =
-        Closure::wrap(Box::new(move |event: web_sys::RtcPeerConnectionIceEvent| {
-            let Some(candidate) = event.candidate() else {
-                return;
-            };
-            let (room, from) = {
-                let borrowed = state_for_ice.borrow();
-                (borrowed.room.clone(), borrowed.peer_id.clone())
-            };
-            let signal = MeshSignal::Ice {
-                room,
-                from,
-                to: remote.clone(),
-                candidate: candidate.candidate(),
-                sdp_mid: candidate.sdp_mid(),
-                sdp_mline_index: candidate.sdp_m_line_index(),
-            };
-            let _ = post_mesh_signal_state(&state_for_ice, &signal);
-        }) as Box<dyn FnMut(_)>);
+    let onicecandidate = Closure::wrap(Box::new(move |event: web_sys::RtcPeerConnectionIceEvent| {
+        let Some(candidate) = event.candidate() else {
+            return;
+        };
+        let (room, from) = {
+            let borrowed = state_for_ice.borrow();
+            (borrowed.room.clone(), borrowed.peer_id.clone())
+        };
+        let signal = MeshSignal::Ice {
+            room,
+            from,
+            to: remote.clone(),
+            candidate: candidate.candidate(),
+            sdp_mid: candidate.sdp_mid(),
+            sdp_mline_index: candidate.sdp_m_line_index(),
+        };
+        let _ = post_mesh_signal_state(&state_for_ice, &signal);
+    }) as Box<dyn FnMut(_)>);
     connection.set_onicecandidate(Some(onicecandidate.as_ref().unchecked_ref()));
 
     let remote_for_data = remote_peer.to_owned();
@@ -2128,7 +2168,11 @@ fn flush_mesh_pending_state(
     let message_id = {
         let mut borrowed = state.borrow_mut();
         borrowed.next_message_seq = borrowed.next_message_seq.saturating_add(1);
-        format!("{}/mesh/{:x}", borrowed.db.replica_id(), borrowed.next_message_seq)
+        format!(
+            "{}/mesh/{:x}",
+            borrowed.db.replica_id(),
+            borrowed.next_message_seq
+        )
     };
     let frame = SyncFrame::Sync {
         from: envelope.from.clone(),
@@ -2136,10 +2180,11 @@ fn flush_mesh_pending_state(
         ops: envelope.ops.clone(),
     };
     let (encoding, payload) = encode_sync_payload(&db, frame)?;
-    let route = state
-        .borrow()
-        .router
-        .wrap_sync(encoding.clone(), payload.clone(), RouteTarget::Broadcast);
+    let route =
+        state
+            .borrow()
+            .router
+            .wrap_sync(encoding.clone(), payload.clone(), RouteTarget::Broadcast);
 
     let mut awaiting = BTreeMap::new();
     for peer_id in &peer_ids {
@@ -2193,7 +2238,10 @@ fn send_mesh_sync_frame(
 ) -> std::result::Result<(), JsValue> {
     let db = state.borrow().db.clone();
     let (encoding, payload) = encode_sync_payload(&db, frame)?;
-    let route = state.borrow().router.wrap_sync(encoding, payload, target.clone());
+    let route = state
+        .borrow()
+        .router
+        .wrap_sync(encoding, payload, target.clone());
     match target {
         RouteTarget::Peer(peer_id) => send_mesh_route_to_peer(state, &peer_id, &route),
         RouteTarget::Broadcast | RouteTarget::Topic(_) => {

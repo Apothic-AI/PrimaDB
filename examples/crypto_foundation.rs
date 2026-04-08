@@ -24,8 +24,17 @@ fn main() -> anyhow::Result<()> {
     let decrypted: serde_json::Value = secret_box.decrypt_json(&encrypted)?;
 
     println!("public key: {}", identity.public_key_base64());
-    println!("verified frame: {}", serde_json::to_string_pretty(&verified)?);
-    println!("encrypted payload: {}", serde_json::to_string_pretty(&encrypted)?);
-    println!("decrypted payload: {}", serde_json::to_string_pretty(&decrypted)?);
+    println!(
+        "verified frame: {}",
+        serde_json::to_string_pretty(&verified)?
+    );
+    println!(
+        "encrypted payload: {}",
+        serde_json::to_string_pretty(&encrypted)?
+    );
+    println!(
+        "decrypted payload: {}",
+        serde_json::to_string_pretty(&decrypted)?
+    );
     Ok(())
 }

@@ -31,6 +31,7 @@
 - Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
 - Gun compatibility surface with `Gun` / `GunChain`, Gun link markers, and Gun graph import/export helpers.
 - Runtime stats and limit controls for transport and queue hardening.
+- Optional Rayon-backed query filtering/sorting, chunk construction, and log replay on native targets and on the opt-in `wasm-threads` browser build.
 - `wasm-bindgen` bindings that compile on `wasm32-unknown-unknown`.
 
 ## Design Notes
@@ -45,6 +46,7 @@ This is intentionally not a 1:1 port of Gun internals.
 - Browser auto-persistence ignores the transient “drained for transport” state so in-flight writes are not silently lost on reload before ack.
 - Persisted snapshot loads preserve the local replica identity and do not replay another tab's pending queue.
 - Browser support stays on stable `wasm32-unknown-unknown` patterns instead of assuming newer WebAssembly proposals are enabled by default.
+- Threaded WASM is an explicit opt-in path layered on top of the default browser build instead of changing the default toolchain or hosting requirements.
 
 That gives the project a more inspectable merge model and makes it easier to test and evolve without carrying over Gun's event-routing bugs.
 
@@ -132,6 +134,32 @@ persistence.close();
 peer.close();
 ```
 
+## Threaded WASM
+
+The default browser build remains the current stable `wasm32-unknown-unknown` path.
+
+If you want Rayon-backed parallel work in the browser, Primadb now has a separate `wasm-threads`
+build path. That path is intentionally opt-in because it requires:
+
+- the `wasm-threads` feature
+- a nightly toolchain with `-Z build-std`
+- shared-memory linker flags
+- `SharedArrayBuffer`
+- COOP/COEP headers at runtime
+
+The dedicated example in [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md)
+shows the intended JS bootstrap pattern:
+
+```js
+import init, * as primadb from "./pkg/primadb.js";
+
+await init();
+await primadb.initThreadPool(Math.max(2, navigator.hardwareConcurrency || 4));
+
+const db = new primadb.Primadb("threaded-browser");
+console.log(primadb.parallelEnabled(), primadb.parallelThreadCount());
+```
+
 ## Replication Contract
 
 Primadb does not hide the wire format from you.
@@ -166,8 +194,10 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's `WebSocketSync` API and the included relay server.
 - [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Browser board using Primadb's `WebRtcMesh` API, peer discovery over `BroadcastChannel`, and direct WebRTC data-channel sync.
 - [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the DAM relay.
+- [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md): Opt-in `wasm-threads` browser demo that initializes `initThreadPool(...)` and exercises the Rayon-backed query path under COOP/COEP.
 - [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
 - [examples/native_relay_client.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
+- [examples/native_parallel_query.rs](/home/bitnom/Code/gunport/primadb/examples/native_parallel_query.rs): Native Rayon verification example, runnable with `cargo run --example native_parallel_query`.
 - [examples/crypto_foundation.rs](/home/bitnom/Code/gunport/primadb/examples/crypto_foundation.rs): Signing and encryption primitives, runnable with `cargo run --features crypto --example crypto_foundation`.
 - [examples/authenticated_sync.rs](/home/bitnom/Code/gunport/primadb/examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
 - [examples/radisk_storage.rs](/home/bitnom/Code/gunport/primadb/examples/radisk_storage.rs): RADisk-style append-log storage demo, runnable with `cargo run --example radisk_storage`.

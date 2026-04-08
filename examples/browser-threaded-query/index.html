@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Primadb Threaded Query Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Primadb wasm-threads</p>
+        <h1>Threaded query demo</h1>
+        <p class="lede">
+          This example boots Primadb with <code>wasm-bindgen-rayon</code>, seeds a large note set,
+          and runs a query through the Rayon-backed path.
+        </p>
+      </section>
+
+      <section class="panel status-panel">
+        <div>
+          <span class="label">Build</span>
+          <strong id="build-mode">loading</strong>
+        </div>
+        <div>
+          <span class="label">Thread Pool</span>
+          <strong id="thread-count">0</strong>
+        </div>
+        <div>
+          <span class="label">Seeded Notes</span>
+          <strong id="seed-count">0</strong>
+        </div>
+        <div>
+          <span class="label">Last Query</span>
+          <strong id="query-timing">not run</strong>
+        </div>
+      </section>
+
+      <section class="panel controls">
+        <button id="seed-button" type="button">Seed 4,000 Notes</button>
+        <button id="query-button" type="button" disabled>Run Parallel Query</button>
+      </section>
+
+      <section class="panel">
+        <h2>Query Result</h2>
+        <pre id="result-output">Initializing…</pre>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

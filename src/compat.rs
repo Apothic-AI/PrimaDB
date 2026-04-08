@@ -73,10 +73,7 @@ impl Gun {
                         field_state.version.op_id
                     )),
                 );
-                node.insert(
-                    field.clone(),
-                    field_value_to_gun(&field_state.value),
-                );
+                node.insert(field.clone(), field_value_to_gun(&field_state.value));
             }
             metadata.insert(">".to_owned(), JsonValue::Object(versions));
             node.insert("_".to_owned(), JsonValue::Object(metadata));
@@ -185,7 +182,9 @@ fn gun_to_primadb(value: JsonValue) -> JsonValue {
                     .collect(),
             )
         }
-        JsonValue::Array(items) => JsonValue::Array(items.into_iter().map(gun_to_primadb).collect()),
+        JsonValue::Array(items) => {
+            JsonValue::Array(items.into_iter().map(gun_to_primadb).collect())
+        }
         other => other,
     }
 }
@@ -208,7 +207,9 @@ fn primadb_to_gun(value: JsonValue) -> JsonValue {
                     .collect(),
             )
         }
-        JsonValue::Array(items) => JsonValue::Array(items.into_iter().map(primadb_to_gun).collect()),
+        JsonValue::Array(items) => {
+            JsonValue::Array(items.into_iter().map(primadb_to_gun).collect())
+        }
         other => other,
     }
 }

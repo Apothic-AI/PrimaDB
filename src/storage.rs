@@ -1,5 +1,7 @@
 use crate::error::{PrimadbError, Result};
 use crate::{DatabaseSnapshot, Operation, Primadb};
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
@@ -117,11 +119,21 @@ impl RadiskFileAdapter {
             return Ok(Vec::new());
         }
         let payload = std::fs::read_to_string(path)?;
-        payload
+        let lines: Vec<_> = payload
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).map_err(Into::into))
-            .collect()
+            .collect();
+        if lines.len() >= 256 {
+            lines
+                .into_par_iter()
+                .map(|line| serde_json::from_str(line).map_err(Into::into))
+                .collect()
+        } else {
+            lines
+                .into_iter()
+                .map(|line| serde_json::from_str(line).map_err(Into::into))
+                .collect()
+        }
     }
 }
 
@@ -175,7 +187,10 @@ impl StorageAdapter for RadiskFileAdapter {
 
         let log_len = self.read_log()?.len();
         if log_len >= self.compaction_threshold || !self.checkpoint_path().exists() {
-            std::fs::write(self.checkpoint_path(), serde_json::to_string_pretty(snapshot)?)?;
+            std::fs::write(
+                self.checkpoint_path(),
+                serde_json::to_string_pretty(snapshot)?,
+            )?;
             std::fs::write(self.log_path(), "")?;
         }
         Ok(())
@@ -189,7 +204,10 @@ pub fn attach_adapter(db: &Primadb, adapter: Arc<dyn StorageAdapter>) -> Result<
 
 #[allow(dead_code)]
 pub fn adapter_error(name: &str, detail: impl ToString) -> PrimadbError {
-    PrimadbError::Message(format!("storage adapter `{name}` failed: {}", detail.to_string()))
+    PrimadbError::Message(format!(
+        "storage adapter `{name}` failed: {}",
+        detail.to_string()
+    ))
 }
 
 #[cfg(test)]
@@ -201,9 +219,14 @@ mod tests {
     #[test]
     fn memory_adapter_round_trips_snapshot() {
         let db = Primadb::with_replica_id("adapter-a");
-        db.root("docs").field("post").put(json!({"title": "Hello"})).unwrap();
+        db.root("docs")
+            .field("post")
+            .put(json!({"title": "Hello"}))
+            .unwrap();
         let adapter = MemoryStorageAdapter::default();
-        adapter.flush(&db.pending_operations(), &db.snapshot()).unwrap();
+        adapter
+            .flush(&db.pending_operations(), &db.snapshot())
+            .unwrap();
         let snapshot = adapter.load_snapshot().unwrap().unwrap();
         assert_eq!(snapshot.nodes.len(), 2);
     }

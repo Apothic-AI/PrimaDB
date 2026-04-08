@@ -6,8 +6,8 @@ use primadb::{
 use std::collections::BTreeMap;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -158,10 +158,7 @@ async fn forward_route(
     let (bootstrap, recipients, encoded) = {
         let mut state = state.lock().await;
 
-        if route
-            .seen_by
-            .iter()
-            .any(|peer_id| peer_id == "relay")
+        if route.seen_by.iter().any(|peer_id| peer_id == "relay")
             || state.seen_routes.contains_key(&route.route_id)
             || dedupe_key(&route)
                 .as_ref()
@@ -194,7 +191,10 @@ async fn forward_route(
                     if *candidate_id == client_id {
                         None
                     } else {
-                        handle.presence.as_ref().map(|presence| presence.route.clone())
+                        handle
+                            .presence
+                            .as_ref()
+                            .map(|presence| presence.route.clone())
                     }
                 })
                 .collect::<Vec<_>>();
@@ -253,7 +253,10 @@ fn collect_route_recipients(
                 if *client_id == sender_id {
                     None
                 } else {
-                    state.clients.get(client_id).map(|handle| handle.sender.clone())
+                    state
+                        .clients
+                        .get(client_id)
+                        .map(|handle| handle.sender.clone())
                 }
             })
             .into_iter()
@@ -284,7 +287,11 @@ fn collect_route_recipients(
                 let Some(presence) = &handle.presence else {
                     return None;
                 };
-                if presence.peer.topics.iter().any(|candidate| candidate == topic)
+                if presence
+                    .peer
+                    .topics
+                    .iter()
+                    .any(|candidate| candidate == topic)
                     || presence.route.channel == *topic
                 {
                     Some(handle.sender.clone())
@@ -354,7 +361,10 @@ fn build_bootstrap_route(
 
     let payload = RoutePayload::Batch { items };
     Some(RouteEnvelope {
-        route_id: format!("relay/bootstrap/{:x}", NEXT_ROUTE_ID.fetch_add(1, Ordering::Relaxed)),
+        route_id: format!(
+            "relay/bootstrap/{:x}",
+            NEXT_ROUTE_ID.fetch_add(1, Ordering::Relaxed)
+        ),
         from: "relay".to_owned(),
         channel,
         target: RouteTarget::Peer(target_peer_id),
@@ -418,7 +428,10 @@ async fn send_to_client(
 ) -> anyhow::Result<()> {
     let sender = {
         let state = state.lock().await;
-        state.clients.get(&client_id).map(|handle| handle.sender.clone())
+        state
+            .clients
+            .get(&client_id)
+            .map(|handle| handle.sender.clone())
     };
     if let Some(sender) = sender {
         let _ = sender.send(RelayMessage { payload });

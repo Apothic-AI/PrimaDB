@@ -3,9 +3,7 @@ fn main() -> anyhow::Result<()> {
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis();
+    let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let directory = std::env::temp_dir().join(format!("primadb-radisk-example-{suffix}"));
 
     let db = Primadb::with_replica_id("radisk-demo");

@@ -218,7 +218,11 @@ impl NativeWebSocketSync {
             .collect()
     }
 
-    pub async fn remote_get(&self, peer_id: impl Into<String>, path: RemotePath) -> Result<Option<JsonValue>> {
+    pub async fn remote_get(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+    ) -> Result<Option<JsonValue>> {
         match request_remote_result(
             &self.state,
             peer_id.into(),
@@ -375,10 +379,7 @@ async fn request_remote_result(
         .map_err(PrimadbError::Message)
 }
 
-async fn handle_incoming_text(
-    state: &Arc<NativeWebSocketSyncState>,
-    payload: &str,
-) -> Result<()> {
+async fn handle_incoming_text(state: &Arc<NativeWebSocketSyncState>, payload: &str) -> Result<()> {
     if let Ok(route) = serde_json::from_str::<RouteEnvelope>(payload) {
         return handle_route_envelope(state, route).await;
     }
@@ -413,9 +414,11 @@ async fn handle_route_payload(
             }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
-                let response = state
-                    .router
-                    .snapshot_response(root, state.db.snapshot(), RouteTarget::Peer(from.clone()));
+                let response = state.router.snapshot_response(
+                    root,
+                    state.db.snapshot(),
+                    RouteTarget::Peer(from.clone()),
+                );
                 send_route(state, &response)?;
             }
             RoutePayload::SnapshotResponse { snapshot, .. } => {
@@ -530,7 +533,9 @@ async fn flush_pending_state(state: &Arc<NativeWebSocketSyncState>) -> Result<us
         target: RouteTarget::Broadcast,
     };
     let sent_ops = envelope.ops.len();
-    let route = state.router.wrap_sync(encoding, payload, RouteTarget::Broadcast);
+    let route = state
+        .router
+        .wrap_sync(encoding, payload, RouteTarget::Broadcast);
 
     if let Err(error) = send_route(state, &route) {
         let _ = state.db.requeue_pending_operations(envelope.ops);
@@ -555,9 +560,11 @@ async fn retry_inflight_state(state: &Arc<NativeWebSocketSyncState>) -> Result<u
         .collect::<Vec<_>>();
 
     for item in &outbound {
-        let route = state
-            .router
-            .wrap_sync(item.encoding.clone(), item.payload.clone(), item.target.clone());
+        let route = state.router.wrap_sync(
+            item.encoding.clone(),
+            item.payload.clone(),
+            item.target.clone(),
+        );
         send_route(state, &route)?;
     }
 
@@ -617,7 +624,10 @@ fn fail_pending_requests(state: &Arc<NativeWebSocketSyncState>, message: &str) {
     }
 }
 
-fn accept_pull_response(state: &Arc<NativeWebSocketSyncState>, response: crate::PullResponse) -> Result<()> {
+fn accept_pull_response(
+    state: &Arc<NativeWebSocketSyncState>,
+    response: crate::PullResponse,
+) -> Result<()> {
     let mut pending = state.pending_requests.lock().unwrap();
     let Some(request) = pending.get_mut(&response.request_id) else {
         return Ok(());
@@ -707,7 +717,9 @@ fn peer_recommendation_from_presence(peer: &crate::PeerPresence) -> PeerRecommen
     PeerRecommendation {
         peer: peer.clone(),
         relay_urls,
-        score: 100 + peer.capabilities.len().min(8) as u16 * 5 + peer.topics.len().min(8) as u16 * 5,
+        score: 100
+            + peer.capabilities.len().min(8) as u16 * 5
+            + peer.topics.len().min(8) as u16 * 5,
         discovered_at_millis: crate::clock::now_millis(),
     }
 }
@@ -722,7 +734,8 @@ fn pack_batch_routes(
     if items.is_empty() {
         return Vec::new();
     }
-    items.chunks(batch_size.max(1))
+    items
+        .chunks(batch_size.max(1))
         .map(|chunk| {
             if chunk.len() == 1 {
                 router.wrap_batch_item(chunk[0].clone(), target.clone(), reply_to.clone())
@@ -765,9 +778,15 @@ impl PullAccumulator {
     fn new(request: &crate::PullRequestKind) -> Self {
         match request {
             crate::PullRequestKind::Get { .. } => Self::Get { value: None },
-            crate::PullRequestKind::Map { .. } => Self::Map { entries: Vec::new() },
-            crate::PullRequestKind::Query { .. } => Self::Query { entries: Vec::new() },
-            crate::PullRequestKind::Lex { .. } => Self::Lex { entries: Vec::new() },
+            crate::PullRequestKind::Map { .. } => Self::Map {
+                entries: Vec::new(),
+            },
+            crate::PullRequestKind::Query { .. } => Self::Query {
+                entries: Vec::new(),
+            },
+            crate::PullRequestKind::Lex { .. } => Self::Lex {
+                entries: Vec::new(),
+            },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
                 nodes: BTreeMap::new(),

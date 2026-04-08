@@ -1,6 +1,8 @@
 #[cfg(not(feature = "native-websocket"))]
 fn main() {
-    eprintln!("Run with: cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010");
+    eprintln!(
+        "Run with: cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010"
+    );
 }
 
 #[cfg(feature = "native-websocket")]

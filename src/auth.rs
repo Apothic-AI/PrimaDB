@@ -145,8 +145,11 @@ impl UserRecord {
     }
 
     pub fn can_write_roots<'a>(&self, roots: impl IntoIterator<Item = &'a str>) -> bool {
-        roots.into_iter()
-            .all(|root| self.grants.iter().any(|grant| grant.write && grant.matches_root(root)))
+        roots.into_iter().all(|root| {
+            self.grants
+                .iter()
+                .any(|grant| grant.write && grant.matches_root(root))
+        })
     }
 }
 
@@ -172,8 +175,10 @@ impl SecurityState {
         grants: Vec<UserGrant>,
     ) {
         let alias = alias.into();
-        self.trusted_users
-            .insert(alias.clone(), UserRecord::new(alias, public_identity).with_grants(grants));
+        self.trusted_users.insert(
+            alias.clone(),
+            UserRecord::new(alias, public_identity).with_grants(grants),
+        );
     }
 
     pub fn set_local_user(
@@ -221,7 +226,9 @@ impl SecurityState {
         write_block: Option<JsonValue>,
     ) -> Result<String> {
         let local_user = self.local_user.as_ref().ok_or_else(|| {
-            PrimadbError::Crypto("cannot create a certificate without an authenticated user".to_owned())
+            PrimadbError::Crypto(
+                "cannot create a certificate without an authenticated user".to_owned(),
+            )
         })?;
         let signed = local_user.identity.sign_payload(DataCertificate {
             certificants: normalize_certificants(certificants),
@@ -258,7 +265,11 @@ impl SecurityState {
         }))?))
     }
 
-    pub fn verify_data_value(&self, expected_path: &str, value: &JsonValue) -> Result<Option<JsonValue>> {
+    pub fn verify_data_value(
+        &self,
+        expected_path: &str,
+        value: &JsonValue,
+    ) -> Result<Option<JsonValue>> {
         let Some(signed) = decode_signed_value(value)? else {
             return Ok(Some(value.clone()));
         };
@@ -340,21 +351,23 @@ impl SecurityState {
             }
             SecureSyncFrame::Authenticated(frame) => {
                 let user = self.verify_claims(&frame.claims, &frame.signer)?;
-                user.public_identity()?.verify_payload(&crate::SignedPayload {
-                    signer: frame.signer,
-                    signature: frame.signature,
-                    payload: (frame.claims.clone(), frame.frame.clone()),
-                })?;
+                user.public_identity()?
+                    .verify_payload(&crate::SignedPayload {
+                        signer: frame.signer,
+                        signature: frame.signature,
+                        payload: (frame.claims.clone(), frame.frame.clone()),
+                    })?;
                 authorize_roots(user, &frame.claims, roots_for_frame(&frame.frame))?;
                 Ok(frame.frame)
             }
             SecureSyncFrame::Encrypted(frame) => {
                 let user = self.verify_claims(&frame.claims, &frame.signer)?;
-                user.public_identity()?.verify_payload(&crate::SignedPayload {
-                    signer: frame.signer,
-                    signature: frame.signature,
-                    payload: (frame.claims.clone(), frame.payload.clone()),
-                })?;
+                user.public_identity()?
+                    .verify_payload(&crate::SignedPayload {
+                        signer: frame.signer,
+                        signature: frame.signature,
+                        payload: (frame.claims.clone(), frame.payload.clone()),
+                    })?;
                 let key = self.transport_encryption_key.as_ref().ok_or_else(|| {
                     PrimadbError::Crypto(
                         "received encrypted sync frame but no transport key is configured"
@@ -386,8 +399,7 @@ impl SecurityState {
             StoredSnapshot::Encrypted { payload, .. } => {
                 let key = self.snapshot_encryption_key.as_ref().ok_or_else(|| {
                     PrimadbError::Crypto(
-                        "received encrypted snapshot but no snapshot key is configured"
-                            .to_owned(),
+                        "received encrypted snapshot but no snapshot key is configured".to_owned(),
                     )
                 })?;
                 key.decrypt_json(&payload)
@@ -605,7 +617,11 @@ fn validate_certificate(
     Ok(())
 }
 
-fn authorize_roots(user: &UserRecord, claims: &AuthClaims, actual_roots: Vec<String>) -> Result<()> {
+fn authorize_roots(
+    user: &UserRecord,
+    claims: &AuthClaims,
+    actual_roots: Vec<String>,
+) -> Result<()> {
     if !claims
         .roots
         .iter()
@@ -634,7 +650,7 @@ fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SecurityState, SecureSyncFrame, UserGrant, owner_public_key_for_path};
+    use super::{SecureSyncFrame, SecurityState, UserGrant, owner_public_key_for_path};
     use crate::{Identity, Operation, OperationAction, OperationValue, Revision, SyncFrame};
     use serde_json::json;
 
@@ -643,7 +659,11 @@ mod tests {
         let identity = Identity::generate();
         let mut state = SecurityState::default();
         state
-            .set_local_user("alice", identity.clone(), vec![UserGrant::write_root("docs")])
+            .set_local_user(
+                "alice",
+                identity.clone(),
+                vec![UserGrant::write_root("docs")],
+            )
             .unwrap();
         state.register_user(
             "alice",
@@ -675,7 +695,11 @@ mod tests {
         let identity = Identity::generate();
         let mut sender = SecurityState::default();
         sender
-            .set_local_user("alice", identity.clone(), vec![UserGrant::write_root("docs")])
+            .set_local_user(
+                "alice",
+                identity.clone(),
+                vec![UserGrant::write_root("docs")],
+            )
             .unwrap();
         sender.register_user(
             "alice",
@@ -784,7 +808,11 @@ mod tests {
 
         let mut delegate_state = SecurityState::default();
         delegate_state
-            .set_local_user("delegate", delegate.clone(), vec![UserGrant::write_root("*")])
+            .set_local_user(
+                "delegate",
+                delegate.clone(),
+                vec![UserGrant::write_root("*")],
+            )
             .unwrap();
         let signed = delegate_state
             .sign_data_value(

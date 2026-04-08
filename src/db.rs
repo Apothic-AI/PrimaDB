@@ -17,11 +17,18 @@ use crate::{
     UserGrant, owner_public_key_for_path,
 };
 use async_channel::{Receiver, Sender};
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+const PARALLEL_QUERY_MIN_LEN: usize = 256;
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+const PARALLEL_CHUNK_MIN_LEN: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MapEntry {
@@ -367,7 +374,9 @@ impl Primadb {
     pub fn secure_sync_frame(&self, frame: SyncFrame) -> Result<SecureSyncFrame> {
         let roots = crate::auth::roots_for_frame(&frame);
         let inner = self.inner.lock().unwrap();
-        inner.security.encode_sync_frame(inner.clock.actor(), roots, frame)
+        inner
+            .security
+            .encode_sync_frame(inner.clock.actor(), roots, frame)
     }
 
     #[cfg(feature = "crypto")]
@@ -597,20 +606,31 @@ impl Primadb {
             "alias": alias,
             "pub": public_key,
         }))?;
-        self.root(format!("~{public_key}")).put_signed(serde_json::json!({
-            "alias": alias,
-            "pub": public_key,
-        }), None)
+        self.root(format!("~{public_key}")).put_signed(
+            serde_json::json!({
+                "alias": alias,
+                "pub": public_key,
+            }),
+            None,
+        )
     }
 
     #[cfg(feature = "crypto")]
     pub fn set_snapshot_encryption_key(&self, key: SecretBoxKey) {
-        self.inner.lock().unwrap().security.set_snapshot_encryption_key(key);
+        self.inner
+            .lock()
+            .unwrap()
+            .security
+            .set_snapshot_encryption_key(key);
     }
 
     #[cfg(feature = "crypto")]
     pub fn set_transport_encryption_key(&self, key: SecretBoxKey) {
-        self.inner.lock().unwrap().security.set_transport_encryption_key(key);
+        self.inner
+            .lock()
+            .unwrap()
+            .security
+            .set_transport_encryption_key(key);
     }
 
     #[cfg(feature = "crypto")]
@@ -751,15 +771,10 @@ impl Primadb {
         segments: &[String],
         spec: &QuerySpec,
     ) -> Result<Vec<MapEntry>> {
-        let mut entries = self.map_at(anchor, segments)?;
-        entries.retain(|entry| {
-            spec.filters
-                .iter()
-                .all(|filter| matches_filter(entry, filter))
-        });
+        let mut entries = filter_query_entries(self.map_at(anchor, segments)?, spec);
 
         if let Some(order) = &spec.order {
-            entries.sort_by(|left, right| compare_entries(left, right, order));
+            sort_query_entries(&mut entries, order);
         }
 
         let offset = spec.offset.min(entries.len());
@@ -1133,7 +1148,11 @@ impl Chain {
     }
 
     #[cfg(feature = "crypto")]
-    pub fn set_signed<T: Serialize>(&self, value: T, certificate: Option<String>) -> Result<String> {
+    pub fn set_signed<T: Serialize>(
+        &self,
+        value: T,
+        certificate: Option<String>,
+    ) -> Result<String> {
         self.db.set_signed_json(
             &self.anchor,
             &self.segments,
@@ -2231,7 +2250,12 @@ impl Inner {
             output.push(LexEntry {
                 path: path.clone(),
                 key: field.clone(),
-                value: self.materialize_field(node, field, &field_state.value, &mut BTreeSet::new()),
+                value: self.materialize_field(
+                    node,
+                    field,
+                    &field_state.value,
+                    &mut BTreeSet::new(),
+                ),
             });
 
             if !spec.follow_links || remaining_depth <= 1 {
@@ -2294,7 +2318,13 @@ impl Inner {
                         value: self.materialize_node(member, member, &mut BTreeSet::new()),
                     });
                     if spec.follow_links && remaining_depth > 1 {
-                        self.collect_lex_from_node(member, &path, spec, remaining_depth - 1, output);
+                        self.collect_lex_from_node(
+                            member,
+                            &path,
+                            spec,
+                            remaining_depth - 1,
+                            output,
+                        );
                     }
                 }
             }
@@ -2453,7 +2483,10 @@ fn build_pull_responses(
         RemoteResult::Snapshot { snapshot } => {
             let node_chunks =
                 chunk_btree_map(snapshot.nodes, limits.max_snapshot_nodes_per_chunk.max(1));
-            let op_chunks = chunk_vec(snapshot.pending_ops, limits.max_snapshot_ops_per_chunk.max(1));
+            let op_chunks = chunk_vec(
+                snapshot.pending_ops,
+                limits.max_snapshot_ops_per_chunk.max(1),
+            );
             let total = node_chunks.len().max(op_chunks.len()).max(1);
             let total_u32 = total as u32;
             (0..total)
@@ -2486,7 +2519,9 @@ fn build_map_chunk_responses(
             request_id: request_id.to_owned(),
             chunk: PullChunk { index: 0, total: 1 },
             done: true,
-            result: PullResponseBody::Map { entries: Vec::new() },
+            result: PullResponseBody::Map {
+                entries: Vec::new(),
+            },
         }];
     }
     let total = chunks.len();
@@ -2516,7 +2551,9 @@ fn build_query_chunk_responses(
             request_id: request_id.to_owned(),
             chunk: PullChunk { index: 0, total: 1 },
             done: true,
-            result: PullResponseBody::Query { entries: Vec::new() },
+            result: PullResponseBody::Query {
+                entries: Vec::new(),
+            },
         }];
     }
     let total = chunks.len();
@@ -2546,7 +2583,9 @@ fn build_lex_chunk_responses(
             request_id: request_id.to_owned(),
             chunk: PullChunk { index: 0, total: 1 },
             done: true,
-            result: PullResponseBody::Lex { entries: Vec::new() },
+            result: PullResponseBody::Lex {
+                entries: Vec::new(),
+            },
         }];
     }
     let total = chunks.len();
@@ -2565,16 +2604,39 @@ fn build_lex_chunk_responses(
         .collect()
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+fn chunk_vec<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>>
+where
+    T: Clone + Send + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    chunk_vec_impl(items, chunk_size.max(1))
+}
+
+#[cfg(not(any(not(target_arch = "wasm32"), feature = "wasm-threads")))]
 fn chunk_vec<T: Clone>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {
     if items.is_empty() {
         return Vec::new();
     }
-    items
-        .chunks(chunk_size.max(1))
-        .map(|chunk| chunk.to_vec())
-        .collect()
+    chunk_vec_impl(items, chunk_size.max(1))
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+fn chunk_btree_map<K, V>(items: BTreeMap<K, V>, chunk_size: usize) -> Vec<BTreeMap<K, V>>
+where
+    K: Ord + Clone + Send + Sync,
+    V: Clone + Send + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    chunk_btree_map_impl(items, chunk_size.max(1))
+}
+
+#[cfg(not(any(not(target_arch = "wasm32"), feature = "wasm-threads")))]
 fn chunk_btree_map<K, V>(items: BTreeMap<K, V>, chunk_size: usize) -> Vec<BTreeMap<K, V>>
 where
     K: Ord + Clone,
@@ -2584,11 +2646,113 @@ where
         return Vec::new();
     }
 
+    chunk_btree_map_impl(items, chunk_size.max(1))
+}
+
+fn filter_query_entries(mut entries: Vec<MapEntry>, spec: &QuerySpec) -> Vec<MapEntry> {
+    if spec.filters.is_empty() {
+        return entries;
+    }
+
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+    {
+        if entries.len() >= PARALLEL_QUERY_MIN_LEN {
+            return entries
+                .into_par_iter()
+                .filter(|entry| {
+                    spec.filters
+                        .iter()
+                        .all(|filter| matches_filter(entry, filter))
+                })
+                .collect();
+        }
+    }
+
+    entries.retain(|entry| {
+        spec.filters
+            .iter()
+            .all(|filter| matches_filter(entry, filter))
+    });
+    entries
+}
+
+fn sort_query_entries(entries: &mut Vec<MapEntry>, order: &crate::query::QueryOrder) {
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+    {
+        if entries.len() >= PARALLEL_QUERY_MIN_LEN {
+            entries.par_sort_unstable_by(|left, right| compare_entries(left, right, order));
+            return;
+        }
+    }
+
+    entries.sort_by(|left, right| compare_entries(left, right, order));
+}
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+fn chunk_vec_impl<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>>
+where
+    T: Clone + Send + Sync,
+{
+    if items.len() >= PARALLEL_CHUNK_MIN_LEN {
+        items
+            .par_chunks(chunk_size)
+            .map(|chunk| chunk.to_vec())
+            .collect()
+    } else {
+        items
+            .chunks(chunk_size)
+            .map(|chunk| chunk.to_vec())
+            .collect()
+    }
+}
+
+#[cfg(not(any(not(target_arch = "wasm32"), feature = "wasm-threads")))]
+fn chunk_vec_impl<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>>
+where
+    T: Clone,
+{
+    items
+        .chunks(chunk_size)
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+fn chunk_btree_map_impl<K, V>(items: BTreeMap<K, V>, chunk_size: usize) -> Vec<BTreeMap<K, V>>
+where
+    K: Ord + Clone + Send + Sync,
+    V: Clone + Send + Sync,
+{
+    if items.len() >= PARALLEL_CHUNK_MIN_LEN {
+        let entries: Vec<_> = items.into_iter().collect();
+        entries
+            .par_chunks(chunk_size)
+            .map(|chunk| chunk.iter().cloned().collect())
+            .collect()
+    } else {
+        chunk_btree_map_serial(items, chunk_size)
+    }
+}
+
+#[cfg(not(any(not(target_arch = "wasm32"), feature = "wasm-threads")))]
+fn chunk_btree_map_impl<K, V>(items: BTreeMap<K, V>, chunk_size: usize) -> Vec<BTreeMap<K, V>>
+where
+    K: Ord + Clone,
+    V: Clone,
+{
+    chunk_btree_map_serial(items, chunk_size)
+}
+
+fn chunk_btree_map_serial<K, V>(items: BTreeMap<K, V>, chunk_size: usize) -> Vec<BTreeMap<K, V>>
+where
+    K: Ord + Clone,
+    V: Clone,
+{
     let mut chunks = Vec::new();
     let mut current = BTreeMap::new();
     for (index, (key, value)) in items.into_iter().enumerate() {
         current.insert(key, value);
-        if (index + 1) % chunk_size.max(1) == 0 {
+        if (index + 1) % chunk_size == 0 {
             chunks.push(std::mem::take(&mut current));
         }
     }
@@ -3026,7 +3190,10 @@ mod tests {
             .follow_links(true)
             .depth(3)
             .run()?;
-        assert!(deep.iter().any(|entry| entry.path.ends_with("profile.city")));
+        assert!(
+            deep.iter()
+                .any(|entry| entry.path.ends_with("profile.city"))
+        );
         Ok(())
     }
 
@@ -3074,7 +3241,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_pull_requests_and_chunked_responses_cover_large_query_and_snapshot_results() -> Result<()> {
+    fn remote_pull_requests_and_chunked_responses_cover_large_query_and_snapshot_results()
+    -> Result<()> {
         let db = Primadb::with_replica_id("pull-source");
         let notes = db.root("boards").field("shared").field("notes");
         for index in 0..90 {

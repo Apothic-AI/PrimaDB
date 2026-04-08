@@ -1,5 +1,5 @@
-use crate::error::{PrimadbError, Result};
 use crate::SyncFrame;
+use crate::error::{PrimadbError, Result};
 use base64ct::{Base64UrlUnpadded, Encoding};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};

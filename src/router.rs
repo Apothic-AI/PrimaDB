@@ -202,13 +202,7 @@ impl Router {
     }
 
     pub fn known_peers(&self) -> Vec<PeerPresence> {
-        self.inner
-            .lock()
-            .unwrap()
-            .peers
-            .values()
-            .cloned()
-            .collect()
+        self.inner.lock().unwrap().peers.values().cloned().collect()
     }
 
     pub fn stats(&self) -> RouterStats {
@@ -304,7 +298,11 @@ impl Router {
             topics,
             metadata: BTreeMap::new(),
         };
-        self.wrap_payload(RoutePayload::Presence { peer }, RouteTarget::Broadcast, None)
+        self.wrap_payload(
+            RoutePayload::Presence { peer },
+            RouteTarget::Broadcast,
+            None,
+        )
     }
 
     pub fn peer_exchange(
@@ -374,7 +372,11 @@ impl Router {
             };
         }
 
-        let deliver = matches_target(&self.config.peer_id, &self.config.default_channel, &envelope);
+        let deliver = matches_target(
+            &self.config.peer_id,
+            &self.config.default_channel,
+            &envelope,
+        );
         let forward = if envelope.ttl > 1 {
             let mut forwarded = envelope.clone();
             forwarded.ttl = forwarded.ttl.saturating_sub(1);

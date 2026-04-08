@@ -1,6 +1,6 @@
-mod clock;
 #[cfg(feature = "crypto")]
 mod auth;
+mod clock;
 mod compat;
 #[cfg(feature = "crypto")]
 mod crypto;
@@ -10,6 +10,7 @@ mod hardening;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 mod native_sync;
 mod operation;
+mod parallel;
 mod persistence;
 mod query;
 mod router;
@@ -21,16 +22,18 @@ mod value;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-pub use clock::{HybridClock, Revision, VersionMarker};
 #[cfg(feature = "crypto")]
 pub use auth::{
     AuthClaims, AuthenticatedSyncFrame, DataCertificate, EncryptedSyncFrame, LocalUser,
     SecureSyncFrame, SecurityState, SignedValueClaims, StoredSnapshot, UserGrant, UserRecord,
     owner_public_key_for_path,
 };
+pub use clock::{HybridClock, Revision, VersionMarker};
 pub use compat::{Gun, GunChain, GunCompatOptions};
 #[cfg(feature = "crypto")]
-pub use crypto::{EncryptedPayload, Identity, PublicIdentity, SeaPair, SecretBoxKey, SignedPayload};
+pub use crypto::{
+    EncryptedPayload, Identity, PublicIdentity, SeaPair, SecretBoxKey, SignedPayload,
+};
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, Primadb, QueryBuilder,
     Subscription,
@@ -40,6 +43,7 @@ pub use hardening::{PrimadbLimits, PrimadbStats};
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 pub use native_sync::NativeWebSocketSync;
 pub use operation::{Operation, OperationAction, OperationValue};
+pub use parallel::{parallel_enabled, parallel_thread_count};
 pub use query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QueryOrder, QuerySpec};
 pub use router::{
     PeerPresence, PeerRecommendation, RouteBatchItem, RouteDecision, RouteEnvelope, RoutePayload,
