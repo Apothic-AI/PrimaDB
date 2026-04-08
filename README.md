@@ -40,6 +40,7 @@ This is intentionally not a 1:1 port of Gun internals.
 - Replication is transport-agnostic.
 - Nested objects become linked graph nodes with deterministic path-derived IDs, so replicas converge on the same intermediate graph structure.
 - Browser auto-persistence ignores the transient “drained for transport” state so in-flight writes are not silently lost on reload before ack.
+- Persisted snapshot loads preserve the local replica identity and do not replay another tab's pending queue.
 - Browser support stays on stable `wasm32-unknown-unknown` patterns instead of assuming newer WebAssembly proposals are enabled by default.
 
 That gives the project a more inspectable merge model and makes it easier to test and evolve without carrying over Gun's event-routing bugs.
@@ -266,6 +267,12 @@ cargo test
 cargo check --target wasm32-unknown-unknown
 cargo test --features "crypto native-websocket"
 ```
+
+The browser mesh example was also verified in a clean two-tab browser run:
+
+- both tabs reached `connected to 1 peer over WebRTC`
+- a note created in one tab appeared in the other
+- both tabs remained responsive after sync
 
 ## Coverage
 
