@@ -616,6 +616,29 @@ impl Primadb {
         self.finalize_change(true)?;
         Ok(member_id)
     }
+
+    fn remove_json(&self, anchor: &str, segments: &[String], value: JsonValue) -> Result<String> {
+        if segments.is_empty() {
+            return Err(PrimadbError::ExpectedFieldPath {
+                path: display_path(anchor, segments),
+            });
+        }
+
+        let member_id = {
+            let mut inner = self.inner.lock().unwrap();
+            let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
+                return Err(PrimadbError::ExpectedFieldPath {
+                    path: display_path(anchor, segments),
+                });
+            };
+
+            let member_id = parse_member_reference(value, &display_path(anchor, segments))?;
+            inner.remove_member_from_set(&node, &field, &member_id);
+            member_id
+        };
+        self.finalize_change(true)?;
+        Ok(member_id)
+    }
 }
 
 impl Default for Primadb {
@@ -655,6 +678,11 @@ impl Chain {
     pub fn set<T: Serialize>(&self, value: T) -> Result<String> {
         self.db
             .set_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
+    }
+
+    pub fn remove<T: Serialize>(&self, value: T) -> Result<String> {
+        self.db
+            .remove_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
     }
 
     pub fn map(&self) -> Result<Vec<MapEntry>> {
@@ -1120,6 +1148,22 @@ impl Inner {
         self.apply_operation_internal(op, OperationOrigin::Local);
     }
 
+    fn remove_member_from_set(&mut self, node: &str, field: &str, member: &str) {
+        let revision = self.clock.next_revision();
+        let op_id = self.clock.next_op_id("set-remove");
+        let op = Operation {
+            author: self.clock.actor().to_owned(),
+            revision,
+            op_id,
+            action: OperationAction::RemoveSetMember {
+                node: node.to_owned(),
+                field: field.to_owned(),
+                member: member.to_owned(),
+            },
+        };
+        self.apply_operation_internal(op, OperationOrigin::Local);
+    }
+
     fn apply_operation_internal(&mut self, op: Operation, origin: OperationOrigin) -> bool {
         self.clock.observe(&op.revision);
         let marker = VersionMarker {
@@ -1168,6 +1212,7 @@ impl Inner {
                                 .cloned()
                                 .map(|member| (member, marker.clone()))
                                 .collect(),
+                            removed: BTreeMap::new(),
                         }),
                     };
                     state.fields.insert(
@@ -1210,10 +1255,16 @@ impl Inner {
                                         .get(member)
                                         .map(|current| marker <= *current)
                                         .unwrap_or(false);
-                                    if member_blocks {
+                                    let removal_blocks = set
+                                        .removed
+                                        .get(member)
+                                        .map(|current| marker <= *current)
+                                        .unwrap_or(false);
+                                    if member_blocks || removal_blocks {
                                         false
                                     } else {
                                         set.members.insert(member.clone(), marker.clone());
+                                        set.removed.remove(member);
                                         if marker > current.version {
                                             current.version = marker;
                                         }
@@ -1230,6 +1281,7 @@ impl Inner {
                                     current.value = FieldValue::Set(SetState {
                                         baseline: marker.clone(),
                                         members,
+                                        removed: BTreeMap::new(),
                                     });
                                     current.version = marker;
                                     true
@@ -1245,6 +1297,88 @@ impl Inner {
                                     value: FieldValue::Set(SetState {
                                         baseline: zero_marker(),
                                         members,
+                                        removed: BTreeMap::new(),
+                                    }),
+                                    version: marker,
+                                },
+                            );
+                            true
+                        }
+                    }
+                }
+            }
+            OperationAction::RemoveSetMember {
+                node,
+                field,
+                member,
+            } => {
+                let state = self
+                    .nodes
+                    .entry(node.clone())
+                    .or_insert_with(|| NodeState::new(node.clone()));
+
+                let tombstone_blocks = state
+                    .tombstones
+                    .get(field)
+                    .map(|current| marker <= *current)
+                    .unwrap_or(false);
+                if tombstone_blocks {
+                    false
+                } else {
+                    match state.fields.get_mut(field) {
+                        Some(current) => match &mut current.value {
+                            FieldValue::Set(set) => {
+                                if marker <= set.baseline {
+                                    false
+                                } else {
+                                    let member_blocks = set
+                                        .members
+                                        .get(member)
+                                        .map(|current| marker <= *current)
+                                        .unwrap_or(false);
+                                    let removal_blocks = set
+                                        .removed
+                                        .get(member)
+                                        .map(|current| marker <= *current)
+                                        .unwrap_or(false);
+                                    if member_blocks || removal_blocks {
+                                        false
+                                    } else {
+                                        set.members.remove(member);
+                                        set.removed.insert(member.clone(), marker.clone());
+                                        if marker > current.version {
+                                            current.version = marker;
+                                        }
+                                        true
+                                    }
+                                }
+                            }
+                            _ => {
+                                if marker <= current.version {
+                                    false
+                                } else {
+                                    let mut removed = BTreeMap::new();
+                                    removed.insert(member.clone(), marker.clone());
+                                    current.value = FieldValue::Set(SetState {
+                                        baseline: zero_marker(),
+                                        members: BTreeMap::new(),
+                                        removed,
+                                    });
+                                    current.version = marker;
+                                    true
+                                }
+                            }
+                        },
+                        None => {
+                            let mut removed = BTreeMap::new();
+                            removed.insert(member.clone(), marker.clone());
+                            state.fields.insert(
+                                field.clone(),
+                                FieldState {
+                                    value: FieldValue::Set(SetState {
+                                        baseline: zero_marker(),
+                                        members: BTreeMap::new(),
+                                        removed,
                                     }),
                                     version: marker,
                                 },
@@ -1414,6 +1548,26 @@ fn parse_set_marker(object: &Map<String, JsonValue>) -> Option<Vec<JsonValue>> {
     })
 }
 
+fn parse_member_reference(value: JsonValue, path: &str) -> Result<String> {
+    match value {
+        JsonValue::String(member) => Ok(member),
+        JsonValue::Object(object) => {
+            if let Some(link) = parse_link_marker(&object) {
+                return Ok(link);
+            }
+            if let Some(JsonValue::String(id)) = object.get("$id") {
+                return Ok(id.clone());
+            }
+            Err(PrimadbError::InvalidMemberReference {
+                path: path.to_owned(),
+            })
+        }
+        _ => Err(PrimadbError::InvalidMemberReference {
+            path: path.to_owned(),
+        }),
+    }
+}
+
 fn zero_marker() -> VersionMarker {
     VersionMarker {
         revision: Revision {
@@ -1571,6 +1725,30 @@ mod tests {
     }
 
     #[test]
+    fn set_members_can_be_removed() -> Result<()> {
+        let db = Primadb::with_replica_id("node-a");
+        let member_id = db
+            .root("rooms")
+            .field("general")
+            .field("members")
+            .set(json!({"name": "Alice"}))?;
+
+        db.root("rooms")
+            .field("general")
+            .field("members")
+            .remove(json!({"$link": member_id}))?;
+
+        let members = db
+            .root("rooms")
+            .field("general")
+            .field("members")
+            .once_json()?
+            .unwrap();
+        assert_eq!(members["$set"].as_array().unwrap().len(), 0);
+        Ok(())
+    }
+
+    #[test]
     fn later_revisions_win_across_replicas() -> Result<()> {
         let left = Primadb::with_replica_id("left");
         let right = Primadb::with_replica_id("right");
@@ -1628,6 +1806,35 @@ mod tests {
             .collect();
         assert!(ids.contains(left_id.as_str()));
         assert!(ids.contains(right_id.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn later_set_member_removal_wins_across_replicas() -> Result<()> {
+        let left = Primadb::with_replica_id("left");
+        let right = Primadb::with_replica_id("right");
+
+        let member_id = left
+            .root("rooms")
+            .field("general")
+            .field("members")
+            .set(json!({"name": "Alice"}))?;
+        right.apply_operations(left.drain_pending_operations()?)?;
+
+        right
+            .root("rooms")
+            .field("general")
+            .field("members")
+            .remove(json!({"$link": member_id}))?;
+        left.apply_operations(right.drain_pending_operations()?)?;
+
+        let members = left
+            .root("rooms")
+            .field("general")
+            .field("members")
+            .once_json()?
+            .unwrap();
+        assert_eq!(members["$set"].as_array().unwrap().len(), 0);
         Ok(())
     }
 

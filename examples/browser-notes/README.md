@@ -38,4 +38,4 @@ Open a second tab to watch cross-tab sync happen in real time.
 
 - IndexedDB is used when available.
 - If IndexedDB setup fails, the example falls back to Primadb's `localStorage` persistence.
-- Deletes are implemented as soft deletes (`archived: true`) because Primadb does not yet support removing a member from a set.
+- Archiving removes the item from the underlying Primadb set membership instead of using a soft-delete workaround.

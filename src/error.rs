@@ -10,6 +10,8 @@ pub enum PrimadbError {
     ArrayOfObjectsUnsupported { path: String },
     #[error("sets may only contain plain objects or {{$link: \"node-id\"}} markers at `{path}`")]
     InvalidSetMember { path: String },
+    #[error("set member references must be a node id, {{$link: \"node-id\"}}, or an object with `$id` at `{path}`")]
+    InvalidMemberReference { path: String },
     #[error("path segment `{field}` on node `{node}` is a scalar and cannot be traversed")]
     TraversalIntoScalar { node: String, field: String },
     #[error("path segment `{field}` on node `{node}` is a set and cannot be traversed")]
@@ -22,6 +24,8 @@ pub enum PrimadbError {
     Serde(#[from] serde_json::Error),
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("crypto error: {0}")]
+    Crypto(String),
     #[error("{0}")]
     Message(String),
 }

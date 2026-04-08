@@ -223,11 +223,7 @@ function renderNote(entry) {
   });
 
   archiveButton.addEventListener("click", async () => {
-    updateNote(noteId, {
-      ...note,
-      archived: true,
-      updated_at: Date.now(),
-    });
+    state.listChain.remove({ $link: noteId });
     await flushPersistence();
     flushRelay();
     await render();

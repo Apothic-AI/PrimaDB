@@ -9,6 +9,7 @@ pub type NodeId = String;
 pub struct SetState {
     pub baseline: VersionMarker,
     pub members: BTreeMap<NodeId, VersionMarker>,
+    pub removed: BTreeMap<NodeId, VersionMarker>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

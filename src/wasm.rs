@@ -334,6 +334,10 @@ impl WasmChain {
         self.inner.set(js_to_json(value)?).map_err(to_js_error)
     }
 
+    pub fn remove(&self, value: JsValue) -> std::result::Result<String, JsValue> {
+        self.inner.remove(js_to_json(value)?).map_err(to_js_error)
+    }
+
     pub fn unset(&self) -> std::result::Result<(), JsValue> {
         self.inner.unset().map_err(to_js_error)
     }

@@ -6,6 +6,21 @@ description = "A Rust-native local-first graph database inspired by Gun."
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 
+[features]
+default = []
+crypto = [
+    "dep:base64ct",
+    "dep:chacha20poly1305",
+    "dep:ed25519-dalek",
+    "dep:getrandom",
+    "dep:rand_core",
+]
+native-websocket = [
+    "dep:futures-util",
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+]
+
 [lib]
 crate-type = ["rlib", "cdylib"]
 
@@ -14,6 +29,14 @@ async-channel = "2.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+base64ct = { version = "1.8", features = ["alloc"], optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+ed25519-dalek = { version = "2.2", features = ["rand_core"], optional = true }
+futures-util = { version = "0.3", optional = true }
+getrandom = { version = "0.2", features = ["js"], optional = true }
+rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+tokio-tungstenite = { version = "0.26", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"

@@ -32,6 +32,11 @@ pub enum OperationAction {
         field: String,
         member: NodeId,
     },
+    RemoveSetMember {
+        node: NodeId,
+        field: String,
+        member: NodeId,
+    },
     DeleteField {
         node: NodeId,
         field: String,

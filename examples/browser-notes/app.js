@@ -235,11 +235,7 @@ function renderTask(entry) {
   });
 
   archiveButton.addEventListener("click", async () => {
-    updateTask(taskId, {
-      ...task,
-      archived: true,
-      updated_at: Date.now(),
-    });
+    state.listChain.remove({ $link: taskId });
     await flushLocalOps("archived");
     await render();
   });

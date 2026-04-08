@@ -35,4 +35,4 @@ cargo run --example ws_relay_server -- 127.0.0.1:9010
 ## Notes
 
 - The relay is intentionally dumb: it forwards text frames and relies on Primadb's sync framing to handle idempotence and acknowledgments.
-- Deletes are soft deletes (`archived: true`) because Primadb does not yet support removing a member from a set.
+- Archiving removes the note from the underlying Primadb set membership.

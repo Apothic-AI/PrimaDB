@@ -8,7 +8,7 @@
 - Gun-style path traversal through a chain API.
 - Query layer with filter/order/limit support over node fields and set members.
 - Per-field last-write-wins conflict resolution with hybrid logical revisions.
-- Set membership via `set()` or `{"$set": [...]}` markers.
+- Set membership via `set()` / `remove()` or `{"$set": [...]}` markers.
 - Link references via `{"$link": "node-id"}` markers.
 - Reactive subscriptions.
 - Database-level change subscriptions for persistence/sync hooks.
@@ -20,6 +20,8 @@
 - Async IndexedDB save/load helpers in the WASM bindings.
 - Automatic IndexedDB persistence hook in the WASM bindings.
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
+- Optional native WebSocket sync adapter behind the `native-websocket` feature.
+- Optional crypto/auth groundwork behind the `crypto` feature.
 - `wasm-bindgen` bindings that compile on `wasm32-unknown-unknown`.
 
 ## Design Notes
@@ -27,7 +29,7 @@
 This is intentionally not a 1:1 port of Gun internals.
 
 - Primadb stores version markers per field and tombstone.
-- Set membership uses additive operations so concurrent `set()` writes converge instead of overwriting each other.
+- Set membership tracks both add and remove markers so concurrent `set()` / `remove()` operations converge.
 - Writes are turned into explicit operations.
 - Replication is transport-agnostic.
 - Nested objects become linked graph nodes with deterministic path-derived IDs, so replicas converge on the same intermediate graph structure.
@@ -59,6 +61,11 @@ fn main() -> primadb::Result<()> {
 
     let snapshot = db.root("users").field("alice").once_json()?;
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
+
+    db.root("rooms")
+        .field("general")
+        .field("members")
+        .remove(json!({"$link": "users/alice"}))?;
 
     let boston_users = db
         .root("users")
@@ -137,6 +144,8 @@ The browser `WebSocketSync` helper adds:
 - [examples/browser-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-notes/README.md): Browser-only local-first board with IndexedDB persistence and cross-tab sync over `BroadcastChannel`.
 - [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's `WebSocketSync` API and the included relay server.
 - [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): Minimal Rust WebSocket relay, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
+- [examples/native_relay_client.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
+- [examples/crypto_foundation.rs](/home/bitnom/Code/gunport/primadb/examples/crypto_foundation.rs): Signing and encryption demo, runnable with `cargo run --features crypto --example crypto_foundation`.
 
 ## Query Layer
 
@@ -175,6 +184,28 @@ Supported filters:
 
 Use `"$key"` to filter or sort by the entry key, and `"$value"` for the full materialized value.
 
+## Auth Groundwork
+
+Enable the `crypto` feature for identity, signing, and envelope-encryption primitives:
+
+```bash
+cargo run --features crypto --example crypto_foundation
+```
+
+Available primitives include:
+
+- `Identity` / `PublicIdentity` for Ed25519 signing and verification.
+- `SignedPayload<T>` for signed JSON payloads such as `SyncFrame`.
+- `SecretBoxKey` / `EncryptedPayload` for XChaCha20-Poly1305 JSON encryption.
+
+## Native Sync
+
+Enable the `native-websocket` feature for a runtime-backed native relay client:
+
+```bash
+cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010
+```
+
 ## Data Markers
 
 - `{"$link": "node-id"}` sets a field to an explicit graph link.
@@ -187,13 +218,14 @@ Use `"$key"` to filter or sort by the entry key, and `"$value"` for the full mat
 ```bash
 cargo test
 cargo check --target wasm32-unknown-unknown
+cargo test --features "crypto native-websocket"
 ```
 
 ## Near-Term Gaps
 
 The foundation is in place, but this is not full Gun parity yet.
 
-- No SEA/auth/encryption layer yet.
+- No SEA/auth/encryption layer yet beyond the current identity/signing/encryption groundwork.
 - No peer discovery or WebRTC transport yet.
 - No lexical graph/range traversal engine yet beyond the current filter-based query layer.
-- The WebSocket sync helper is browser-oriented; native transport adapters are still missing.
+- The crypto module is groundwork only; it is not yet enforced by the sync adapters.
