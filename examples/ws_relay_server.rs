@@ -1,5 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
-use primadb::{PeerPresence, RouteEnvelope, RoutePayload, RouteTarget};
+use primadb::{
+    PeerPresence, PeerRecommendation, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    stable_content_hash,
+};
 use std::collections::BTreeMap;
 use std::env;
 use std::net::SocketAddr;
@@ -7,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -36,6 +39,8 @@ struct ClientHandle {
 struct RelayState {
     clients: BTreeMap<u64, ClientHandle>,
     peer_index: BTreeMap<String, u64>,
+    seen_routes: BTreeMap<String, u64>,
+    seen_content: BTreeMap<String, u64>,
 }
 
 #[tokio::main]
@@ -148,13 +153,39 @@ async fn handle_text_message(
 async fn forward_route(
     state: Arc<Mutex<RelayState>>,
     client_id: u64,
-    route: RouteEnvelope,
+    mut route: RouteEnvelope,
 ) -> anyhow::Result<()> {
-    let encoded = serde_json::to_string(&route)?;
-    let mut bootstrap_routes = Vec::new();
-    let recipients = {
+    let (bootstrap, recipients, encoded) = {
         let mut state = state.lock().await;
 
+        if route
+            .seen_by
+            .iter()
+            .any(|peer_id| peer_id == "relay")
+            || state.seen_routes.contains_key(&route.route_id)
+            || dedupe_key(&route)
+                .as_ref()
+                .is_some_and(|key| state.seen_content.contains_key(key))
+        {
+            return Ok(());
+        }
+
+        let seen_at = now_millis();
+        state.seen_routes.insert(route.route_id.clone(), seen_at);
+        trim_seen_cache(&mut state.seen_routes, 8_192);
+        if let Some(key) = dedupe_key(&route) {
+            state.seen_content.insert(key, seen_at);
+            trim_seen_cache(&mut state.seen_content, 8_192);
+        }
+
+        if !route.seen_by.iter().any(|peer_id| peer_id == "relay") {
+            route.seen_by.push("relay".to_owned());
+        }
+        if route.content_hash.is_none() {
+            route.content_hash = stable_content_hash(&route.payload);
+        }
+
+        let mut bootstrap = None;
         if let RoutePayload::Presence { peer } = &route.payload {
             let existing = state
                 .clients
@@ -167,7 +198,13 @@ async fn forward_route(
                     }
                 })
                 .collect::<Vec<_>>();
-            bootstrap_routes = existing;
+            let recommendations = collect_peer_recommendations(&state, Some(client_id));
+            bootstrap = build_bootstrap_route(
+                route.channel.clone(),
+                peer.peer_id.clone(),
+                existing,
+                recommendations,
+            );
 
             let previous_peer_id = state
                 .clients
@@ -186,13 +223,13 @@ async fn forward_route(
             }
         }
 
-        collect_route_recipients(&state, client_id, &route)
+        let recipients = collect_route_recipients(&state, client_id, &route);
+        let encoded = serde_json::to_string(&route)?;
+        (bootstrap, recipients, encoded)
     };
 
-    for bootstrap in bootstrap_routes {
-        if let Ok(payload) = serde_json::to_string(&bootstrap) {
-            let _ = send_to_client(&state, client_id, payload).await;
-        }
+    if let Some(bootstrap) = bootstrap {
+        send_to_client(&state, client_id, serde_json::to_string(&bootstrap)?).await?;
     }
 
     for recipient in recipients {
@@ -259,6 +296,78 @@ fn collect_route_recipients(
     }
 }
 
+fn collect_peer_recommendations(
+    state: &RelayState,
+    exclude_client_id: Option<u64>,
+) -> Vec<PeerRecommendation> {
+    state
+        .clients
+        .iter()
+        .filter_map(|(client_id, handle)| {
+            if exclude_client_id == Some(*client_id) {
+                return None;
+            }
+            let presence = handle.presence.as_ref()?;
+            let relay_urls = presence
+                .peer
+                .metadata
+                .get("relay_url")
+                .into_iter()
+                .flat_map(|value| value.split(','))
+                .map(str::trim)
+                .filter(|candidate| !candidate.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            Some(PeerRecommendation {
+                peer: presence.peer.clone(),
+                relay_urls,
+                score: recommendation_score(&presence.peer),
+                discovered_at_millis: now_millis(),
+            })
+        })
+        .collect()
+}
+
+fn build_bootstrap_route(
+    channel: String,
+    target_peer_id: String,
+    existing: Vec<RouteEnvelope>,
+    recommendations: Vec<PeerRecommendation>,
+) -> Option<RouteEnvelope> {
+    let mut items = existing
+        .into_iter()
+        .filter_map(|route| match route.payload {
+            RoutePayload::Presence { peer } => Some(RouteBatchItem::Presence { peer }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if !recommendations.is_empty() {
+        items.push(RouteBatchItem::PeerExchange {
+            peers: recommendations,
+        });
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+
+    let payload = RoutePayload::Batch { items };
+    Some(RouteEnvelope {
+        route_id: format!("relay/bootstrap/{:x}", NEXT_ROUTE_ID.fetch_add(1, Ordering::Relaxed)),
+        from: "relay".to_owned(),
+        channel,
+        target: RouteTarget::Peer(target_peer_id),
+        ttl: 1,
+        hops: 0,
+        issued_at_millis: now_millis(),
+        reply_to: None,
+        content_hash: stable_content_hash(&payload),
+        seen_by: vec!["relay".to_owned()],
+        payload,
+    })
+}
+
 async fn disconnect_client(state: Arc<Mutex<RelayState>>, client_id: u64) -> anyhow::Result<()> {
     let (offline_route, recipients) = {
         let mut state = state.lock().await;
@@ -275,18 +384,19 @@ async fn disconnect_client(state: Arc<Mutex<RelayState>>, client_id: u64) -> any
         offline_peer
             .metadata
             .insert("state".to_owned(), "offline".to_owned());
+        let payload = RoutePayload::Presence { peer: offline_peer };
         let offline_route = RouteEnvelope {
-            route_id: format!(
-                "relay/{:x}",
-                NEXT_ROUTE_ID.fetch_add(1, Ordering::Relaxed)
-            ),
+            route_id: format!("relay/{:x}", NEXT_ROUTE_ID.fetch_add(1, Ordering::Relaxed)),
             from: "relay".to_owned(),
             channel: presence.route.channel.clone(),
             target: RouteTarget::Broadcast,
             ttl: 1,
             hops: 0,
             issued_at_millis: now_millis(),
-            payload: RoutePayload::Presence { peer: offline_peer },
+            reply_to: None,
+            content_hash: stable_content_hash(&payload),
+            seen_by: vec!["relay".to_owned()],
+            payload,
         };
         let recipients = collect_route_recipients(&state, client_id, &offline_route);
         (offline_route, recipients)
@@ -314,6 +424,31 @@ async fn send_to_client(
         let _ = sender.send(RelayMessage { payload });
     }
     Ok(())
+}
+
+fn recommendation_score(peer: &PeerPresence) -> u16 {
+    let capability_bonus = peer.capabilities.len().min(8) as u16 * 10;
+    let topic_bonus = peer.topics.len().min(8) as u16 * 5;
+    50 + capability_bonus + topic_bonus
+}
+
+fn dedupe_key(route: &RouteEnvelope) -> Option<String> {
+    route.content_hash.as_ref().map(|content_hash| {
+        format!(
+            "{}:{}:{content_hash}",
+            route.from,
+            route.reply_to.as_deref().unwrap_or_default()
+        )
+    })
+}
+
+fn trim_seen_cache(cache: &mut BTreeMap<String, u64>, max: usize) {
+    while cache.len() > max {
+        let Some(oldest) = cache.keys().next().cloned() else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
 }
 
 fn now_millis() -> u64 {

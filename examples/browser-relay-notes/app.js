@@ -22,8 +22,13 @@ const elements = {
   relayDetail: document.getElementById("relay-detail"),
   pendingCount: document.getElementById("pending-count"),
   inflightCount: document.getElementById("inflight-count"),
+  peerCount: document.getElementById("peer-count"),
+  peerDetail: document.getElementById("peer-detail"),
   relayUrl: document.getElementById("relay-url"),
   connectButton: document.getElementById("connect-button"),
+  seedBulkButton: document.getElementById("seed-bulk-button"),
+  probeRemoteButton: document.getElementById("probe-remote-button"),
+  remoteResult: document.getElementById("remote-result"),
   noteForm: document.getElementById("note-form"),
   noteTitle: document.getElementById("note-title"),
   noteBody: document.getElementById("note-body"),
@@ -60,14 +65,27 @@ async function main() {
   updateRelayStatus();
   startStatusLoop();
   await connectRelay();
+  globalThis.primadbRelayDemo = state;
 
   globalThis.addEventListener("beforeunload", () => {
     if (state.statusTimer) {
       clearInterval(state.statusTimer);
     }
-    state.subscription?.cancel();
-    state.persistence?.close();
-    state.relay?.close();
+    try {
+      state.subscription?.cancel();
+    } catch (error) {
+      console.warn("subscription teardown failed", error);
+    }
+    try {
+      state.persistence?.close();
+    } catch (error) {
+      console.warn("persistence teardown failed", error);
+    }
+    try {
+      state.relay?.close();
+    } catch (error) {
+      console.warn("relay teardown failed", error);
+    }
   });
 }
 
@@ -89,6 +107,8 @@ async function setupPersistence() {
 
 function bindUi() {
   elements.connectButton.addEventListener("click", connectRelay);
+  elements.seedBulkButton.addEventListener("click", seedBulkNotes);
+  elements.probeRemoteButton.addEventListener("click", probeRemotePeer);
 
   elements.noteForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -174,6 +194,79 @@ async function ensureSeedNote() {
   });
 
   await flushPersistence();
+}
+
+async function seedBulkNotes() {
+  const start = Date.now();
+  for (let index = 0; index < 90; index += 1) {
+    state.listChain.set({
+      title: `Chunk note ${index + 1}`,
+      body: `Remote query and snapshot chunk proof ${index + 1}`,
+      done: index % 3 === 0,
+      archived: false,
+      created_at: start + index,
+      updated_at: start + index,
+    });
+  }
+  await flushPersistence();
+  flushRelay();
+  await render();
+  elements.remoteResult.textContent =
+    "Seeded 90 local notes. Open a second client and use “Probe remote peer” to force chunked query and snapshot replies.";
+}
+
+async function probeRemotePeer() {
+  if (!state.relay) {
+    elements.remoteResult.textContent = "Connect to the relay first.";
+    return;
+  }
+
+  const recommendations = state.relay.recommendedPeers();
+  const target =
+    recommendations.find(
+      (candidate) =>
+        candidate?.peer?.capabilities?.includes("pull_query") &&
+        candidate?.peer?.topics?.includes("primadb-sync"),
+    ) ?? recommendations.find((candidate) => candidate?.peer?.peer_id);
+  if (!target?.peer?.peer_id) {
+    elements.remoteResult.textContent =
+      "No recommended peer is available yet. Open a second client on the same relay first.";
+    return;
+  }
+
+  const path = { anchor: "boards", segments: ["shared", "notes"] };
+
+  try {
+    const remoteValue = await state.relay.remoteGet(target.peer.peer_id, path);
+    const remoteQuery = await state.relay.remoteQuery(target.peer.peer_id, path, {
+      filters: [{ kind: "eq", path: "archived", value: false }],
+      order: { path: "created_at", direction: "desc" },
+      limit: 200,
+    });
+    const remoteLex = await state.relay.remoteLex(target.peer.peer_id, path, {
+      follow_links: true,
+      depth: 2,
+      limit: 200,
+    });
+    const remoteSnapshot = await state.relay.remoteSnapshot(target.peer.peer_id, "boards");
+
+    elements.remoteResult.textContent = JSON.stringify(
+      {
+        target_peer: target.peer.peer_id,
+        target_replica: target.peer.replica_id,
+        relay_urls: target.relay_urls ?? [],
+        remote_get_items: Array.isArray(remoteValue?.$set) ? remoteValue.$set.length : null,
+        remote_query_count: Array.isArray(remoteQuery) ? remoteQuery.length : 0,
+        remote_lex_count: Array.isArray(remoteLex) ? remoteLex.length : 0,
+        remote_snapshot_nodes: Object.keys(remoteSnapshot?.nodes ?? {}).length,
+      },
+      null,
+      2,
+    );
+  } catch (error) {
+    console.error("remote probe failed", error);
+    elements.remoteResult.textContent = `Remote probe failed: ${error}`;
+  }
 }
 
 async function render() {
@@ -294,6 +387,8 @@ function updateRelayStatus() {
     elements.relayDetail.textContent = "Not connected to the relay. Local changes stay in this browser until you connect.";
     elements.pendingCount.textContent = String(state.db ? state.db.pendingOperations().length : 0);
     elements.inflightCount.textContent = "0";
+    elements.peerCount.textContent = "0";
+    elements.peerDetail.textContent = "Connect a second client to discover peers.";
     elements.connectButton.textContent = "Connect";
     elements.connectButton.classList.remove("is-live");
     return;
@@ -302,6 +397,7 @@ function updateRelayStatus() {
   const readyState = state.relay.readyState();
   const pending = state.relay.pendingCount();
   const inflight = state.relay.inflightCount();
+  const recommendations = state.relay.recommendedPeers();
 
   if (readyState === WebSocket.CONNECTING) {
     elements.relayStatus.textContent = "connecting";
@@ -341,6 +437,19 @@ function updateRelayStatus() {
 
   elements.pendingCount.textContent = String(pending);
   elements.inflightCount.textContent = String(state.relay.inflightCount());
+  elements.peerCount.textContent = String(recommendations.length);
+  elements.peerDetail.textContent =
+    recommendations.length > 0
+      ? `Best match: ${(recommendations.find(
+          (candidate) =>
+            candidate?.peer?.capabilities?.includes("pull_query") &&
+            candidate?.peer?.topics?.includes("primadb-sync"),
+        ) ?? recommendations[0]).peer.peer_id} over ${(recommendations.find(
+          (candidate) =>
+            candidate?.peer?.capabilities?.includes("pull_query") &&
+            candidate?.peer?.topics?.includes("primadb-sync"),
+        ) ?? recommendations[0]).peer.transport}.`
+      : "Connect a second client to discover peers.";
 }
 
 function formatTimestamp(value) {

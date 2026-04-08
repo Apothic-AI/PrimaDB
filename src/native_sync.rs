@@ -1,7 +1,9 @@
 use crate::{
-    ChangeSubscription, Primadb, PrimadbError, Result, RouteEnvelope, RoutePayload, RouteTarget,
-    Router, RouterConfig, SyncEnvelope, SyncFrame,
+    ChangeSubscription, HybridClock, LexEntry, MapEntry, Operation, PeerRecommendation, Primadb,
+    PrimadbError, RemotePath, RemoteResult, Result, RouteBatchItem, RouteEnvelope, RoutePayload,
+    RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
 };
+use async_channel::{Sender, bounded};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -21,12 +23,41 @@ struct OutboundSync {
 }
 
 #[derive(Debug)]
+struct PendingPullRequest {
+    sender: Sender<std::result::Result<RemoteResult, String>>,
+    accumulator: PullAccumulator,
+}
+
+#[derive(Debug)]
+enum PullAccumulator {
+    Get {
+        value: Option<JsonValue>,
+    },
+    Map {
+        entries: Vec<MapEntry>,
+    },
+    Query {
+        entries: Vec<MapEntry>,
+    },
+    Lex {
+        entries: Vec<LexEntry>,
+    },
+    Snapshot {
+        clock: Option<HybridClock>,
+        nodes: BTreeMap<String, crate::NodeState>,
+        pending_ops: Vec<Operation>,
+    },
+}
+
+#[derive(Debug)]
 struct NativeWebSocketSyncState {
     db: Primadb,
     router: Router,
     connected: AtomicBool,
     next_message_seq: AtomicU64,
     inflight: Mutex<BTreeMap<String, OutboundSync>>,
+    pending_requests: Mutex<BTreeMap<String, PendingPullRequest>>,
+    recommendations: Mutex<BTreeMap<String, PeerRecommendation>>,
     outbound: UnboundedSender<Message>,
 }
 
@@ -45,7 +76,8 @@ impl NativeWebSocketSync {
         url: impl AsRef<str>,
         retry_interval: Duration,
     ) -> Result<Self> {
-        let (socket, _) = connect_async(url.as_ref())
+        let url = url.as_ref().to_owned();
+        let (socket, _) = connect_async(&url)
             .await
             .map_err(|error| PrimadbError::Message(error.to_string()))?;
         let (mut writer, mut reader) = socket.split();
@@ -64,6 +96,8 @@ impl NativeWebSocketSync {
             connected: AtomicBool::new(true),
             next_message_seq: AtomicU64::new(0),
             inflight: Mutex::new(BTreeMap::new()),
+            pending_requests: Mutex::new(BTreeMap::new()),
+            recommendations: Mutex::new(BTreeMap::new()),
             outbound,
         });
 
@@ -73,6 +107,10 @@ impl NativeWebSocketSync {
                 if writer.send(message).await.is_err() {
                     writer_state.connected.store(false, Ordering::SeqCst);
                     requeue_inflight_state(&writer_state);
+                    fail_pending_requests(
+                        &writer_state,
+                        "websocket writer closed while requests were in flight",
+                    );
                     break;
                 }
             }
@@ -93,6 +131,10 @@ impl NativeWebSocketSync {
             }
             reader_state.connected.store(false, Ordering::SeqCst);
             requeue_inflight_state(&reader_state);
+            fail_pending_requests(
+                &reader_state,
+                "websocket reader closed while requests were in flight",
+            );
         });
 
         let change_subscription = db.subscribe_changes();
@@ -119,20 +161,26 @@ impl NativeWebSocketSync {
             }
         });
 
-        send_route(
-            &state,
-            &state.router.presence(
-                db.replica_id(),
-                "websocket",
-                vec![
-                    "sync".to_owned(),
-                    "ack".to_owned(),
-                    "routing".to_owned(),
-                    "snapshot".to_owned(),
-                ],
-                vec!["primadb-sync".to_owned()],
-            ),
-        )?;
+        let mut presence = state.router.presence(
+            db.replica_id(),
+            "websocket",
+            vec![
+                "sync".to_owned(),
+                "ack".to_owned(),
+                "routing".to_owned(),
+                "snapshot".to_owned(),
+                "batch".to_owned(),
+                "pull_get".to_owned(),
+                "pull_query".to_owned(),
+                "pull_lex".to_owned(),
+                "peer_exchange".to_owned(),
+            ],
+            vec!["primadb-sync".to_owned()],
+        );
+        if let RoutePayload::Presence { peer } = &mut presence.payload {
+            peer.metadata.insert("relay_url".to_owned(), url);
+        }
+        send_route(&state, &presence)?;
 
         Ok(Self {
             state,
@@ -158,6 +206,90 @@ impl NativeWebSocketSync {
 
     pub fn known_peer_count(&self) -> usize {
         self.state.router.known_peers().len()
+    }
+
+    pub fn recommended_peers(&self) -> Vec<PeerRecommendation> {
+        self.state
+            .recommendations
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn remote_get(&self, peer_id: impl Into<String>, path: RemotePath) -> Result<Option<JsonValue>> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Get { path },
+        )
+        .await?
+        {
+            RemoteResult::Get { value } => Ok(value),
+            other => Err(PrimadbError::Message(format!(
+                "expected get result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_query(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+        spec: crate::QuerySpec,
+    ) -> Result<Vec<MapEntry>> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Query { path, spec },
+        )
+        .await?
+        {
+            RemoteResult::Query { entries } => Ok(entries),
+            other => Err(PrimadbError::Message(format!(
+                "expected query result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_lex(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+        spec: crate::LexSpec,
+    ) -> Result<Vec<LexEntry>> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Lex { path, spec },
+        )
+        .await?
+        {
+            RemoteResult::Lex { entries } => Ok(entries),
+            other => Err(PrimadbError::Message(format!(
+                "expected lex result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_snapshot(
+        &self,
+        peer_id: impl Into<String>,
+        root: Option<String>,
+    ) -> Result<crate::DatabaseSnapshot> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Snapshot { root },
+        )
+        .await?
+        {
+            RemoteResult::Snapshot { snapshot } => Ok(snapshot),
+            other => Err(PrimadbError::Message(format!(
+                "expected snapshot result, received {other:?}"
+            ))),
+        }
     }
 
     pub async fn flush_pending(&self) -> Result<usize> {
@@ -189,6 +321,7 @@ impl NativeWebSocketSync {
             task.abort();
         }
         requeue_inflight_state(&self.state);
+        fail_pending_requests(&self.state, "connection closed");
     }
 }
 
@@ -196,6 +329,50 @@ impl Drop for NativeWebSocketSync {
     fn drop(&mut self) {
         self.teardown();
     }
+}
+
+async fn request_remote_result(
+    state: &Arc<NativeWebSocketSyncState>,
+    target_peer_id: String,
+    request_kind: crate::PullRequestKind,
+) -> Result<RemoteResult> {
+    if !state.connected.load(Ordering::SeqCst) {
+        return Err(PrimadbError::Message(
+            "native websocket is not connected".to_owned(),
+        ));
+    }
+
+    let request_id = format!(
+        "{}/pull/{:x}",
+        state.db.replica_id(),
+        state.next_message_seq.fetch_add(1, Ordering::SeqCst) + 1
+    );
+    let (sender, receiver) = bounded(1);
+    state.pending_requests.lock().unwrap().insert(
+        request_id.clone(),
+        PendingPullRequest {
+            sender,
+            accumulator: PullAccumulator::new(&request_kind),
+        },
+    );
+
+    let request = crate::PullRequest {
+        request_id: request_id.clone(),
+        request: request_kind,
+    };
+    let route = state
+        .router
+        .wrap_pull_request(request, RouteTarget::Peer(target_peer_id));
+    if let Err(error) = send_route(state, &route) {
+        state.pending_requests.lock().unwrap().remove(&request_id);
+        return Err(error);
+    }
+
+    receiver
+        .recv()
+        .await
+        .map_err(|error| PrimadbError::Message(error.to_string()))?
+        .map_err(PrimadbError::Message)
 }
 
 async fn handle_incoming_text(
@@ -219,24 +396,67 @@ async fn handle_route_envelope(
     if !decision.deliver {
         return Ok(());
     }
+    handle_route_payload(state, route.from, route.route_id, route.payload).await
+}
 
-    match route.payload {
-        RoutePayload::Presence { .. } => Ok(()),
-        RoutePayload::Signal { .. } => Ok(()),
-        RoutePayload::SnapshotRequest { root } => {
-            let response = state.router.snapshot_response(
-                root,
-                state.db.snapshot(),
-                RouteTarget::Peer(route.from),
-            );
-            send_route(state, &response)
-        }
-        RoutePayload::SnapshotResponse { snapshot, .. } => state.db.load_snapshot(snapshot),
-        RoutePayload::Sync { encoding, payload } => {
-            let frame = decode_sync_payload(&state.db, &encoding, payload)?;
-            handle_sync_frame(state, frame, Some(route.from)).await
+async fn handle_route_payload(
+    state: &Arc<NativeWebSocketSyncState>,
+    from: String,
+    route_id: String,
+    payload: RoutePayload,
+) -> Result<()> {
+    let mut pending = vec![payload];
+    while let Some(payload) = pending.pop() {
+        match payload {
+            RoutePayload::Presence { peer } => {
+                store_peer_recommendations(state, vec![peer_recommendation_from_presence(&peer)]);
+            }
+            RoutePayload::Signal { .. } => {}
+            RoutePayload::SnapshotRequest { root } => {
+                let response = state
+                    .router
+                    .snapshot_response(root, state.db.snapshot(), RouteTarget::Peer(from.clone()));
+                send_route(state, &response)?;
+            }
+            RoutePayload::SnapshotResponse { snapshot, .. } => {
+                state.db.load_snapshot(snapshot)?;
+            }
+            RoutePayload::Sync { encoding, payload } => {
+                let frame = decode_sync_payload(&state.db, &encoding, payload)?;
+                handle_sync_frame(state, frame, Some(from.clone())).await?;
+            }
+            RoutePayload::PullRequest { request } => {
+                let result = state.db.execute_pull_request(&request)?;
+                let items = state
+                    .db
+                    .chunk_remote_result(&request.request_id, result)
+                    .into_iter()
+                    .map(|response| RouteBatchItem::PullResponse { response })
+                    .collect::<Vec<_>>();
+                for route in pack_batch_routes(
+                    &state.router,
+                    RouteTarget::Peer(from.clone()),
+                    Some(route_id.clone()),
+                    items,
+                    state.db.limits().max_batch_items_per_route.max(1),
+                ) {
+                    send_route(state, &route)?;
+                }
+            }
+            RoutePayload::PullResponse { response } => {
+                accept_pull_response(state, response)?;
+            }
+            RoutePayload::PeerExchange { peers } => {
+                store_peer_recommendations(state, peers);
+            }
+            RoutePayload::Batch { items } => {
+                for item in items.into_iter().rev() {
+                    pending.push(RoutePayload::from_batch_item(item));
+                }
+            }
         }
     }
+    Ok(())
 }
 
 async fn handle_sync_frame(
@@ -387,6 +607,132 @@ fn requeue_inflight_state(state: &Arc<NativeWebSocketSyncState>) {
     }
 }
 
+fn fail_pending_requests(state: &Arc<NativeWebSocketSyncState>, message: &str) {
+    let pending = {
+        let mut pending = state.pending_requests.lock().unwrap();
+        std::mem::take(&mut *pending)
+    };
+    for request in pending.into_values() {
+        let _ = request.sender.try_send(Err(message.to_owned()));
+    }
+}
+
+fn accept_pull_response(state: &Arc<NativeWebSocketSyncState>, response: crate::PullResponse) -> Result<()> {
+    let mut pending = state.pending_requests.lock().unwrap();
+    let Some(request) = pending.get_mut(&response.request_id) else {
+        return Ok(());
+    };
+
+    match &response.result {
+        crate::PullResponseBody::Get { value } => {
+            request.accumulator = PullAccumulator::Get {
+                value: value.clone(),
+            };
+        }
+        crate::PullResponseBody::Map { entries } => {
+            if let PullAccumulator::Map { entries: current } = &mut request.accumulator {
+                current.extend(entries.clone());
+            }
+        }
+        crate::PullResponseBody::Query { entries } => {
+            if let PullAccumulator::Query { entries: current } = &mut request.accumulator {
+                current.extend(entries.clone());
+            }
+        }
+        crate::PullResponseBody::Lex { entries } => {
+            if let PullAccumulator::Lex { entries: current } = &mut request.accumulator {
+                current.extend(entries.clone());
+            }
+        }
+        crate::PullResponseBody::Snapshot {
+            clock,
+            nodes,
+            pending_ops,
+        } => {
+            if let PullAccumulator::Snapshot {
+                clock: current_clock,
+                nodes: current_nodes,
+                pending_ops: current_ops,
+            } = &mut request.accumulator
+            {
+                if current_clock.is_none() {
+                    *current_clock = clock.clone();
+                }
+                current_nodes.extend(nodes.clone());
+                current_ops.extend(pending_ops.clone());
+            }
+        }
+        crate::PullResponseBody::Error { message } => {
+            let request = pending.remove(&response.request_id).unwrap();
+            let _ = request.sender.try_send(Err(message.clone()));
+            return Ok(());
+        }
+    }
+
+    if response.is_final() {
+        let request = pending.remove(&response.request_id).unwrap();
+        let result = request.accumulator.into_result()?;
+        let _ = request.sender.try_send(Ok(result));
+    }
+    Ok(())
+}
+
+fn store_peer_recommendations(
+    state: &Arc<NativeWebSocketSyncState>,
+    peers: Vec<PeerRecommendation>,
+) {
+    let max = state.db.limits().max_peer_recommendations.max(1);
+    let mut recommendations = state.recommendations.lock().unwrap();
+    for peer in peers {
+        recommendations.insert(peer.peer.peer_id.clone(), peer);
+    }
+    while recommendations.len() > max {
+        let Some(oldest) = recommendations.keys().next().cloned() else {
+            break;
+        };
+        recommendations.remove(&oldest);
+    }
+}
+
+fn peer_recommendation_from_presence(peer: &crate::PeerPresence) -> PeerRecommendation {
+    let relay_urls = peer
+        .metadata
+        .get("relay_url")
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    PeerRecommendation {
+        peer: peer.clone(),
+        relay_urls,
+        score: 100 + peer.capabilities.len().min(8) as u16 * 5 + peer.topics.len().min(8) as u16 * 5,
+        discovered_at_millis: crate::clock::now_millis(),
+    }
+}
+
+fn pack_batch_routes(
+    router: &Router,
+    target: RouteTarget,
+    reply_to: Option<String>,
+    items: Vec<RouteBatchItem>,
+    batch_size: usize,
+) -> Vec<RouteEnvelope> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    items.chunks(batch_size.max(1))
+        .map(|chunk| {
+            if chunk.len() == 1 {
+                router.wrap_batch_item(chunk[0].clone(), target.clone(), reply_to.clone())
+            } else {
+                router.wrap_batch(chunk.to_vec(), target.clone(), reply_to.clone())
+            }
+        })
+        .collect()
+}
+
 fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> Result<(String, JsonValue)> {
     #[cfg(feature = "crypto")]
     {
@@ -412,5 +758,45 @@ fn decode_sync_payload(_db: &Primadb, encoding: &str, payload: JsonValue) -> Res
         other => Err(PrimadbError::Message(format!(
             "unsupported sync encoding `{other}`"
         ))),
+    }
+}
+
+impl PullAccumulator {
+    fn new(request: &crate::PullRequestKind) -> Self {
+        match request {
+            crate::PullRequestKind::Get { .. } => Self::Get { value: None },
+            crate::PullRequestKind::Map { .. } => Self::Map { entries: Vec::new() },
+            crate::PullRequestKind::Query { .. } => Self::Query { entries: Vec::new() },
+            crate::PullRequestKind::Lex { .. } => Self::Lex { entries: Vec::new() },
+            crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
+                clock: None,
+                nodes: BTreeMap::new(),
+                pending_ops: Vec::new(),
+            },
+        }
+    }
+
+    fn into_result(self) -> Result<RemoteResult> {
+        match self {
+            Self::Get { value } => Ok(RemoteResult::Get { value }),
+            Self::Map { entries } => Ok(RemoteResult::Map { entries }),
+            Self::Query { entries } => Ok(RemoteResult::Query { entries }),
+            Self::Lex { entries } => Ok(RemoteResult::Lex { entries }),
+            Self::Snapshot {
+                clock,
+                nodes,
+                pending_ops,
+            } => Ok(RemoteResult::Snapshot {
+                snapshot: crate::DatabaseSnapshot {
+                    clock: clock.ok_or_else(|| {
+                        PrimadbError::Message(
+                            "snapshot response completed without a clock".to_owned(),
+                        )
+                    })?,
+                    nodes,
+                    pending_ops,
+                },
+            }),
+        }
     }
 }

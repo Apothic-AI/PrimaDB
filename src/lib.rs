@@ -24,8 +24,9 @@ mod wasm;
 pub use clock::{HybridClock, Revision, VersionMarker};
 #[cfg(feature = "crypto")]
 pub use auth::{
-    AuthClaims, AuthenticatedSyncFrame, EncryptedSyncFrame, LocalUser, SecureSyncFrame,
-    SecurityState, StoredSnapshot, UserGrant, UserRecord,
+    AuthClaims, AuthenticatedSyncFrame, DataCertificate, EncryptedSyncFrame, LocalUser,
+    SecureSyncFrame, SecurityState, SignedValueClaims, StoredSnapshot, UserGrant, UserRecord,
+    owner_public_key_for_path,
 };
 pub use compat::{Gun, GunChain, GunCompatOptions};
 #[cfg(feature = "crypto")]
@@ -40,10 +41,16 @@ pub use hardening::{PrimadbLimits, PrimadbStats};
 pub use native_sync::NativeWebSocketSync;
 pub use operation::{Operation, OperationAction, OperationValue};
 pub use query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QueryOrder, QuerySpec};
-pub use router::{PeerPresence, RouteDecision, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, RouterStats};
+pub use router::{
+    PeerPresence, PeerRecommendation, RouteBatchItem, RouteDecision, RouteEnvelope, RoutePayload,
+    RouteTarget, Router, RouterConfig, RouterStats,
+};
 pub use snapshot::DatabaseSnapshot;
 pub use storage::{MemoryStorageAdapter, StorageAdapter, StorageReport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{RadiskFileAdapter, SnapshotFileAdapter};
-pub use sync::{SyncEnvelope, SyncFrame};
+pub use sync::{
+    PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
+    RemoteResult, SyncEnvelope, SyncFrame, stable_content_hash,
+};
 pub use value::{FieldState, FieldValue, NodeId, NodeState, SetState};

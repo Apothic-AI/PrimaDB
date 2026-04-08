@@ -41,6 +41,11 @@
           <strong id="inflight-count">0</strong>
           <small class="status-detail">Messages sent to the relay and waiting for peer confirmation.</small>
         </div>
+        <div>
+          <span class="label">Peer Recommendations</span>
+          <strong id="peer-count">0</strong>
+          <small id="peer-detail" class="status-detail">Connect a second client to discover peers.</small>
+        </div>
       </section>
 
       <section class="panel relay-config">
@@ -87,6 +92,14 @@
           <span>Search</span>
           <input id="search-input" type="search" placeholder="Search titles or bodies" />
         </label>
+      </section>
+
+      <section class="panel diagnostics">
+        <div class="diagnostic-actions">
+          <button id="seed-bulk-button" class="ghost-button" type="button">Seed 90 notes</button>
+          <button id="probe-remote-button" class="primary-button" type="button">Probe remote peer</button>
+        </div>
+        <pre id="remote-result" class="remote-result">No remote probe run yet.</pre>
       </section>
 
       <section class="panel">

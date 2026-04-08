@@ -99,6 +99,23 @@ h1 {
   align-items: end;
 }
 
+.diagnostic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.remote-result {
+  margin: 1rem 0 0;
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(24, 34, 26, 0.04);
+  border: 1px solid rgba(24, 34, 26, 0.08);
+  color: var(--ink);
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
 .grow {
   flex: 1 1 auto;
 }
@@ -289,7 +306,8 @@ textarea:focus {
   }
 
   .relay-config,
-  .controls {
+  .controls,
+  .diagnostic-actions {
     flex-direction: column;
     align-items: stretch;
   }

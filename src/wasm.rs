@@ -1,7 +1,10 @@
 use crate::{
-    Chain, ChangeSubscription, LexSpec, Operation, Primadb, QuerySpec, RouteEnvelope,
-    RoutePayload, RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame,
+    Chain, ChangeSubscription, HybridClock, LexEntry, LexSpec, MapEntry, Operation,
+    PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody,
+    RemotePath, RemoteResult, QuerySpec, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame,
 };
+use async_channel::{Sender, bounded};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
@@ -42,6 +45,8 @@ struct WebSocketSyncState {
     router: Router,
     socket: web_sys::WebSocket,
     inflight: BTreeMap<String, OutboundSync>,
+    pending_requests: BTreeMap<String, PendingPullRequest>,
+    recommendations: BTreeMap<String, PeerRecommendation>,
     next_message_seq: u64,
 }
 
@@ -50,6 +55,33 @@ struct OutboundSync {
     encoding: String,
     payload: JsonValue,
     target: RouteTarget,
+}
+
+#[derive(Debug)]
+struct PendingPullRequest {
+    sender: Sender<std::result::Result<RemoteResult, String>>,
+    accumulator: PullAccumulator,
+}
+
+#[derive(Debug, Clone)]
+enum PullAccumulator {
+    Get {
+        value: Option<JsonValue>,
+    },
+    Map {
+        entries: Vec<MapEntry>,
+    },
+    Query {
+        entries: Vec<MapEntry>,
+    },
+    Lex {
+        entries: Vec<LexEntry>,
+    },
+    Snapshot {
+        clock: Option<HybridClock>,
+        nodes: BTreeMap<String, crate::NodeState>,
+        pending_ops: Vec<Operation>,
+    },
 }
 
 #[wasm_bindgen(js_name = WebSocketSync)]
@@ -307,6 +339,33 @@ impl WasmPrimadb {
         Ok(())
     }
 
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = createWriteCertificate)]
+    pub fn create_write_certificate(
+        &self,
+        certificants: JsValue,
+        write_policy: JsValue,
+        expires_at_millis: Option<f64>,
+        write_block: JsValue,
+    ) -> std::result::Result<String, JsValue> {
+        let certificants: Vec<String> = serde_wasm_bindgen::from_value(certificants)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let write_policy = js_to_json(write_policy)?;
+        let write_block = if write_block.is_null() || write_block.is_undefined() {
+            None
+        } else {
+            Some(js_to_json(write_block)?)
+        };
+        self.inner
+            .create_write_certificate(
+                certificants,
+                write_policy,
+                expires_at_millis.map(|value| value as u64),
+                write_block,
+            )
+            .map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = saveIndexedDb)]
     pub async fn save_indexed_db(
         &self,
@@ -402,6 +461,8 @@ impl WasmPrimadb {
             }),
             socket: socket.clone(),
             inflight: BTreeMap::new(),
+            pending_requests: BTreeMap::new(),
+            recommendations: BTreeMap::new(),
             next_message_seq: 0,
         }));
 
@@ -414,8 +475,9 @@ impl WasmPrimadb {
         socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
         let onopen_state = state.clone();
+        let relay_url = url.clone();
         let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-            let route = {
+            let mut route = {
                 let borrowed = onopen_state.borrow();
                 borrowed.router.presence(
                     borrowed.db.replica_id(),
@@ -425,10 +487,18 @@ impl WasmPrimadb {
                         "ack".to_owned(),
                         "routing".to_owned(),
                         "snapshot".to_owned(),
+                        "batch".to_owned(),
+                        "pull_get".to_owned(),
+                        "pull_query".to_owned(),
+                        "pull_lex".to_owned(),
+                        "peer_exchange".to_owned(),
                     ],
                     vec!["primadb-sync".to_owned()],
                 )
             };
+            if let RoutePayload::Presence { peer } = &mut route.payload {
+                peer.metadata.insert("relay_url".to_owned(), relay_url.clone());
+            }
             let _ = send_route_state(&onopen_state, &route);
             let _ = retry_inflight_state(&onopen_state);
             let _ = flush_pending_state(&onopen_state);
@@ -438,12 +508,14 @@ impl WasmPrimadb {
         let onclose_state = state.clone();
         let onclose = Closure::wrap(Box::new(move |_event: web_sys::CloseEvent| {
             requeue_inflight_state(&onclose_state);
+            fail_pending_requests_state(&onclose_state, "websocket closed while requests were pending");
         }) as Box<dyn FnMut(_)>);
         socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
         let onerror_state = state.clone();
         let onerror = Closure::wrap(Box::new(move |_event: web_sys::Event| {
             requeue_inflight_state(&onerror_state);
+            fail_pending_requests_state(&onerror_state, "websocket errored while requests were pending");
         }) as Box<dyn FnMut(_)>);
         socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
@@ -651,6 +723,18 @@ impl WasmChain {
         self.inner.put(js_to_json(value)?).map_err(to_js_error)
     }
 
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = putSigned)]
+    pub fn put_signed(
+        &self,
+        value: JsValue,
+        certificate: Option<String>,
+    ) -> std::result::Result<(), JsValue> {
+        self.inner
+            .put_signed(js_to_json(value)?, certificate)
+            .map_err(to_js_error)
+    }
+
     pub fn once(&self) -> std::result::Result<JsValue, JsValue> {
         match self.inner.once_json().map_err(to_js_error)? {
             Some(value) => to_js(&value),
@@ -660,6 +744,18 @@ impl WasmChain {
 
     pub fn set(&self, value: JsValue) -> std::result::Result<String, JsValue> {
         self.inner.set(js_to_json(value)?).map_err(to_js_error)
+    }
+
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = setSigned)]
+    pub fn set_signed(
+        &self,
+        value: JsValue,
+        certificate: Option<String>,
+    ) -> std::result::Result<String, JsValue> {
+        self.inner
+            .set_signed(js_to_json(value)?, certificate)
+            .map_err(to_js_error)
     }
 
     pub fn remove(&self, value: JsValue) -> std::result::Result<String, JsValue> {
@@ -770,6 +866,99 @@ impl WasmWebSocketSync {
         self.state.borrow().inflight.len()
     }
 
+    #[wasm_bindgen(js_name = recommendedPeers)]
+    pub fn recommended_peers(&self) -> std::result::Result<JsValue, JsValue> {
+        let peers = self
+            .state
+            .borrow()
+            .recommendations
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        to_js(&peers)
+    }
+
+    #[wasm_bindgen(js_name = remoteGet)]
+    pub async fn remote_get(
+        &self,
+        peer_id: String,
+        path: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Get { path }).await? {
+            RemoteResult::Get { value } => match value {
+                Some(value) => to_js(&value),
+                None => Ok(JsValue::NULL),
+            },
+            other => Err(JsValue::from_str(&format!(
+                "expected get result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = remoteQuery)]
+    pub async fn remote_query(
+        &self,
+        peer_id: String,
+        path: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Query { path, spec })
+            .await?
+        {
+            RemoteResult::Query { entries } => to_js(&entries),
+            other => Err(JsValue::from_str(&format!(
+                "expected query result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = remoteLex)]
+    pub async fn remote_lex(
+        &self,
+        peer_id: String,
+        path: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
+            .await?
+        {
+            RemoteResult::Lex { entries } => to_js(&entries),
+            other => Err(JsValue::from_str(&format!(
+                "expected lex result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = remoteSnapshot)]
+    pub async fn remote_snapshot(
+        &self,
+        peer_id: String,
+        root: Option<String>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        match request_remote_result_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::Snapshot { root },
+        )
+        .await?
+        {
+            RemoteResult::Snapshot { snapshot } => to_js(&snapshot),
+            other => Err(JsValue::from_str(&format!(
+                "expected snapshot result, received {other:?}"
+            ))),
+        }
+    }
+
     #[wasm_bindgen(js_name = flushPending)]
     pub fn flush_pending(&self) -> std::result::Result<usize, JsValue> {
         flush_pending_state(&self.state)
@@ -804,6 +993,7 @@ impl WasmWebSocketSync {
         self.onerror.take();
         self.interval_callback.take();
         requeue_inflight_state(&self.state);
+        fail_pending_requests_state(&self.state, "websocket connection closed");
     }
 }
 
@@ -917,34 +1107,84 @@ fn handle_route_message(
     if !decision.deliver {
         return Ok(());
     }
+    handle_route_payload(state, route.from, route.route_id, route.payload)
+}
 
-    match route.payload {
-        RoutePayload::Presence { .. } => Ok(()),
-        RoutePayload::Signal { .. } => Ok(()),
-        RoutePayload::SnapshotRequest { root } => {
-            let response = {
-                let borrowed = state.borrow();
-                borrowed
-                    .router
-                    .snapshot_response(root, borrowed.db.snapshot(), RouteTarget::Peer(route.from))
-            };
-            send_route_state(state, &response)
-        }
-        RoutePayload::SnapshotResponse { snapshot, .. } => {
-            state
-                .borrow()
-                .db
-                .load_snapshot(snapshot)
-                .map_err(to_js_error)
-        }
-        RoutePayload::Sync { encoding, payload } => {
-            let frame = {
-                let borrowed = state.borrow();
-                decode_sync_payload(&borrowed.db, &encoding, payload)?
-            };
-            handle_sync_frame(state, frame, Some(route.from))
+fn handle_route_payload(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    from: String,
+    route_id: String,
+    payload: RoutePayload,
+) -> std::result::Result<(), JsValue> {
+    let mut pending = vec![payload];
+    while let Some(payload) = pending.pop() {
+        match payload {
+            RoutePayload::Presence { peer } => {
+                store_peer_recommendations_state(state, vec![peer_recommendation_from_presence(&peer)]);
+            }
+            RoutePayload::Signal { .. } => {}
+            RoutePayload::SnapshotRequest { root } => {
+                let response = {
+                    let borrowed = state.borrow();
+                    borrowed
+                        .router
+                        .snapshot_response(root, borrowed.db.snapshot(), RouteTarget::Peer(from.clone()))
+                };
+                send_route_state(state, &response)?;
+            }
+            RoutePayload::SnapshotResponse { snapshot, .. } => {
+                state
+                    .borrow()
+                    .db
+                    .load_snapshot(snapshot)
+                    .map_err(to_js_error)?;
+            }
+            RoutePayload::Sync { encoding, payload } => {
+                let frame = {
+                    let borrowed = state.borrow();
+                    decode_sync_payload(&borrowed.db, &encoding, payload)?
+                };
+                handle_sync_frame(state, frame, Some(from.clone()))?;
+            }
+            RoutePayload::PullRequest { request } => {
+                let (router, db, batch_size) = {
+                    let borrowed = state.borrow();
+                    (
+                        borrowed.router.clone(),
+                        borrowed.db.clone(),
+                        borrowed.db.limits().max_batch_items_per_route.max(1),
+                    )
+                };
+                let result = db.execute_pull_request(&request).map_err(to_js_error)?;
+                let items = db
+                    .chunk_remote_result(&request.request_id, result)
+                    .into_iter()
+                    .map(|response| RouteBatchItem::PullResponse { response })
+                    .collect::<Vec<_>>();
+                for route in pack_batch_routes(
+                    &router,
+                    RouteTarget::Peer(from.clone()),
+                    Some(route_id.clone()),
+                    items,
+                    batch_size,
+                ) {
+                    send_route_state(state, &route)?;
+                }
+            }
+            RoutePayload::PullResponse { response } => {
+                accept_pull_response_state(state, response)?;
+            }
+            RoutePayload::PeerExchange { peers } => {
+                store_peer_recommendations_state(state, peers);
+            }
+            RoutePayload::Batch { items } => {
+                for item in items.into_iter().rev() {
+                    pending.push(RoutePayload::from_batch_item(item));
+                }
+            }
         }
     }
+    Ok(())
 }
 
 fn handle_sync_frame(
@@ -1122,6 +1362,227 @@ fn send_route_state(
         )));
     }
     socket.send_with_str(&payload)
+}
+
+async fn request_remote_result_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    target_peer_id: String,
+    request_kind: PullRequestKind,
+) -> std::result::Result<RemoteResult, JsValue> {
+    let (request_id, receiver) = {
+        let mut borrowed = state.borrow_mut();
+        if borrowed.socket.ready_state() != web_sys::WebSocket::OPEN {
+            return Err(JsValue::from_str("websocket is not connected"));
+        }
+        borrowed.next_message_seq = borrowed.next_message_seq.saturating_add(1);
+        let request_id = format!(
+            "{}/pull/{:x}",
+            borrowed.db.replica_id(),
+            borrowed.next_message_seq
+        );
+        let (sender, receiver) = bounded(1);
+        borrowed.pending_requests.insert(
+            request_id.clone(),
+            PendingPullRequest {
+                sender,
+                accumulator: PullAccumulator::new(&request_kind),
+            },
+        );
+        (request_id, receiver)
+    };
+
+    let request = PullRequest {
+        request_id: request_id.clone(),
+        request: request_kind,
+    };
+    let route = state
+        .borrow()
+        .router
+        .wrap_pull_request(request, RouteTarget::Peer(target_peer_id));
+    if let Err(error) = send_route_state(state, &route) {
+        state.borrow_mut().pending_requests.remove(&request_id);
+        return Err(error);
+    }
+
+    let result = receiver
+        .recv()
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    result.map_err(|message| JsValue::from_str(&message))
+}
+
+fn fail_pending_requests_state(state: &Rc<RefCell<WebSocketSyncState>>, message: &str) {
+    let pending = {
+        let mut borrowed = state.borrow_mut();
+        std::mem::take(&mut borrowed.pending_requests)
+    };
+    for request in pending.into_values() {
+        let _ = request.sender.try_send(Err(message.to_owned()));
+    }
+}
+
+fn accept_pull_response_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    response: PullResponse,
+) -> std::result::Result<(), JsValue> {
+    let mut borrowed = state.borrow_mut();
+    let Some(request) = borrowed.pending_requests.get_mut(&response.request_id) else {
+        return Ok(());
+    };
+
+    match &response.result {
+        PullResponseBody::Get { value } => {
+            request.accumulator = PullAccumulator::Get {
+                value: value.clone(),
+            };
+        }
+        PullResponseBody::Map { entries } => {
+            if let PullAccumulator::Map { entries: current } = &mut request.accumulator {
+                current.extend(entries.clone());
+            }
+        }
+        PullResponseBody::Query { entries } => {
+            if let PullAccumulator::Query { entries: current } = &mut request.accumulator {
+                current.extend(entries.clone());
+            }
+        }
+        PullResponseBody::Lex { entries } => {
+            if let PullAccumulator::Lex { entries: current } = &mut request.accumulator {
+                current.extend(entries.clone());
+            }
+        }
+        PullResponseBody::Snapshot {
+            clock,
+            nodes,
+            pending_ops,
+        } => {
+            if let PullAccumulator::Snapshot {
+                clock: current_clock,
+                nodes: current_nodes,
+                pending_ops: current_ops,
+            } = &mut request.accumulator
+            {
+                if current_clock.is_none() {
+                    *current_clock = clock.clone();
+                }
+                current_nodes.extend(nodes.clone());
+                current_ops.extend(pending_ops.clone());
+            }
+        }
+        PullResponseBody::Error { message } => {
+            let request = borrowed.pending_requests.remove(&response.request_id).unwrap();
+            let _ = request.sender.try_send(Err(message.clone()));
+            return Ok(());
+        }
+    }
+
+    if response.is_final() {
+        let request = borrowed.pending_requests.remove(&response.request_id).unwrap();
+        let result = request.accumulator.into_result().map_err(to_js_error)?;
+        let _ = request.sender.try_send(Ok(result));
+    }
+    Ok(())
+}
+
+fn store_peer_recommendations_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    peers: Vec<PeerRecommendation>,
+) {
+    let max = state.borrow().db.limits().max_peer_recommendations.max(1);
+    let mut borrowed = state.borrow_mut();
+    for peer in peers {
+        borrowed
+            .recommendations
+            .insert(peer.peer.peer_id.clone(), peer);
+    }
+    while borrowed.recommendations.len() > max {
+        let Some(oldest) = borrowed.recommendations.keys().next().cloned() else {
+            break;
+        };
+        borrowed.recommendations.remove(&oldest);
+    }
+}
+
+fn peer_recommendation_from_presence(peer: &crate::PeerPresence) -> PeerRecommendation {
+    const MAX_HINTS: usize = 8;
+    const MAX_TOPICS: usize = 8;
+    let relay_urls = peer
+        .metadata
+        .get("relay_url")
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    PeerRecommendation {
+        peer: peer.clone(),
+        relay_urls,
+        score: 100 + peer.capabilities.len().min(MAX_HINTS) as u16 * 5 + peer.topics.len().min(MAX_TOPICS) as u16 * 5,
+        discovered_at_millis: crate::clock::now_millis(),
+    }
+}
+
+fn pack_batch_routes(
+    router: &Router,
+    target: RouteTarget,
+    reply_to: Option<String>,
+    items: Vec<RouteBatchItem>,
+    batch_size: usize,
+) -> Vec<RouteEnvelope> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    items
+        .chunks(batch_size.max(1))
+        .map(|chunk| {
+            if chunk.len() == 1 {
+                router.wrap_batch_item(chunk[0].clone(), target.clone(), reply_to.clone())
+            } else {
+                router.wrap_batch(chunk.to_vec(), target.clone(), reply_to.clone())
+            }
+        })
+        .collect()
+}
+
+impl PullAccumulator {
+    fn new(request: &PullRequestKind) -> Self {
+        match request {
+            PullRequestKind::Get { .. } => Self::Get { value: None },
+            PullRequestKind::Map { .. } => Self::Map { entries: Vec::new() },
+            PullRequestKind::Query { .. } => Self::Query { entries: Vec::new() },
+            PullRequestKind::Lex { .. } => Self::Lex { entries: Vec::new() },
+            PullRequestKind::Snapshot { .. } => Self::Snapshot {
+                clock: None,
+                nodes: BTreeMap::new(),
+                pending_ops: Vec::new(),
+            },
+        }
+    }
+
+    fn into_result(self) -> crate::Result<RemoteResult> {
+        match self {
+            Self::Get { value } => Ok(RemoteResult::Get { value }),
+            Self::Map { entries } => Ok(RemoteResult::Map { entries }),
+            Self::Query { entries } => Ok(RemoteResult::Query { entries }),
+            Self::Lex { entries } => Ok(RemoteResult::Lex { entries }),
+            Self::Snapshot {
+                clock,
+                nodes,
+                pending_ops,
+            } => Ok(RemoteResult::Snapshot {
+                snapshot: crate::DatabaseSnapshot {
+                    clock: clock.ok_or_else(|| {
+                        crate::PrimadbError::Message(
+                            "snapshot response completed without a clock".to_owned(),
+                        )
+                    })?,
+                    nodes,
+                    pending_ops,
+                },
+            }),
+        }
+    }
 }
 
 fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> std::result::Result<(String, JsonValue), JsValue> {
@@ -1531,36 +1992,73 @@ fn handle_mesh_route_message(
     if !decision.deliver {
         return Ok(());
     }
-
-    match route.payload {
-        RoutePayload::Presence { .. } => Ok(()),
-        RoutePayload::Signal { .. } => Ok(()),
-        RoutePayload::SnapshotRequest { root } => {
-            let response = {
-                let borrowed = state.borrow();
-                borrowed.router.snapshot_response(
-                    root,
-                    borrowed.db.snapshot(),
+    let mut pending = vec![route.payload];
+    while let Some(payload) = pending.pop() {
+        match payload {
+            RoutePayload::Presence { .. } => {}
+            RoutePayload::Signal { .. } => {}
+            RoutePayload::SnapshotRequest { root } => {
+                let response = {
+                    let borrowed = state.borrow();
+                    borrowed.router.snapshot_response(
+                        root,
+                        borrowed.db.snapshot(),
+                        RouteTarget::Peer(remote_peer.to_owned()),
+                    )
+                };
+                send_mesh_route_to_peer(state, remote_peer, &response)?;
+            }
+            RoutePayload::SnapshotResponse { snapshot, .. } => {
+                state
+                    .borrow()
+                    .db
+                    .load_snapshot(snapshot)
+                    .map_err(to_js_error)?;
+            }
+            RoutePayload::Sync { encoding, payload } => {
+                let frame = {
+                    let borrowed = state.borrow();
+                    decode_sync_payload(&borrowed.db, &encoding, payload)?
+                };
+                handle_mesh_sync_frame(state, remote_peer, frame)?;
+            }
+            RoutePayload::PullRequest { request } => {
+                let (router, db, batch_size) = {
+                    let borrowed = state.borrow();
+                    (
+                        borrowed.router.clone(),
+                        borrowed.db.clone(),
+                        borrowed.db.limits().max_batch_items_per_route.max(1),
+                    )
+                };
+                let items = db
+                    .chunk_remote_result(
+                        &request.request_id,
+                        db.execute_pull_request(&request).map_err(to_js_error)?,
+                    )
+                    .into_iter()
+                    .map(|response| RouteBatchItem::PullResponse { response })
+                    .collect::<Vec<_>>();
+                for route in pack_batch_routes(
+                    &router,
                     RouteTarget::Peer(remote_peer.to_owned()),
-                )
-            };
-            send_mesh_route_to_peer(state, remote_peer, &response)
-        }
-        RoutePayload::SnapshotResponse { snapshot, .. } => {
-            state
-                .borrow()
-                .db
-                .load_snapshot(snapshot)
-                .map_err(to_js_error)
-        }
-        RoutePayload::Sync { encoding, payload } => {
-            let frame = {
-                let borrowed = state.borrow();
-                decode_sync_payload(&borrowed.db, &encoding, payload)?
-            };
-            handle_mesh_sync_frame(state, remote_peer, frame)
+                    None,
+                    items,
+                    batch_size,
+                ) {
+                    send_mesh_route_to_peer(state, remote_peer, &route)?;
+                }
+            }
+            RoutePayload::PullResponse { .. } => {}
+            RoutePayload::PeerExchange { .. } => {}
+            RoutePayload::Batch { items } => {
+                for item in items.into_iter().rev() {
+                    pending.push(RoutePayload::from_batch_item(item));
+                }
+            }
         }
     }
+    Ok(())
 }
 
 fn handle_mesh_sync_frame(

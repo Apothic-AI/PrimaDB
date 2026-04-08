@@ -45,6 +45,16 @@ function stableStringify(value) {
   });
 }
 
+function contentHashForPayload(payload) {
+  const text = stableStringify(payload);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 function splitPath(path) {
   return `${path ?? ""}`
     .split("/")
@@ -350,6 +360,7 @@ class DamConnection {
     this.closed = false;
     this.ready = false;
     this.knownPeers = new Map();
+    this.recommendedPeers = new Map();
     this.inflight = new Map();
     this.signalListeners = new Set();
     this._retryTimer = null;
@@ -419,6 +430,9 @@ class DamConnection {
       ttl: 6,
       hops: 0,
       issued_at_millis: nowMillis(),
+      reply_to: null,
+      content_hash: contentHashForPayload(payload),
+      seen_by: [this.runtime._peerId],
       payload,
     };
   }
@@ -440,18 +454,34 @@ class DamConnection {
       return;
     }
 
-    switch (route.payload?.kind) {
+    this._handlePayload(route.payload, route);
+  }
+
+  _handlePayload(payload, route) {
+    switch (payload?.kind) {
       case "presence":
-        this._handlePresence(route.payload.peer);
+        this._handlePresence(payload.peer);
+        return;
+      case "peer_exchange":
+        for (const recommendation of payload.peers ?? []) {
+          if (recommendation?.peer?.peer_id && recommendation.peer.peer_id !== this.runtime._peerId) {
+            this.recommendedPeers.set(recommendation.peer.peer_id, recommendation);
+          }
+        }
+        return;
+      case "batch":
+        for (const item of payload.items ?? []) {
+          this._handlePayload(item, route);
+        }
         return;
       case "signal":
         if (
           route.target?.kind === "peer" &&
           route.target.value === this.runtime._peerId &&
-          route.payload.room === this.room
+          payload.room === this.room
         ) {
           for (const listener of this.signalListeners) {
-            listener(route.payload, route);
+            listener(payload, route);
           }
         }
         return;
@@ -469,9 +499,22 @@ class DamConnection {
     }
     if (peer.metadata?.state === "offline") {
       this.knownPeers.delete(peer.peer_id);
+      this.recommendedPeers.delete(peer.peer_id);
       return;
     }
     this.knownPeers.set(peer.peer_id, peer);
+    this.recommendedPeers.set(peer.peer_id, {
+      peer,
+      relay_urls:
+        typeof peer.metadata?.relay_url === "string"
+          ? peer.metadata.relay_url
+              .split(",")
+              .map((candidate) => candidate.trim())
+              .filter(Boolean)
+          : [],
+      score: 100 + Math.min(peer.capabilities?.length ?? 0, 8) * 5 + Math.min(peer.topics?.length ?? 0, 8) * 5,
+      discovered_at_millis: nowMillis(),
+    });
   }
 
   async _handleSync(route) {
@@ -566,6 +609,10 @@ class DamConnection {
 
   peerCount() {
     return this.knownPeers.size;
+  }
+
+  recommendationCount() {
+    return this.recommendedPeers.size;
   }
 
   close() {
@@ -667,42 +714,7 @@ class GunChain {
   }
 
   _prepareWrite(value, path, opt = {}) {
-    if (value instanceof GunChain) {
-      return { $link: value._soul() };
-    }
-    if (isGunLink(value)) {
-      return { $link: value["#"] };
-    }
-
-    const ownerPub = ownerPubForPath(path);
-    const user = this._runtime._userContext;
-    const canSign =
-      ownerPub &&
-      user?.pair &&
-      (user.pub === ownerPub || opt.cert);
-
-    if (!canSign) {
-      return convertToPrimadbValue(value);
-    }
-
-    if (Array.isArray(value) || !isPlainObject(value)) {
-      return this._signLeaf(value, path, opt.cert);
-    }
-
-    const next = {};
-    for (const [key, candidate] of Object.entries(value)) {
-      const fieldPath = joinPath(path, key);
-      if (candidate instanceof GunChain || isGunLink(candidate)) {
-        next[key] = convertToPrimadbValue(candidate);
-        continue;
-      }
-      if (Array.isArray(candidate) || !isPlainObject(candidate)) {
-        next[key] = this._signLeaf(candidate, fieldPath, opt.cert);
-        continue;
-      }
-      next[key] = this._prepareWrite(candidate, fieldPath, opt);
-    }
-    return next;
+    return convertToPrimadbValue(value);
   }
 
   _signLeaf(value, path, cert) {
@@ -815,6 +827,13 @@ class GunChain {
           const chain = this._resolveChain();
           if (prepared == null) {
             chain.unset();
+          } else if (
+            typeof chain.putSigned === "function" &&
+            ownerPubForPath(this._path()) &&
+            this._runtime._userContext?.pair &&
+            (this._runtime._userContext.pub === ownerPubForPath(this._path()) || opt.cert)
+          ) {
+            chain.putSigned(prepared, opt.cert ?? null);
           } else {
             chain.put(prepared);
           }
@@ -1328,9 +1347,14 @@ class GunRoot {
       (count, connection) => count + connection.inflight.size,
       0,
     );
+    const recommendations = this._damConnections.reduce(
+      (count, connection) => count + connection.recommendationCount(),
+      0,
+    );
     return {
       replicaId: this._db.replicaId(),
       peers,
+      recommendations,
       inflight,
       pending: this._db.pendingOperations().length,
       authenticatedUser: this._user.is,

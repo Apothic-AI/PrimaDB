@@ -1,9 +1,12 @@
 use crate::clock::now_millis;
 use crate::crypto::{EncryptedPayload, Identity, PublicIdentity, SecretBoxKey};
 use crate::error::{PrimadbError, Result};
-use crate::{DatabaseSnapshot, Operation, SyncFrame};
+use crate::{DatabaseSnapshot, Operation, SignedPayload, SyncFrame};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeMap;
+
+const SEA_PREFIX: &str = "SEA";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserGrant {
@@ -73,6 +76,30 @@ pub enum StoredSnapshot {
         alias: Option<String>,
         payload: EncryptedPayload,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SignedValueClaims {
+    pub path: String,
+    pub value: JsonValue,
+    #[serde(default)]
+    pub cert: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DataCertificate {
+    #[serde(rename = "c")]
+    pub certificants: Vec<String>,
+    #[serde(rename = "w")]
+    pub write_policy: JsonValue,
+    #[serde(rename = "e")]
+    #[serde(default)]
+    pub expires_at_millis: Option<u64>,
+    #[serde(rename = "wb")]
+    #[serde(default)]
+    pub write_block: Option<JsonValue>,
+    #[serde(default = "now_millis")]
+    pub iat: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +207,76 @@ impl SecurityState {
 
     pub fn clear_local_user(&mut self) {
         self.local_user = None;
+    }
+
+    pub fn local_public_key(&self) -> Option<String> {
+        self.local_user.as_ref().map(LocalUser::public_key)
+    }
+
+    pub fn certify_write(
+        &self,
+        certificants: Vec<String>,
+        write_policy: JsonValue,
+        expires_at_millis: Option<u64>,
+        write_block: Option<JsonValue>,
+    ) -> Result<String> {
+        let local_user = self.local_user.as_ref().ok_or_else(|| {
+            PrimadbError::Crypto("cannot create a certificate without an authenticated user".to_owned())
+        })?;
+        let signed = local_user.identity.sign_payload(DataCertificate {
+            certificants: normalize_certificants(certificants),
+            write_policy,
+            expires_at_millis,
+            write_block,
+            iat: now_millis(),
+        })?;
+        encode_sea_envelope(json!({
+            "kind": "signed",
+            "signed": signed,
+        }))
+    }
+
+    pub fn sign_data_value(
+        &self,
+        path: &str,
+        value: JsonValue,
+        cert: Option<String>,
+    ) -> Result<JsonValue> {
+        let local_user = self.local_user.as_ref().ok_or_else(|| {
+            PrimadbError::Crypto(
+                "cannot sign a field value without an authenticated user".to_owned(),
+            )
+        })?;
+        let signed = local_user.identity.sign_payload(SignedValueClaims {
+            path: path.to_owned(),
+            value,
+            cert,
+        })?;
+        Ok(JsonValue::String(encode_sea_envelope(json!({
+            "kind": "signed",
+            "signed": signed,
+        }))?))
+    }
+
+    pub fn verify_data_value(&self, expected_path: &str, value: &JsonValue) -> Result<Option<JsonValue>> {
+        let Some(signed) = decode_signed_value(value)? else {
+            return Ok(Some(value.clone()));
+        };
+        let claims = signed.verify()?;
+        if claims.path != expected_path {
+            return Ok(None);
+        }
+
+        if let Some(owner_pub) = owner_public_key_for_path(expected_path) {
+            if signed.signer != owner_pub {
+                let Some(certificate) = claims.cert.as_deref() else {
+                    return Ok(None);
+                };
+                validate_certificate(certificate, &owner_pub, &signed.signer, expected_path)?;
+            }
+        }
+
+        Ok(Some(claims.value))
     }
 
     pub fn encode_sync_frame(
@@ -349,6 +446,165 @@ pub fn root_for_node(node: &str) -> String {
     first.to_owned()
 }
 
+pub fn owner_public_key_for_path(path: &str) -> Option<String> {
+    let root = path.split('/').next().unwrap_or(path);
+    if !root.starts_with('~') || root.starts_with("~@") {
+        return None;
+    }
+    Some(root.trim_start_matches('~').to_owned())
+}
+
+fn encode_sea_envelope(value: JsonValue) -> Result<String> {
+    Ok(format!("{SEA_PREFIX}{}", serde_json::to_string(&value)?))
+}
+
+fn parse_sea_envelope(value: &str) -> Option<JsonValue> {
+    if !value.starts_with(SEA_PREFIX) {
+        return None;
+    }
+    serde_json::from_str(&value[SEA_PREFIX.len()..]).ok()
+}
+
+fn decode_signed_value(value: &JsonValue) -> Result<Option<SignedPayload<SignedValueClaims>>> {
+    let JsonValue::String(value) = value else {
+        return Ok(None);
+    };
+    let Some(envelope) = parse_sea_envelope(value) else {
+        return Ok(None);
+    };
+    let signed = match envelope {
+        JsonValue::Object(object) => object
+            .get("signed")
+            .cloned()
+            .unwrap_or(JsonValue::Object(object)),
+        other => other,
+    };
+    Ok(Some(serde_json::from_value(signed)?))
+}
+
+fn decode_certificate(value: &str) -> Result<SignedPayload<DataCertificate>> {
+    let envelope = parse_sea_envelope(value).ok_or_else(|| {
+        PrimadbError::Crypto("certificate is not a SEA-encoded signed payload".to_owned())
+    })?;
+    let signed = match envelope {
+        JsonValue::Object(object) => object
+            .get("signed")
+            .cloned()
+            .unwrap_or(JsonValue::Object(object)),
+        other => other,
+    };
+    Ok(serde_json::from_value(signed)?)
+}
+
+fn normalize_certificants(certificants: Vec<String>) -> Vec<String> {
+    if certificants.is_empty() {
+        vec!["*".to_owned()]
+    } else {
+        certificants
+    }
+}
+
+fn matches_lex(candidate: &str, pattern: &str) -> bool {
+    if pattern.is_empty() || pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return candidate.starts_with(prefix);
+    }
+    candidate == pattern
+}
+
+fn matches_certificate_path(path: &str, policy: &JsonValue) -> bool {
+    if policy.is_null() {
+        return true;
+    }
+
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let key = segments.last().copied().unwrap_or_default();
+    let soul_path = if segments.len() > 2 {
+        segments[1..segments.len() - 1].join("/")
+    } else {
+        String::new()
+    };
+
+    let policies = match policy {
+        JsonValue::Array(entries) => entries.clone(),
+        other => vec![other.clone()],
+    };
+
+    policies.into_iter().any(|entry| match entry {
+        JsonValue::String(pattern) => {
+            matches_lex(path, &pattern)
+                || matches_lex(&soul_path, &pattern)
+                || matches_lex(key, &pattern)
+        }
+        JsonValue::Object(object) => {
+            let path_rule = object.get("#").and_then(JsonValue::as_str);
+            let field_rule = object.get(".").and_then(JsonValue::as_str);
+            match (path_rule, field_rule) {
+                (Some(path_rule), Some(field_rule)) => {
+                    matches_lex(&soul_path, path_rule) && matches_lex(key, field_rule)
+                }
+                (Some(path_rule), None) => {
+                    matches_lex(path, path_rule) || matches_lex(&soul_path, path_rule)
+                }
+                (None, Some(field_rule)) => matches_lex(key, field_rule),
+                (None, None) => false,
+            }
+        }
+        _ => false,
+    })
+}
+
+fn validate_certificate(
+    certificate: &str,
+    owner_pub: &str,
+    certificant: &str,
+    expected_path: &str,
+) -> Result<()> {
+    let signed = decode_certificate(certificate)?;
+    if signed.signer != owner_pub {
+        return Err(PrimadbError::Crypto(
+            "certificate signer does not match the path owner".to_owned(),
+        ));
+    }
+
+    let claims = signed.verify()?;
+    if claims
+        .expires_at_millis
+        .is_some_and(|expires_at| expires_at < now_millis())
+    {
+        return Err(PrimadbError::Crypto("certificate has expired".to_owned()));
+    }
+    if !claims
+        .certificants
+        .iter()
+        .any(|candidate| candidate == "*" || candidate == certificant)
+    {
+        return Err(PrimadbError::Crypto(
+            "certificate does not authorize this writer".to_owned(),
+        ));
+    }
+    if !matches_certificate_path(expected_path, &claims.write_policy) {
+        return Err(PrimadbError::Crypto(
+            "certificate does not authorize this path".to_owned(),
+        ));
+    }
+    if claims
+        .write_block
+        .as_ref()
+        .is_some_and(|policy| matches_certificate_path(expected_path, policy))
+    {
+        return Err(PrimadbError::Crypto(
+            "certificate blocks writes to this path".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn authorize_roots(user: &UserRecord, claims: &AuthClaims, actual_roots: Vec<String>) -> Result<()> {
     if !claims
         .roots
@@ -378,8 +634,9 @@ fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SecurityState, SecureSyncFrame, UserGrant};
+    use super::{SecurityState, SecureSyncFrame, UserGrant, owner_public_key_for_path};
     use crate::{Identity, Operation, OperationAction, OperationValue, Revision, SyncFrame};
+    use serde_json::json;
 
     #[test]
     fn signed_frames_round_trip() {
@@ -460,5 +717,96 @@ mod tests {
             .unwrap();
 
         assert!(receiver.decode_sync_frame(secure).is_err());
+    }
+
+    #[test]
+    fn owner_public_key_is_resolved_from_user_paths() {
+        assert_eq!(
+            owner_public_key_for_path("~alice-pub/profile/name"),
+            Some("alice-pub".to_owned())
+        );
+        assert_eq!(owner_public_key_for_path("docs/post/title"), None);
+        assert_eq!(owner_public_key_for_path("~@alice"), None);
+    }
+
+    #[test]
+    fn signed_field_values_round_trip_through_core_helpers() {
+        let identity = Identity::generate();
+        let mut state = SecurityState::default();
+        state
+            .set_local_user("alice", identity.clone(), vec![UserGrant::write_root("*")])
+            .unwrap();
+        state.register_user(
+            "alice",
+            &identity.public_identity(),
+            vec![UserGrant::write_root("*")],
+        );
+
+        let signed = state
+            .sign_data_value(
+                &format!("~{}/profile/display_name", identity.public_key_base64()),
+                json!("Alice"),
+                None,
+            )
+            .unwrap();
+
+        let verified = state
+            .verify_data_value(
+                &format!("~{}/profile/display_name", identity.public_key_base64()),
+                &signed,
+            )
+            .unwrap();
+        assert_eq!(verified, Some(json!("Alice")));
+    }
+
+    #[test]
+    fn delegated_certificates_authorize_signed_field_values() {
+        let owner = Identity::generate();
+        let delegate = Identity::generate();
+
+        let mut owner_state = SecurityState::default();
+        owner_state
+            .set_local_user("owner", owner.clone(), vec![UserGrant::write_root("*")])
+            .unwrap();
+        owner_state.register_user(
+            "owner",
+            &owner.public_identity(),
+            vec![UserGrant::write_root("*")],
+        );
+        let certificate = owner_state
+            .certify_write(
+                vec![delegate.public_key_base64()],
+                json!({"#": "profile", ".": "tagline"}),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut delegate_state = SecurityState::default();
+        delegate_state
+            .set_local_user("delegate", delegate.clone(), vec![UserGrant::write_root("*")])
+            .unwrap();
+        let signed = delegate_state
+            .sign_data_value(
+                &format!("~{}/profile/tagline", owner.public_key_base64()),
+                json!("delegated"),
+                Some(certificate),
+            )
+            .unwrap();
+
+        let mut verifier = SecurityState::default();
+        verifier.register_user(
+            "owner",
+            &owner.public_identity(),
+            vec![UserGrant::write_root("*")],
+        );
+
+        let verified = verifier
+            .verify_data_value(
+                &format!("~{}/profile/tagline", owner.public_key_base64()),
+                &signed,
+            )
+            .unwrap();
+        assert_eq!(verified, Some(json!("delegated")));
     }
 }

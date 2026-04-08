@@ -6,12 +6,15 @@ use crate::persistence::{PersistenceTarget, load_snapshot_payload, store_snapsho
 use crate::query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QuerySpec};
 use crate::snapshot::DatabaseSnapshot;
 use crate::storage::StorageAdapter;
-use crate::sync::{SyncEnvelope, SyncFrame};
+use crate::sync::{
+    PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
+    RemoteResult, SyncEnvelope, SyncFrame,
+};
 use crate::value::{FieldState, FieldValue, NodeId, NodeState, SetState};
 #[cfg(feature = "crypto")]
 use crate::{
     Identity, PublicIdentity, SecretBoxKey, SecureSyncFrame, SecurityState, StoredSnapshot,
-    UserGrant,
+    UserGrant, owner_public_key_for_path,
 };
 use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
@@ -391,6 +394,72 @@ impl Primadb {
         inner.security.decode_sync_frame(frame)
     }
 
+    pub fn get_path(&self, path: &RemotePath) -> Result<Option<JsonValue>> {
+        self.materialize(&path.anchor, &path.segments)
+    }
+
+    pub fn map_path(&self, path: &RemotePath) -> Result<Vec<MapEntry>> {
+        self.map_at(&path.anchor, &path.segments)
+    }
+
+    pub fn query_path(&self, path: &RemotePath, spec: &QuerySpec) -> Result<Vec<MapEntry>> {
+        self.query_at(&path.anchor, &path.segments, spec)
+    }
+
+    pub fn lex_path(&self, path: &RemotePath, spec: &LexSpec) -> Result<Vec<LexEntry>> {
+        self.scan_at(&path.anchor, &path.segments, spec)
+    }
+
+    pub fn snapshot_for_root(&self, root: Option<&str>) -> DatabaseSnapshot {
+        let inner = self.inner.lock().unwrap();
+        match root {
+            None => DatabaseSnapshot {
+                clock: inner.clock.clone(),
+                nodes: inner.nodes.clone(),
+                pending_ops: inner.pending_ops.clone(),
+            },
+            Some(root) => DatabaseSnapshot {
+                clock: inner.clock.clone(),
+                nodes: inner
+                    .nodes
+                    .iter()
+                    .filter(|(node_id, _)| node_matches_root(node_id, root))
+                    .map(|(node_id, node)| (node_id.clone(), node.clone()))
+                    .collect(),
+                pending_ops: inner
+                    .pending_ops
+                    .iter()
+                    .filter(|op| operation_matches_root(op, root))
+                    .cloned()
+                    .collect(),
+            },
+        }
+    }
+
+    pub fn execute_pull_request(&self, request: &PullRequest) -> Result<RemoteResult> {
+        match &request.request {
+            PullRequestKind::Get { path } => Ok(RemoteResult::Get {
+                value: self.get_path(path)?,
+            }),
+            PullRequestKind::Map { path } => Ok(RemoteResult::Map {
+                entries: self.map_path(path)?,
+            }),
+            PullRequestKind::Query { path, spec } => Ok(RemoteResult::Query {
+                entries: self.query_path(path, spec)?,
+            }),
+            PullRequestKind::Lex { path, spec } => Ok(RemoteResult::Lex {
+                entries: self.lex_path(path, spec)?,
+            }),
+            PullRequestKind::Snapshot { root } => Ok(RemoteResult::Snapshot {
+                snapshot: self.snapshot_for_root(root.as_deref()),
+            }),
+        }
+    }
+
+    pub fn chunk_remote_result(&self, request_id: &str, result: RemoteResult) -> Vec<PullResponse> {
+        build_pull_responses(request_id, result, &self.limits())
+    }
+
     pub fn subscribe_changes(&self) -> ChangeSubscription {
         let (sender, receiver) = async_channel::unbounded();
         let (id, event) = {
@@ -528,10 +597,10 @@ impl Primadb {
             "alias": alias,
             "pub": public_key,
         }))?;
-        self.root(format!("~{public_key}")).put(serde_json::json!({
+        self.root(format!("~{public_key}")).put_signed(serde_json::json!({
             "alias": alias,
             "pub": public_key,
-        }))
+        }), None)
     }
 
     #[cfg(feature = "crypto")]
@@ -542,6 +611,20 @@ impl Primadb {
     #[cfg(feature = "crypto")]
     pub fn set_transport_encryption_key(&self, key: SecretBoxKey) {
         self.inner.lock().unwrap().security.set_transport_encryption_key(key);
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn create_write_certificate(
+        &self,
+        certificants: Vec<String>,
+        write_policy: JsonValue,
+        expires_at_millis: Option<u64>,
+        write_block: Option<JsonValue>,
+    ) -> Result<String> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .security
+            .certify_write(certificants, write_policy, expires_at_millis, write_block)
     }
 
     fn configure_persistence(&self, target: PersistenceTarget) -> Result<bool> {
@@ -609,9 +692,11 @@ impl Primadb {
     fn materialize(&self, anchor: &str, segments: &[String]) -> Result<Option<JsonValue>> {
         let inner = self.inner.lock().unwrap();
         match inner.resolve_cursor(anchor, segments)? {
-            Some(Cursor::Node(node)) => {
-                Ok(Some(inner.materialize_node(&node, &mut BTreeSet::new())))
-            }
+            Some(Cursor::Node(node)) => Ok(Some(inner.materialize_node(
+                &node,
+                &node,
+                &mut BTreeSet::new(),
+            ))),
             Some(Cursor::Field { node, field }) => {
                 let node_state = match inner.nodes.get(&node) {
                     Some(node_state) => node_state,
@@ -622,6 +707,8 @@ impl Primadb {
                     None => return Ok(None),
                 };
                 Ok(Some(inner.materialize_field(
+                    &node,
+                    &field,
                     &field_state.value,
                     &mut BTreeSet::new(),
                 )))
@@ -648,7 +735,7 @@ impl Primadb {
                         .keys()
                         .map(|member| MapEntry {
                             key: member.clone(),
-                            value: inner.materialize_node(member, &mut BTreeSet::new()),
+                            value: inner.materialize_node(member, member, &mut BTreeSet::new()),
                         })
                         .collect()),
                     FieldValue::Scalar(_) => Ok(Vec::new()),
@@ -853,6 +940,49 @@ impl Primadb {
         self.finalize_change(true)
     }
 
+    #[cfg(feature = "crypto")]
+    fn put_signed_json(
+        &self,
+        anchor: &str,
+        segments: &[String],
+        value: JsonValue,
+        certificate: Option<String>,
+    ) -> Result<()> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if segments.is_empty() {
+                let ParsedInput::Object(object) =
+                    parse_input(value, &display_path(anchor, segments))?
+                else {
+                    return Err(PrimadbError::ExpectedObject {
+                        path: display_path(anchor, segments),
+                    });
+                };
+                inner.write_object_to_node_secure(
+                    anchor,
+                    object,
+                    anchor,
+                    certificate.as_deref(),
+                )?;
+            } else {
+                let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)?
+                else {
+                    return Err(PrimadbError::ExpectedFieldPath {
+                        path: display_path(anchor, segments),
+                    });
+                };
+                inner.write_value_to_field_secure(
+                    &node,
+                    &field,
+                    value,
+                    &format!("{node}/{field}"),
+                    certificate.as_deref(),
+                )?;
+            }
+        }
+        self.finalize_change(true)
+    }
+
     fn unset(&self, anchor: &str, segments: &[String]) -> Result<()> {
         if segments.is_empty() {
             return Err(PrimadbError::ExpectedFieldPath {
@@ -889,6 +1019,41 @@ impl Primadb {
 
             let parsed = parse_input(value, &display_path(anchor, segments))?;
             inner.add_member_to_set(&node, &field, parsed, &display_path(anchor, segments))?
+        };
+        self.finalize_change(true)?;
+        Ok(member_id)
+    }
+
+    #[cfg(feature = "crypto")]
+    fn set_signed_json(
+        &self,
+        anchor: &str,
+        segments: &[String],
+        value: JsonValue,
+        certificate: Option<String>,
+    ) -> Result<String> {
+        if segments.is_empty() {
+            return Err(PrimadbError::ExpectedFieldPath {
+                path: display_path(anchor, segments),
+            });
+        }
+
+        let member_id = {
+            let mut inner = self.inner.lock().unwrap();
+            let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
+                return Err(PrimadbError::ExpectedFieldPath {
+                    path: display_path(anchor, segments),
+                });
+            };
+
+            let parsed = parse_input(value, &display_path(anchor, segments))?;
+            inner.add_member_to_set_secure(
+                &node,
+                &field,
+                parsed,
+                &format!("{node}/{field}"),
+                certificate.as_deref(),
+            )?
         };
         self.finalize_change(true)?;
         Ok(member_id)
@@ -944,6 +1109,16 @@ impl Chain {
             .put_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
     }
 
+    #[cfg(feature = "crypto")]
+    pub fn put_signed<T: Serialize>(&self, value: T, certificate: Option<String>) -> Result<()> {
+        self.db.put_signed_json(
+            &self.anchor,
+            &self.segments,
+            serde_json::to_value(value)?,
+            certificate,
+        )
+    }
+
     pub fn once_json(&self) -> Result<Option<JsonValue>> {
         self.db.materialize(&self.anchor, &self.segments)
     }
@@ -955,6 +1130,16 @@ impl Chain {
     pub fn set<T: Serialize>(&self, value: T) -> Result<String> {
         self.db
             .set_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn set_signed<T: Serialize>(&self, value: T, certificate: Option<String>) -> Result<String> {
+        self.db.set_signed_json(
+            &self.anchor,
+            &self.segments,
+            serde_json::to_value(value)?,
+            certificate,
+        )
     }
 
     pub fn remove<T: Serialize>(&self, value: T) -> Result<String> {
@@ -1352,6 +1537,26 @@ impl Inner {
         Ok(())
     }
 
+    #[cfg(feature = "crypto")]
+    fn write_object_to_node_secure(
+        &mut self,
+        node: &str,
+        object: Map<String, JsonValue>,
+        path: &str,
+        certificate: Option<&str>,
+    ) -> Result<()> {
+        self.ensure_node(node);
+        for (field, value) in object {
+            let field_path = if path.is_empty() {
+                format!("{node}/{field}")
+            } else {
+                format!("{path}/{field}")
+            };
+            self.write_value_to_field_secure(node, &field, value, &field_path, certificate)?;
+        }
+        Ok(())
+    }
+
     fn write_value_to_field(
         &mut self,
         node: &str,
@@ -1419,6 +1624,77 @@ impl Inner {
         Ok(())
     }
 
+    #[cfg(feature = "crypto")]
+    fn write_value_to_field_secure(
+        &mut self,
+        node: &str,
+        field: &str,
+        value: JsonValue,
+        path: &str,
+        certificate: Option<&str>,
+    ) -> Result<()> {
+        match parse_input(value, path)? {
+            ParsedInput::Scalar(scalar) => {
+                let scalar = self.sign_scalar_for_path(path, scalar, certificate)?;
+                self.set_field(
+                    node.to_owned(),
+                    field.to_owned(),
+                    OperationValue::Scalar(scalar),
+                );
+            }
+            ParsedInput::Link(target) => {
+                self.ensure_node(&target);
+                self.set_field(
+                    node.to_owned(),
+                    field.to_owned(),
+                    OperationValue::Link(target),
+                );
+            }
+            ParsedInput::Object(object) => {
+                let existing_link = self
+                    .nodes
+                    .get(node)
+                    .and_then(|state| state.fields.get(field))
+                    .and_then(|state| match &state.value {
+                        FieldValue::Link(target) => Some(target.clone()),
+                        _ => None,
+                    });
+                let child = existing_link.unwrap_or_else(|| derived_child_id(node, field));
+                self.ensure_node(&child);
+                self.set_field(
+                    node.to_owned(),
+                    field.to_owned(),
+                    OperationValue::Link(child.clone()),
+                );
+                self.write_object_to_node_secure(&child, object, &child, certificate)?;
+            }
+            ParsedInput::Set(members) => {
+                let mut ids = Vec::new();
+                for member in members {
+                    match member {
+                        SetMember::Link(target) => {
+                            self.ensure_node(&target);
+                            ids.push(target);
+                        }
+                        SetMember::Object(object) => {
+                            let member_id = self.allocate_member_id_for_path(path, field);
+                            self.ensure_node(&member_id);
+                            self.write_object_to_node_secure(
+                                &member_id,
+                                object,
+                                &member_id,
+                                certificate,
+                            )?;
+                            ids.push(member_id);
+                        }
+                    }
+                }
+                self.set_field(node.to_owned(), field.to_owned(), OperationValue::Set(ids));
+            }
+        }
+        Ok(())
+    }
+
     fn add_member_to_set(
         &mut self,
         node: &str,
@@ -1446,6 +1722,72 @@ impl Inner {
 
         self.add_set_member(node.to_owned(), field.to_owned(), member_id.clone());
         Ok(member_id)
+    }
+
+    #[cfg(feature = "crypto")]
+    fn add_member_to_set_secure(
+        &mut self,
+        node: &str,
+        field: &str,
+        parsed: ParsedInput,
+        path: &str,
+        certificate: Option<&str>,
+    ) -> Result<String> {
+        let member_id = match parsed {
+            ParsedInput::Link(target) => {
+                self.ensure_node(&target);
+                target
+            }
+            ParsedInput::Object(object) => {
+                let member_id = self.allocate_member_id_for_path(path, field);
+                self.ensure_node(&member_id);
+                self.write_object_to_node_secure(&member_id, object, &member_id, certificate)?;
+                member_id
+            }
+            ParsedInput::Scalar(_) | ParsedInput::Set(_) => {
+                return Err(PrimadbError::InvalidSetMember {
+                    path: path.to_owned(),
+                });
+            }
+        };
+
+        self.add_set_member(node.to_owned(), field.to_owned(), member_id.clone());
+        Ok(member_id)
+    }
+
+    #[cfg(feature = "crypto")]
+    fn allocate_member_id_for_path(&mut self, path: &str, field: &str) -> String {
+        match owner_public_key_for_path(path) {
+            Some(owner_pub) => format!(
+                "~{owner_pub}/{}",
+                self.clock.next_node_id(&format!("{field}-member"))
+            ),
+            None => self.clock.next_node_id(&format!("{field}-member")),
+        }
+    }
+
+    #[cfg(feature = "crypto")]
+    fn sign_scalar_for_path(
+        &self,
+        path: &str,
+        scalar: JsonValue,
+        certificate: Option<&str>,
+    ) -> Result<JsonValue> {
+        let Some(owner_pub) = owner_public_key_for_path(path) else {
+            return Ok(scalar);
+        };
+        let local_pub = self.security.local_public_key().ok_or_else(|| {
+            PrimadbError::Crypto(format!(
+                "writing owned path `{path}` requires an authenticated local user"
+            ))
+        })?;
+        if local_pub != owner_pub && certificate.is_none() {
+            return Err(PrimadbError::Crypto(format!(
+                "writing owned path `{path}` requires the owner or a valid certificate"
+            )));
+        }
+        self.security
+            .sign_data_value(path, scalar, certificate.map(str::to_owned))
     }
 
     fn delete_field(&mut self, node: &str, field: &str) {
@@ -1771,7 +2113,12 @@ impl Inner {
         accepted
     }
 
-    fn materialize_node(&self, node: &str, visited: &mut BTreeSet<NodeId>) -> JsonValue {
+    fn materialize_node(
+        &self,
+        node: &str,
+        _path: &str,
+        visited: &mut BTreeSet<NodeId>,
+    ) -> JsonValue {
         if !visited.insert(node.to_owned()) {
             return JsonValue::Object(Map::from_iter([(
                 "$ref".to_owned(),
@@ -1783,7 +2130,10 @@ impl Inner {
             let mut object = Map::new();
             object.insert("$id".to_owned(), JsonValue::String(state.id.clone()));
             for (field, state) in &state.fields {
-                object.insert(field.clone(), self.materialize_field(&state.value, visited));
+                object.insert(
+                    field.clone(),
+                    self.materialize_field(node, field, &state.value, visited),
+                );
             }
             JsonValue::Object(object)
         } else {
@@ -1797,19 +2147,42 @@ impl Inner {
         output
     }
 
-    fn materialize_field(&self, value: &FieldValue, visited: &mut BTreeSet<NodeId>) -> JsonValue {
+    fn materialize_field(
+        &self,
+        node: &str,
+        field: &str,
+        value: &FieldValue,
+        visited: &mut BTreeSet<NodeId>,
+    ) -> JsonValue {
+        let field_path = format!("{node}/{field}");
         match value {
-            FieldValue::Scalar(value) => value.clone(),
-            FieldValue::Link(target) => self.materialize_node(target, visited),
+            FieldValue::Scalar(value) => self.materialize_scalar(&field_path, value),
+            FieldValue::Link(target) => self.materialize_node(target, target, visited),
             FieldValue::Set(set) => JsonValue::Object(Map::from_iter([(
                 "$set".to_owned(),
                 JsonValue::Array(
                     set.members
                         .keys()
-                        .map(|member| self.materialize_node(member, visited))
+                        .map(|member| self.materialize_node(member, member, visited))
                         .collect(),
                 ),
             )])),
+        }
+    }
+
+    fn materialize_scalar(&self, path: &str, value: &JsonValue) -> JsonValue {
+        #[cfg(feature = "crypto")]
+        {
+            return match self.security.verify_data_value(path, value) {
+                Ok(Some(value)) => value,
+                Ok(None) | Err(_) => JsonValue::Null,
+            };
+        }
+
+        #[cfg(not(feature = "crypto"))]
+        {
+            let _ = path;
+            value.clone()
         }
     }
 
@@ -1822,7 +2195,12 @@ impl Inner {
                     .iter()
                     .map(|(field, state)| MapEntry {
                         key: field.clone(),
-                        value: self.materialize_field(&state.value, &mut BTreeSet::new()),
+                        value: self.materialize_field(
+                            node,
+                            field,
+                            &state.value,
+                            &mut BTreeSet::new(),
+                        ),
                     })
                     .collect()
             })
@@ -1853,7 +2231,7 @@ impl Inner {
             output.push(LexEntry {
                 path: path.clone(),
                 key: field.clone(),
-                value: self.materialize_field(&field_state.value, &mut BTreeSet::new()),
+                value: self.materialize_field(node, field, &field_state.value, &mut BTreeSet::new()),
             });
 
             if !spec.follow_links || remaining_depth <= 1 {
@@ -1913,7 +2291,7 @@ impl Inner {
                     output.push(LexEntry {
                         path: path.clone(),
                         key: member.clone(),
-                        value: self.materialize_node(member, &mut BTreeSet::new()),
+                        value: self.materialize_node(member, member, &mut BTreeSet::new()),
                     });
                     if spec.follow_links && remaining_depth > 1 {
                         self.collect_lex_from_node(member, &path, spec, remaining_depth - 1, output);
@@ -2030,6 +2408,194 @@ fn zero_marker() -> VersionMarker {
 
 fn derived_child_id(parent: &str, field: &str) -> String {
     format!("{parent}/{field}")
+}
+
+fn node_matches_root(node_id: &str, root: &str) -> bool {
+    node_id == root || node_id.starts_with(&format!("{root}/"))
+}
+
+fn operation_matches_root(op: &Operation, root: &str) -> bool {
+    match &op.action {
+        OperationAction::SetField { node, .. }
+        | OperationAction::AddSetMember { node, .. }
+        | OperationAction::RemoveSetMember { node, .. }
+        | OperationAction::DeleteField { node, .. } => node_matches_root(node, root),
+    }
+}
+
+fn build_pull_responses(
+    request_id: &str,
+    result: RemoteResult,
+    limits: &PrimadbLimits,
+) -> Vec<PullResponse> {
+    match result {
+        RemoteResult::Get { value } => vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::Get { value },
+        }],
+        RemoteResult::Map { entries } => build_map_chunk_responses(
+            request_id,
+            entries,
+            limits.max_query_entries_per_chunk.max(1),
+        ),
+        RemoteResult::Query { entries } => build_query_chunk_responses(
+            request_id,
+            entries,
+            limits.max_query_entries_per_chunk.max(1),
+        ),
+        RemoteResult::Lex { entries } => build_lex_chunk_responses(
+            request_id,
+            entries,
+            limits.max_query_entries_per_chunk.max(1),
+        ),
+        RemoteResult::Snapshot { snapshot } => {
+            let node_chunks =
+                chunk_btree_map(snapshot.nodes, limits.max_snapshot_nodes_per_chunk.max(1));
+            let op_chunks = chunk_vec(snapshot.pending_ops, limits.max_snapshot_ops_per_chunk.max(1));
+            let total = node_chunks.len().max(op_chunks.len()).max(1);
+            let total_u32 = total as u32;
+            (0..total)
+                .map(|index| PullResponse {
+                    request_id: request_id.to_owned(),
+                    chunk: PullChunk {
+                        index: index as u32,
+                        total: total_u32,
+                    },
+                    done: index + 1 == total,
+                    result: PullResponseBody::Snapshot {
+                        clock: (index == 0).then_some(snapshot.clock.clone()),
+                        nodes: node_chunks.get(index).cloned().unwrap_or_default(),
+                        pending_ops: op_chunks.get(index).cloned().unwrap_or_default(),
+                    },
+                })
+                .collect()
+        }
+    }
+}
+
+fn build_map_chunk_responses(
+    request_id: &str,
+    entries: Vec<MapEntry>,
+    chunk_size: usize,
+) -> Vec<PullResponse> {
+    let chunks = chunk_vec(entries, chunk_size);
+    if chunks.is_empty() {
+        return vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::Map { entries: Vec::new() },
+        }];
+    }
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, entries)| PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk {
+                index: index as u32,
+                total: total as u32,
+            },
+            done: index + 1 == total,
+            result: PullResponseBody::Map { entries },
+        })
+        .collect()
+}
+
+fn build_query_chunk_responses(
+    request_id: &str,
+    entries: Vec<MapEntry>,
+    chunk_size: usize,
+) -> Vec<PullResponse> {
+    let chunks = chunk_vec(entries, chunk_size);
+    if chunks.is_empty() {
+        return vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::Query { entries: Vec::new() },
+        }];
+    }
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, entries)| PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk {
+                index: index as u32,
+                total: total as u32,
+            },
+            done: index + 1 == total,
+            result: PullResponseBody::Query { entries },
+        })
+        .collect()
+}
+
+fn build_lex_chunk_responses(
+    request_id: &str,
+    entries: Vec<LexEntry>,
+    chunk_size: usize,
+) -> Vec<PullResponse> {
+    let chunks = chunk_vec(entries, chunk_size);
+    if chunks.is_empty() {
+        return vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::Lex { entries: Vec::new() },
+        }];
+    }
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, entries)| PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk {
+                index: index as u32,
+                total: total as u32,
+            },
+            done: index + 1 == total,
+            result: PullResponseBody::Lex { entries },
+        })
+        .collect()
+}
+
+fn chunk_vec<T: Clone>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    items
+        .chunks(chunk_size.max(1))
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+fn chunk_btree_map<K, V>(items: BTreeMap<K, V>, chunk_size: usize) -> Vec<BTreeMap<K, V>>
+where
+    K: Ord + Clone,
+    V: Clone,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = BTreeMap::new();
+    for (index, (key, value)) in items.into_iter().enumerate() {
+        current.insert(key, value);
+        if (index + 1) % chunk_size.max(1) == 0 {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn matches_filter(entry: &MapEntry, filter: &QueryFilter) -> bool {
@@ -2157,7 +2723,10 @@ fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Primadb;
-    use crate::{QueryDirection, Result};
+    use crate::{
+        PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec,
+        RemotePath, Result,
+    };
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2501,6 +3070,67 @@ mod tests {
         assert!(second.pending_operations().is_empty());
         let value = second.root("docs").field("hello").once_json()?.unwrap();
         assert_eq!(value["value"], "world");
+        Ok(())
+    }
+
+    #[test]
+    fn remote_pull_requests_and_chunked_responses_cover_large_query_and_snapshot_results() -> Result<()> {
+        let db = Primadb::with_replica_id("pull-source");
+        let notes = db.root("boards").field("shared").field("notes");
+        for index in 0..90 {
+            notes.set(json!({
+                "title": format!("Chunk note {index}"),
+                "body": "remote pull proof",
+                "archived": false,
+                "created_at": index,
+            }))?;
+        }
+
+        let path = RemotePath::new("boards", vec!["shared".to_owned(), "notes".to_owned()]);
+        let query_chunks = db.chunk_remote_result(
+            "query-1",
+            db.execute_pull_request(&PullRequest {
+                request_id: "query-1".to_owned(),
+                request: PullRequestKind::Query {
+                    path: path.clone(),
+                    spec: QuerySpec {
+                        filters: vec![QueryFilter::Eq {
+                            path: "archived".to_owned(),
+                            value: json!(false),
+                        }],
+                        order: None,
+                        limit: Some(200),
+                        offset: 0,
+                    },
+                },
+            })?,
+        );
+        assert!(query_chunks.len() > 1);
+        let query_count = query_chunks
+            .iter()
+            .map(|response| match &response.result {
+                PullResponseBody::Query { entries } => entries.len(),
+                other => panic!("unexpected query chunk: {other:?}"),
+            })
+            .sum::<usize>();
+        assert_eq!(query_count, 90);
+
+        let snapshot_chunks = db.chunk_remote_result(
+            "snapshot-1",
+            db.execute_pull_request(&PullRequest {
+                request_id: "snapshot-1".to_owned(),
+                request: PullRequestKind::Snapshot { root: None },
+            })?,
+        );
+        assert!(snapshot_chunks.len() > 1);
+        let snapshot_nodes = snapshot_chunks
+            .iter()
+            .map(|response| match &response.result {
+                PullResponseBody::Snapshot { nodes, .. } => nodes.len(),
+                other => panic!("unexpected snapshot chunk: {other:?}"),
+            })
+            .sum::<usize>();
+        assert!(snapshot_nodes >= 90);
         Ok(())
     }
 }

@@ -7,6 +7,9 @@ It demonstrates:
 - Primadb compiled to WebAssembly.
 - Automatic IndexedDB persistence hooks.
 - Primadb's built-in `WebSocketSync` ack/retry/requeue behavior.
+- Peer recommendations delivered by the relay.
+- Remote `get`, `query`, `lex`, and `snapshot` requests over the routed wire protocol.
+- Chunked query/snapshot reply assembly in the browser.
 - A shared note list replicated between multiple browsers.
 - Query filters and reactive UI rendering.
 
@@ -34,5 +37,5 @@ cargo run --example ws_relay_server -- 127.0.0.1:9010
 
 ## Notes
 
-- The relay is intentionally dumb: it forwards text frames and relies on Primadb's sync framing to handle idempotence and acknowledgments.
+- Use the “Seed 90 notes” and “Probe remote peer” controls to force large remote query/snapshot replies and verify chunked response assembly.
 - Archiving removes the note from the underlying Primadb set membership.

@@ -1,5 +1,8 @@
-use crate::Operation;
+use crate::value::{NodeId, NodeState};
+use crate::{DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncEnvelope {
@@ -20,4 +23,137 @@ pub enum SyncFrame {
         message_id: String,
         applied: usize,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemotePath {
+    pub anchor: String,
+    #[serde(default)]
+    pub segments: Vec<String>,
+}
+
+impl RemotePath {
+    pub fn new(anchor: impl Into<String>, segments: Vec<String>) -> Self {
+        Self {
+            anchor: anchor.into(),
+            segments,
+        }
+    }
+
+    pub fn path(&self) -> String {
+        if self.segments.is_empty() {
+            self.anchor.clone()
+        } else {
+            format!("{}/{}", self.anchor, self.segments.join("/"))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PullRequestKind {
+    Get { path: RemotePath },
+    Map { path: RemotePath },
+    Query { path: RemotePath, spec: QuerySpec },
+    Lex { path: RemotePath, spec: LexSpec },
+    Snapshot { root: Option<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PullRequest {
+    pub request_id: String,
+    pub request: PullRequestKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PullChunk {
+    pub index: u32,
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PullResponseBody {
+    Get {
+        value: Option<JsonValue>,
+    },
+    Map {
+        entries: Vec<MapEntry>,
+    },
+    Query {
+        entries: Vec<MapEntry>,
+    },
+    Lex {
+        entries: Vec<LexEntry>,
+    },
+    Snapshot {
+        #[serde(default)]
+        clock: Option<HybridClock>,
+        #[serde(default)]
+        nodes: BTreeMap<NodeId, NodeState>,
+        #[serde(default)]
+        pending_ops: Vec<Operation>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PullResponse {
+    pub request_id: String,
+    pub chunk: PullChunk,
+    pub done: bool,
+    pub result: PullResponseBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemoteResult {
+    Get {
+        value: Option<JsonValue>,
+    },
+    Map {
+        entries: Vec<MapEntry>,
+    },
+    Query {
+        entries: Vec<MapEntry>,
+    },
+    Lex {
+        entries: Vec<LexEntry>,
+    },
+    Snapshot {
+        snapshot: DatabaseSnapshot,
+    },
+}
+
+impl PullRequestKind {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Get { .. } => "get",
+            Self::Map { .. } => "map",
+            Self::Query { .. } => "query",
+            Self::Lex { .. } => "lex",
+            Self::Snapshot { .. } => "snapshot",
+        }
+    }
+}
+
+impl PullResponse {
+    pub fn is_final(&self) -> bool {
+        self.done || self.chunk.index.saturating_add(1) >= self.chunk.total
+    }
+}
+
+pub fn stable_content_hash<T>(value: &T) -> Option<String>
+where
+    T: Serialize,
+{
+    let bytes = serde_json::to_vec(value).ok()?;
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some(format!("{hash:016x}"))
 }

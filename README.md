@@ -20,10 +20,11 @@
 - Async IndexedDB save/load helpers in the WASM bindings.
 - Automatic IndexedDB persistence hook in the WASM bindings.
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
-- Routed transport envelopes with presence, signaling, snapshot request/response, TTL, and dedupe.
+- Routed transport envelopes with presence, signaling, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
 - Browser peer discovery over `BroadcastChannel` plus direct WebRTC mesh sync.
 - Optional native WebSocket sync adapter behind the `native-websocket` feature.
 - Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.
+- Data-level auth in the core database for signed user-owned fields, certificate-authorized delegated writes, and read-time signature verification/unwrapping.
 - Gun-compatible browser runtime in [js/primadb-gun.js](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
 - SEA-style browser crypto surface with pair generation, password work, sign/verify, encrypt/decrypt, shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
@@ -145,6 +146,10 @@ The browser `WebSocketSync` helper adds:
 
 - `sync` frames with message IDs.
 - `ack` frames with applied counts.
+- typed remote `get` / `query` / `lex` / `snapshot` pull requests and responses.
+- batched route payloads and chunked reply assembly for large query and snapshot results.
+- `reply_to`, content-hash, and `seen_by` metadata for better relay dedupe and loop suppression.
+- peer recommendation exchange alongside presence.
 - automatic resend of unacked messages on an interval.
 - requeue of in-flight operations if the socket closes or send fails.
 
@@ -231,8 +236,10 @@ Available pieces include:
 - `Identity` / `PublicIdentity` for Ed25519 signing and verification.
 - `SeaPair` for Gun-style `{ pub, epub, priv, epriv }` key material.
 - `SignedPayload<T>` for signed JSON payloads such as `SyncFrame`.
+- `SignedValueClaims` and `DataCertificate` for field-level auth in owned user graphs.
 - `SecretBoxKey` / `EncryptedPayload` for XChaCha20-Poly1305 JSON encryption.
 - `register_user(...)` / `authenticate_local_user(...)` on `Primadb`.
+- `Chain::put_signed(...)`, `Chain::set_signed(...)`, and `create_write_certificate(...)`.
 - `set_require_signed_sync(...)`, `set_transport_encryption_key(...)`, and `set_snapshot_encryption_key(...)`.
 - browser `generateSeaPair()`, `seaPairFromPrivateKeys()`, `seaSign()`, `seaVerify()`, `seaEncrypt()`, `seaDecrypt()`, and `seaSecret()` WASM exports behind `crypto`
 
@@ -241,17 +248,20 @@ Available pieces include:
 Primadb now routes transport messages through `RouteEnvelope` with:
 
 - peer presence announcements
+- peer recommendation exchange
 - routed sync payloads
+- routed pull request/response payloads
+- batch payloads for grouped route delivery
 - signaling payloads
 - snapshot request/response
-- TTL and dedupe tracking
+- reply correlation, content hashes, seen-by hints, TTL, and dedupe tracking
 
 The browser build also includes `connectWebRtcMesh(...)`, which uses `BroadcastChannel` for local peer discovery/signaling and WebRTC data channels for direct sync.
 
 The included relay example upgrades that into a networked DAM-style path:
 
 - browsers announce presence to the relay
-- new clients receive the current peer set on connect
+- new clients receive the current peer set plus peer recommendations on connect
 - targeted `peer` routes are forwarded only to the addressed client
 - disconnects broadcast offline presence so peer lists converge
 
@@ -283,8 +293,10 @@ Primadb supports:
 
 ```bash
 cargo test
-cargo test --features crypto
+cargo test --features "crypto native-websocket"
 cargo check --target wasm32-unknown-unknown --features crypto
+cargo check --example ws_relay_server --features crypto
+./examples/browser-relay-notes/build.sh
 ./examples/browser-gun-notes/build.sh
 ```
 
@@ -298,7 +310,14 @@ The Gun runtime demo was verified in the built-in browser context as well:
 
 - a second same-origin client joined through the relay and both clients reported discovered peers
 - a note created by the second client appeared in the first client's `gun.get(...).get(...).set(...)` collection
+- a signed profile written through the Gun runtime was stored as SEA envelopes in the raw Primadb snapshot and still read back correctly through the runtime
 - `Gun.SEA.sign(...)` and `Gun.SEA.verify(...)` succeeded in-browser during the same run
+
+The relay example was verified in the built-in browser context with a hidden same-origin second client:
+
+- both clients discovered each other through peer recommendations
+- `remoteGet()`, `remoteQuery()`, `remoteLex()`, and `remoteSnapshot()` succeeded over the relay
+- query and full-database snapshot responses crossed the chunk thresholds and were reassembled correctly in-browser
 
 ## Coverage
 
@@ -307,6 +326,10 @@ The originally identified gaps are now covered by concrete subsystems in this re
 - Gun-compatible browser runtime
 - SEA-style `user()` and browser crypto surface
 - DAM-style relay routing and internet-scale peer discovery/signaling
+- remote pull/query over the wire
+- batched routes plus chunked query/snapshot replies
+- reply correlation and content-hash dedupe hints
+- data-level signed field auth and delegated certificates in the core
 - browser relay sync without `BroadcastChannel`
 - lexical/range traversal
 - RADisk-style storage adapters
