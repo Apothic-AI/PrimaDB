@@ -556,6 +556,85 @@ impl WasmPrimadb {
     }
 }
 
+#[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = generateSeaPair)]
+pub fn generate_sea_pair() -> std::result::Result<JsValue, JsValue> {
+    to_js(&crate::SeaPair::generate())
+}
+
+#[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = seaPairFromPrivateKeys)]
+pub fn sea_pair_from_private_keys(
+    secret_key_base64: String,
+    encryption_secret_key_base64: String,
+) -> std::result::Result<JsValue, JsValue> {
+    to_js(
+        &crate::SeaPair::from_private_keys(&secret_key_base64, &encryption_secret_key_base64)
+            .map_err(to_js_error)?,
+    )
+}
+
+#[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = seaSign)]
+pub fn sea_sign(pair: JsValue, payload: JsValue) -> std::result::Result<JsValue, JsValue> {
+    let pair: crate::SeaPair =
+        serde_wasm_bindgen::from_value(pair).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let payload = js_to_json(payload)?;
+    let signed = pair.sign_payload(payload).map_err(to_js_error)?;
+    to_js(&signed)
+}
+
+#[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = seaVerify)]
+pub fn sea_verify(
+    public_key_base64: String,
+    signed: JsValue,
+) -> std::result::Result<JsValue, JsValue> {
+    let signed: crate::SignedPayload<JsonValue> = serde_wasm_bindgen::from_value(signed)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let identity = crate::PublicIdentity::from_base64(&public_key_base64).map_err(to_js_error)?;
+    identity.verify_payload(&signed).map_err(to_js_error)?;
+    to_js(&signed.payload)
+}
+
+#[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = seaSecret)]
+pub fn sea_secret(
+    pair: JsValue,
+    other_epub_base64: String,
+) -> std::result::Result<String, JsValue> {
+    let pair: crate::SeaPair =
+        serde_wasm_bindgen::from_value(pair).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let shared = pair
+        .derive_secret_box(&other_epub_base64)
+        .map_err(to_js_error)?;
+    Ok(shared.to_base64())
+}
+
+#[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = seaEncrypt)]
+pub fn sea_encrypt(
+    key_base64: String,
+    payload: JsValue,
+) -> std::result::Result<JsValue, JsValue> {
+    let key = crate::SecretBoxKey::from_base64(&key_base64).map_err(to_js_error)?;
+    let encrypted = key.encrypt_json(&js_to_json(payload)?).map_err(to_js_error)?;
+    to_js(&encrypted)
+}
+
+#[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = seaDecrypt)]
+pub fn sea_decrypt(
+    key_base64: String,
+    payload: JsValue,
+) -> std::result::Result<JsValue, JsValue> {
+    let key = crate::SecretBoxKey::from_base64(&key_base64).map_err(to_js_error)?;
+    let payload: crate::EncryptedPayload = serde_wasm_bindgen::from_value(payload)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let decrypted: JsonValue = key.decrypt_json(&payload).map_err(to_js_error)?;
+    to_js(&decrypted)
+}
+
 #[wasm_bindgen(js_class = Chain)]
 impl WasmChain {
     pub fn field(&self, key: String) -> WasmChain {

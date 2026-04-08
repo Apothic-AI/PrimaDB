@@ -29,7 +29,7 @@ pub use auth::{
 };
 pub use compat::{Gun, GunChain, GunCompatOptions};
 #[cfg(feature = "crypto")]
-pub use crypto::{EncryptedPayload, Identity, PublicIdentity, SecretBoxKey, SignedPayload};
+pub use crypto::{EncryptedPayload, Identity, PublicIdentity, SeaPair, SecretBoxKey, SignedPayload};
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, Primadb, QueryBuilder,
     Subscription,

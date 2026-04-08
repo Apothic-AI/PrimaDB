@@ -14,6 +14,7 @@ crypto = [
     "dep:ed25519-dalek",
     "dep:getrandom",
     "dep:rand_core",
+    "dep:x25519-dalek",
 ]
 native-websocket = [
     "dep:futures-util",
@@ -37,6 +38,7 @@ getrandom = { version = "0.2", features = ["js"], optional = true }
 rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-tungstenite = { version = "0.26", optional = true }
+x25519-dalek = { version = "2.0", features = ["static_secrets"], optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"

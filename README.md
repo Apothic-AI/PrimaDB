@@ -24,6 +24,8 @@
 - Browser peer discovery over `BroadcastChannel` plus direct WebRTC mesh sync.
 - Optional native WebSocket sync adapter behind the `native-websocket` feature.
 - Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.
+- Gun-compatible browser runtime in [js/primadb-gun.js](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
+- SEA-style browser crypto surface with pair generation, password work, sign/verify, encrypt/decrypt, shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
 - Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
 - Gun compatibility surface with `Gun` / `GunChain`, Gun link markers, and Gun graph import/export helpers.
@@ -146,12 +148,20 @@ The browser `WebSocketSync` helper adds:
 - automatic resend of unacked messages on an interval.
 - requeue of in-flight operations if the socket closes or send fails.
 
+The Gun-compatible runtime layers a DAM-style browser relay client on top of those same primitives:
+
+- peer presence and discovery over the relay
+- targeted routing and signal payloads
+- sync/ack over the relay without `BroadcastChannel`
+- current Gun-style session recall and browser `user()` flows
+
 ## Examples
 
 - [examples/browser-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-notes/README.md): Browser-only local-first board with IndexedDB persistence and cross-tab sync over `BroadcastChannel`.
 - [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's `WebSocketSync` API and the included relay server.
 - [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Browser board using Primadb's `WebRtcMesh` API, peer discovery over `BroadcastChannel`, and direct WebRTC data-channel sync.
-- [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): Minimal Rust WebSocket relay, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
+- [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the DAM relay.
+- [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
 - [examples/native_relay_client.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
 - [examples/crypto_foundation.rs](/home/bitnom/Code/gunport/primadb/examples/crypto_foundation.rs): Signing and encryption primitives, runnable with `cargo run --features crypto --example crypto_foundation`.
 - [examples/authenticated_sync.rs](/home/bitnom/Code/gunport/primadb/examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
@@ -219,10 +229,12 @@ cargo run --features crypto --example crypto_foundation
 Available pieces include:
 
 - `Identity` / `PublicIdentity` for Ed25519 signing and verification.
+- `SeaPair` for Gun-style `{ pub, epub, priv, epriv }` key material.
 - `SignedPayload<T>` for signed JSON payloads such as `SyncFrame`.
 - `SecretBoxKey` / `EncryptedPayload` for XChaCha20-Poly1305 JSON encryption.
 - `register_user(...)` / `authenticate_local_user(...)` on `Primadb`.
 - `set_require_signed_sync(...)`, `set_transport_encryption_key(...)`, and `set_snapshot_encryption_key(...)`.
+- browser `generateSeaPair()`, `seaPairFromPrivateKeys()`, `seaSign()`, `seaVerify()`, `seaEncrypt()`, `seaDecrypt()`, and `seaSecret()` WASM exports behind `crypto`
 
 ## Routing and Mesh
 
@@ -235,6 +247,13 @@ Primadb now routes transport messages through `RouteEnvelope` with:
 - TTL and dedupe tracking
 
 The browser build also includes `connectWebRtcMesh(...)`, which uses `BroadcastChannel` for local peer discovery/signaling and WebRTC data channels for direct sync.
+
+The included relay example upgrades that into a networked DAM-style path:
+
+- browsers announce presence to the relay
+- new clients receive the current peer set on connect
+- targeted `peer` routes are forwarded only to the addressed client
+- disconnects broadcast offline presence so peer lists converge
 
 ## Native Sync
 
@@ -264,24 +283,31 @@ Primadb supports:
 
 ```bash
 cargo test
-cargo check --target wasm32-unknown-unknown
-cargo test --features "crypto native-websocket"
+cargo test --features crypto
+cargo check --target wasm32-unknown-unknown --features crypto
+./examples/browser-gun-notes/build.sh
 ```
 
-The browser mesh example was also verified in a clean two-tab browser run:
+The browser mesh example was verified in a clean two-tab browser run:
 
 - both tabs reached `connected to 1 peer over WebRTC`
 - a note created in one tab appeared in the other
 - both tabs remained responsive after sync
 
+The Gun runtime demo was verified in the built-in browser context as well:
+
+- a second same-origin client joined through the relay and both clients reported discovered peers
+- a note created by the second client appeared in the first client's `gun.get(...).get(...).set(...)` collection
+- `Gun.SEA.sign(...)` and `Gun.SEA.verify(...)` succeeded in-browser during the same run
+
 ## Coverage
 
 The originally identified gaps are now covered by concrete subsystems in this repo:
 
-- integrated auth/user policies
-- routed networking
-- browser peer discovery and WebRTC mesh sync
-- RADisk-style storage adapters
+- Gun-compatible browser runtime
+- SEA-style `user()` and browser crypto surface
+- DAM-style relay routing and internet-scale peer discovery/signaling
+- browser relay sync without `BroadcastChannel`
 - lexical/range traversal
-- Gun compatibility helpers
-- hardening controls and example integrations
+- RADisk-style storage adapters
+- browser and native example integrations

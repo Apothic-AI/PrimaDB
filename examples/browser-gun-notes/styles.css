@@ -1,0 +1,292 @@
+:root {
+  --bg: #f1eee6;
+  --paper: rgba(255, 252, 245, 0.92);
+  --ink: #231f1a;
+  --muted: #716556;
+  --line: rgba(35, 31, 26, 0.12);
+  --accent: #b24f2b;
+  --accent-soft: rgba(178, 79, 43, 0.14);
+  --good: #2d6a4f;
+  --shadow: 0 18px 48px rgba(35, 31, 26, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family:
+    "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(178, 79, 43, 0.16), transparent 32%),
+    linear-gradient(180deg, #f7f3ea 0%, var(--bg) 100%);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.shell {
+  width: min(1200px, calc(100vw - 2rem));
+  margin: 0 auto;
+  padding: 2rem 0 3rem;
+}
+
+.hero {
+  display: grid;
+  gap: 1.5rem;
+  align-items: end;
+  margin-bottom: 1.5rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  max-width: 12ch;
+  font-size: clamp(2.5rem, 5vw, 4.5rem);
+  line-height: 0.94;
+}
+
+.lede {
+  max-width: 58ch;
+  margin-top: 1rem;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.55;
+}
+
+.status-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.status-card,
+.panel {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: var(--shadow);
+}
+
+.status-card {
+  padding: 1rem 1.1rem;
+}
+
+.label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.layout {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.panel {
+  padding: 1.25rem;
+}
+
+.stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.panel-header {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: start;
+}
+
+.panel-header.compact {
+  align-items: center;
+}
+
+.detail {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.field {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.field span {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.field.compact {
+  min-width: 260px;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.86);
+  padding: 0.85rem 0.95rem;
+  color: var(--ink);
+}
+
+input:focus,
+textarea:focus {
+  outline: 2px solid rgba(178, 79, 43, 0.18);
+  outline-offset: 2px;
+}
+
+.button-row {
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.82rem 1rem;
+  background: var(--ink);
+  color: #fff8f2;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    opacity 120ms ease,
+    background 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+#create-button,
+#save-profile-button,
+#note-submit {
+  background: var(--accent);
+}
+
+.note-meta {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 0.75rem 0;
+}
+
+.note-list {
+  list-style: none;
+  display: grid;
+  gap: 0.85rem;
+  margin: 0;
+  padding: 0;
+}
+
+.note-card {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.84);
+  padding: 1rem;
+}
+
+.note-card.is-done {
+  border-color: rgba(45, 106, 79, 0.24);
+  background: rgba(45, 106, 79, 0.08);
+}
+
+.note-copy {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.note-topline {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.note-author,
+.note-time {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.note-body {
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.toggle-note {
+  min-width: 120px;
+  background: rgba(35, 31, 26, 0.84);
+}
+
+.empty-state {
+  padding: 1rem;
+  border-radius: 16px;
+  background: var(--accent-soft);
+  color: var(--muted);
+}
+
+@media (min-width: 960px) {
+  .hero {
+    grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr);
+  }
+
+  .layout {
+    grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .shell {
+    width: min(100vw - 1rem, 100%);
+    padding-top: 1rem;
+  }
+
+  .panel-header,
+  .note-meta,
+  .note-card,
+  .note-topline {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .field.compact {
+    min-width: 0;
+  }
+}

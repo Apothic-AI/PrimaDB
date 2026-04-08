@@ -6,6 +6,7 @@ use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SignedPayload<T> {
@@ -33,6 +34,16 @@ pub struct PublicIdentity {
 #[derive(Debug, Clone)]
 pub struct SecretBoxKey {
     key_bytes: [u8; 32],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SeaPair {
+    #[serde(rename = "pub")]
+    pub public_key: String,
+    pub epub: String,
+    #[serde(rename = "priv")]
+    pub secret_key: String,
+    pub epriv: String,
 }
 
 impl Identity {
@@ -183,6 +194,60 @@ impl SecretBoxKey {
     }
 }
 
+impl SeaPair {
+    pub fn generate() -> Self {
+        let identity = Identity::generate();
+        let encryption_secret = X25519StaticSecret::random_from_rng(OsRng);
+        let encryption_public = X25519PublicKey::from(&encryption_secret);
+        Self {
+            public_key: identity.public_key_base64(),
+            epub: Base64UrlUnpadded::encode_string(encryption_public.as_bytes()),
+            secret_key: identity.secret_key_base64(),
+            epriv: Base64UrlUnpadded::encode_string(encryption_secret.as_bytes()),
+        }
+    }
+
+    pub fn from_private_keys(secret_key: &str, encryption_secret_key: &str) -> Result<Self> {
+        let identity = Identity::from_secret_key_base64(secret_key)?;
+        let encryption_secret = x25519_secret_from_base64(encryption_secret_key)?;
+        let encryption_public = X25519PublicKey::from(&encryption_secret);
+        Ok(Self {
+            public_key: identity.public_key_base64(),
+            epub: Base64UrlUnpadded::encode_string(encryption_public.as_bytes()),
+            secret_key: secret_key.to_owned(),
+            epriv: encryption_secret_key.to_owned(),
+        })
+    }
+
+    pub fn identity(&self) -> Result<Identity> {
+        Identity::from_secret_key_base64(&self.secret_key)
+    }
+
+    pub fn public_identity(&self) -> Result<PublicIdentity> {
+        PublicIdentity::from_base64(&self.public_key)
+    }
+
+    pub fn sign_payload<T>(&self, payload: T) -> Result<SignedPayload<T>>
+    where
+        T: Serialize,
+    {
+        self.identity()?.sign_payload(payload)
+    }
+
+    pub fn derive_secret_box(&self, other_epub: &str) -> Result<SecretBoxKey> {
+        let encryption_secret = x25519_secret_from_base64(&self.epriv)?;
+        let other_public = x25519_public_from_base64(other_epub)?;
+        let shared = encryption_secret.diffie_hellman(&other_public);
+        Ok(SecretBoxKey::from_bytes(shared.to_bytes()))
+    }
+}
+
+impl Default for SeaPair {
+    fn default() -> Self {
+        Self::generate()
+    }
+}
+
 impl Default for SecretBoxKey {
     fn default() -> Self {
         Self::generate()
@@ -201,9 +266,17 @@ fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N]> {
     })
 }
 
+fn x25519_secret_from_base64(value: &str) -> Result<X25519StaticSecret> {
+    Ok(X25519StaticSecret::from(decode_fixed::<32>(value)?))
+}
+
+fn x25519_public_from_base64(value: &str) -> Result<X25519PublicKey> {
+    Ok(X25519PublicKey::from(decode_fixed::<32>(value)?))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Identity, SecretBoxKey};
+    use super::{Identity, SeaPair, SecretBoxKey};
     use crate::SyncFrame;
     use serde_json::json;
 
@@ -245,5 +318,14 @@ mod tests {
         let decrypted: serde_json::Value = key.decrypt_json(&encrypted).unwrap();
         assert_eq!(decrypted["title"], "Encrypted");
         assert_eq!(decrypted["done"], false);
+    }
+
+    #[test]
+    fn sea_pair_derives_shared_secret() {
+        let alice = SeaPair::generate();
+        let bob = SeaPair::generate();
+        let alice_secret = alice.derive_secret_box(&bob.epub).unwrap();
+        let bob_secret = bob.derive_secret_box(&alice.epub).unwrap();
+        assert_eq!(alice_secret.to_base64(), bob_secret.to_base64());
     }
 }

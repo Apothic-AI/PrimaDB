@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Primadb Gun Runtime Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Primadb Gun Runtime</p>
+          <h1>Gun-style browser app on top of Primadb WASM</h1>
+          <p class="lede">
+            This example uses the Gun-compatible runtime surface, SEA-style users,
+            and the DAM relay for peer discovery plus sync.
+          </p>
+        </div>
+        <div class="status-grid">
+          <article class="status-card">
+            <span class="label">Replica</span>
+            <strong id="replica-id">loading</strong>
+          </article>
+          <article class="status-card">
+            <span class="label">Peers</span>
+            <strong id="peer-count">0</strong>
+          </article>
+          <article class="status-card">
+            <span class="label">Pending</span>
+            <strong id="pending-count">0</strong>
+          </article>
+          <article class="status-card">
+            <span class="label">Inflight</span>
+            <strong id="inflight-count">0</strong>
+          </article>
+        </div>
+      </section>
+
+      <section class="layout">
+        <aside class="panel stack">
+          <div class="panel-header">
+            <h2>User</h2>
+            <p id="auth-status">signed out</p>
+          </div>
+
+          <label class="field">
+            <span>Alias</span>
+            <input id="alias-input" autocomplete="username" value="alice" />
+          </label>
+
+          <label class="field">
+            <span>Password</span>
+            <input
+              id="password-input"
+              type="password"
+              autocomplete="current-password"
+              value="correct horse battery staple"
+            />
+          </label>
+
+          <div class="button-row">
+            <button id="create-button" type="button">Create</button>
+            <button id="login-button" type="button">Login</button>
+            <button id="recall-button" type="button">Recall</button>
+            <button id="logout-button" type="button">Logout</button>
+          </div>
+
+          <p class="detail" id="auth-detail">
+            Create or recall a user, then edit the signed profile data below.
+          </p>
+
+          <form id="profile-form" class="stack">
+            <div class="panel-header compact">
+              <h3>Signed Profile</h3>
+              <p id="profile-state">waiting for login</p>
+            </div>
+
+            <label class="field">
+              <span>Display Name</span>
+              <input id="display-name-input" placeholder="Alice Example" />
+            </label>
+
+            <label class="field">
+              <span>Tagline</span>
+              <textarea
+                id="tagline-input"
+                rows="3"
+                placeholder="Signed user graph data"
+              ></textarea>
+            </label>
+
+            <button id="save-profile-button" type="submit">Save Profile</button>
+          </form>
+        </aside>
+
+        <section class="panel stack">
+          <div class="panel-header">
+            <div>
+              <h2>Shared Notes</h2>
+              <p class="detail">
+                Notes are stored with Gun-style `get().set().open()` chains and
+                synced over the relay.
+              </p>
+            </div>
+            <label class="field compact">
+              <span>Relay</span>
+              <input id="relay-url" value="ws://127.0.0.1:9010" />
+            </label>
+          </div>
+
+          <form id="note-form" class="stack">
+            <label class="field">
+              <span>Title</span>
+              <input id="note-title" placeholder="Ship the Gun runtime" />
+            </label>
+            <label class="field">
+              <span>Body</span>
+              <textarea
+                id="note-body"
+                rows="4"
+                placeholder="This note syncs to every connected browser."
+              ></textarea>
+            </label>
+            <button id="note-submit" type="submit">Add Shared Note</button>
+          </form>
+
+          <div class="note-meta">
+            <p id="notes-state">loading notes</p>
+            <p id="runtime-state" class="detail">booting runtime</p>
+          </div>
+
+          <ul id="note-list" class="note-list"></ul>
+          <p id="empty-state" class="empty-state" hidden>
+            No notes yet. Sign in and create one.
+          </p>
+        </section>
+      </section>
+    </main>
+
+    <template id="note-template">
+      <li class="note-card">
+        <div class="note-copy">
+          <div class="note-topline">
+            <h3 class="note-title"></h3>
+            <span class="note-author"></span>
+          </div>
+          <p class="note-body"></p>
+          <p class="note-time"></p>
+        </div>
+        <button class="toggle-note" type="button">Toggle Done</button>
+      </li>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

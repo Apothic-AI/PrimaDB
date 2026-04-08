@@ -230,7 +230,16 @@ impl Router {
                 inner.seen_routes.insert(envelope.route_id.clone(), seen_at);
                 trim_seen_routes(&mut inner.seen_routes, self.config.max_seen_routes);
                 if let RoutePayload::Presence { peer } = &envelope.payload {
-                    inner.peers.insert(peer.peer_id.clone(), peer.clone());
+                    if peer
+                        .metadata
+                        .get("state")
+                        .map(String::as_str)
+                        == Some("offline")
+                    {
+                        inner.peers.remove(&peer.peer_id);
+                    } else {
+                        inner.peers.insert(peer.peer_id.clone(), peer.clone());
+                    }
                 }
                 false
             }
@@ -311,6 +320,7 @@ fn trim_seen_routes(seen: &mut BTreeMap<String, u64>, max_seen_routes: usize) {
 #[cfg(test)]
 mod tests {
     use super::{RouteTarget, Router, RouterConfig};
+    use std::collections::BTreeMap;
     use serde_json::json;
 
     #[test]
@@ -321,5 +331,38 @@ mod tests {
         let second = router.accept(route);
         assert!(first.deliver);
         assert!(second.duplicate);
+    }
+
+    #[test]
+    fn offline_presence_removes_known_peer() {
+        let router = Router::new(RouterConfig::new("peer-a"));
+        let online = router.presence("replica-b", "websocket", vec![], vec![]);
+        router.accept(online);
+        assert_eq!(router.known_peers().len(), 1);
+
+        let mut offline_peer = super::PeerPresence {
+            peer_id: "peer-a".to_owned(),
+            replica_id: "replica-b".to_owned(),
+            transport: "websocket".to_owned(),
+            capabilities: Vec::new(),
+            topics: Vec::new(),
+            metadata: BTreeMap::new(),
+        };
+        offline_peer
+            .metadata
+            .insert("state".to_owned(), "offline".to_owned());
+        let offline = super::RouteEnvelope {
+            route_id: "peer-b/offline/1".to_owned(),
+            from: "relay".to_owned(),
+            channel: "primadb".to_owned(),
+            target: RouteTarget::Broadcast,
+            ttl: 1,
+            hops: 0,
+            issued_at_millis: 0,
+            payload: super::RoutePayload::Presence { peer: offline_peer },
+        };
+
+        router.accept(offline);
+        assert!(router.known_peers().is_empty());
     }
 }
