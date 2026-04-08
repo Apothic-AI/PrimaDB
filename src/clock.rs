@@ -45,7 +45,7 @@ impl PartialOrd for VersionMarker {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HybridClock {
     actor: String,
     last_millis: u64,
@@ -125,7 +125,7 @@ impl Default for HybridClock {
     }
 }
 
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
         js_sys::Date::now() as u64

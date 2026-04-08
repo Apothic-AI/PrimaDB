@@ -20,8 +20,14 @@
 - Async IndexedDB save/load helpers in the WASM bindings.
 - Automatic IndexedDB persistence hook in the WASM bindings.
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
+- Routed transport envelopes with presence, signaling, snapshot request/response, TTL, and dedupe.
+- Browser peer discovery over `BroadcastChannel` plus direct WebRTC mesh sync.
 - Optional native WebSocket sync adapter behind the `native-websocket` feature.
-- Optional crypto/auth groundwork behind the `crypto` feature.
+- Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.
+- Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
+- Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
+- Gun compatibility surface with `Gun` / `GunChain`, Gun link markers, and Gun graph import/export helpers.
+- Runtime stats and limit controls for transport and queue hardening.
 - `wasm-bindgen` bindings that compile on `wasm32-unknown-unknown`.
 
 ## Design Notes
@@ -143,9 +149,13 @@ The browser `WebSocketSync` helper adds:
 
 - [examples/browser-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-notes/README.md): Browser-only local-first board with IndexedDB persistence and cross-tab sync over `BroadcastChannel`.
 - [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's `WebSocketSync` API and the included relay server.
+- [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Browser board using Primadb's `WebRtcMesh` API, peer discovery over `BroadcastChannel`, and direct WebRTC data-channel sync.
 - [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): Minimal Rust WebSocket relay, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
 - [examples/native_relay_client.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
-- [examples/crypto_foundation.rs](/home/bitnom/Code/gunport/primadb/examples/crypto_foundation.rs): Signing and encryption demo, runnable with `cargo run --features crypto --example crypto_foundation`.
+- [examples/crypto_foundation.rs](/home/bitnom/Code/gunport/primadb/examples/crypto_foundation.rs): Signing and encryption primitives, runnable with `cargo run --features crypto --example crypto_foundation`.
+- [examples/authenticated_sync.rs](/home/bitnom/Code/gunport/primadb/examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
+- [examples/radisk_storage.rs](/home/bitnom/Code/gunport/primadb/examples/radisk_storage.rs): RADisk-style append-log storage demo, runnable with `cargo run --example radisk_storage`.
+- [examples/gun_compat.rs](/home/bitnom/Code/gunport/primadb/examples/gun_compat.rs): Gun-compatible API demo, runnable with `cargo run --example gun_compat`.
 
 ## Query Layer
 
@@ -184,31 +194,67 @@ Supported filters:
 
 Use `"$key"` to filter or sort by the entry key, and `"$value"` for the full materialized value.
 
-## Auth Groundwork
+Lexical traversal:
 
-Enable the `crypto` feature for identity, signing, and envelope-encryption primitives:
+```rust
+let entries = db
+    .root("users")
+    .field("alice")
+    .lex()
+    .follow_links(true)
+    .depth(3)
+    .prefix("p")
+    .run()?;
+```
+
+## Auth and User Policies
+
+Enable the `crypto` feature for identities, trusted users, signed sync, encrypted sync, and encrypted snapshot persistence:
 
 ```bash
 cargo run --features crypto --example crypto_foundation
 ```
 
-Available primitives include:
+Available pieces include:
 
 - `Identity` / `PublicIdentity` for Ed25519 signing and verification.
 - `SignedPayload<T>` for signed JSON payloads such as `SyncFrame`.
 - `SecretBoxKey` / `EncryptedPayload` for XChaCha20-Poly1305 JSON encryption.
+- `register_user(...)` / `authenticate_local_user(...)` on `Primadb`.
+- `set_require_signed_sync(...)`, `set_transport_encryption_key(...)`, and `set_snapshot_encryption_key(...)`.
+
+## Routing and Mesh
+
+Primadb now routes transport messages through `RouteEnvelope` with:
+
+- peer presence announcements
+- routed sync payloads
+- signaling payloads
+- snapshot request/response
+- TTL and dedupe tracking
+
+The browser build also includes `connectWebRtcMesh(...)`, which uses `BroadcastChannel` for local peer discovery/signaling and WebRTC data channels for direct sync.
 
 ## Native Sync
-
-Enable the `native-websocket` feature for a runtime-backed native relay client:
 
 ```bash
 cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010
 ```
 
+## Storage Adapters
+
+Primadb supports:
+
+- snapshot file persistence with `use_file_persistence(...)`
+- browser `localStorage` persistence with `use_browser_storage(...)`
+- explicit IndexedDB persistence hooks in WASM
+- storage adapters via `attach_storage_adapter(...)`
+- a RADisk-style file adapter with `use_radisk_storage(...)`
+
 ## Data Markers
 
 - `{"$link": "node-id"}` sets a field to an explicit graph link.
+- `{"#": "node-id"}` is accepted as a Gun-compatible link marker.
 - `{"$set": [ ... ]}` sets a field to a membership set.
 - Materialized nodes include `"$id"`.
 - Cycles are represented as `{"$ref": "node-id"}`.
@@ -221,11 +267,14 @@ cargo check --target wasm32-unknown-unknown
 cargo test --features "crypto native-websocket"
 ```
 
-## Near-Term Gaps
+## Coverage
 
-The foundation is in place, but this is not full Gun parity yet.
+The originally identified gaps are now covered by concrete subsystems in this repo:
 
-- No SEA/auth/encryption layer yet beyond the current identity/signing/encryption groundwork.
-- No peer discovery or WebRTC transport yet.
-- No lexical graph/range traversal engine yet beyond the current filter-based query layer.
-- The crypto module is groundwork only; it is not yet enforced by the sync adapters.
+- integrated auth/user policies
+- routed networking
+- browser peer discovery and WebRTC mesh sync
+- RADisk-style storage adapters
+- lexical/range traversal
+- Gun compatibility helpers
+- hardening controls and example integrations

@@ -1,11 +1,18 @@
 use crate::clock::{HybridClock, Revision, VersionMarker};
 use crate::error::{PrimadbError, Result};
+use crate::hardening::{PrimadbLimits, PrimadbStats};
 use crate::operation::{Operation, OperationAction, OperationValue};
-use crate::persistence::{PersistenceTarget, load_snapshot, store_snapshot};
-use crate::query::{QueryDirection, QueryFilter, QuerySpec};
+use crate::persistence::{PersistenceTarget, load_snapshot_payload, store_snapshot_payload};
+use crate::query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QuerySpec};
 use crate::snapshot::DatabaseSnapshot;
+use crate::storage::StorageAdapter;
 use crate::sync::{SyncEnvelope, SyncFrame};
 use crate::value::{FieldState, FieldValue, NodeId, NodeState, SetState};
+#[cfg(feature = "crypto")]
+use crate::{
+    Identity, PublicIdentity, SecretBoxKey, SecureSyncFrame, SecurityState, StoredSnapshot,
+    UserGrant,
+};
 use async_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
@@ -52,6 +59,12 @@ pub struct QueryBuilder {
     spec: QuerySpec,
 }
 
+#[derive(Debug, Clone)]
+pub struct LexBuilder {
+    chain: Chain,
+    spec: LexSpec,
+}
+
 struct SubscriptionInner {
     id: u64,
     db: Weak<Mutex<Inner>>,
@@ -69,12 +82,17 @@ struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
     pending_ops: Vec<Operation>,
+    unflushed_ops: Vec<Operation>,
     subscriptions: std::collections::BTreeMap<u64, Watcher>,
     change_subscriptions: std::collections::BTreeMap<u64, ChangeWatcher>,
     next_subscription_id: u64,
     next_change_subscription_id: u64,
     change_revision: u64,
     persistence: Option<PersistenceTarget>,
+    storage_adapter: Option<Arc<dyn StorageAdapter>>,
+    limits: PrimadbLimits,
+    #[cfg(feature = "crypto")]
+    security: SecurityState,
 }
 
 #[derive(Debug, Clone)]
@@ -120,12 +138,17 @@ impl Primadb {
                 clock: HybridClock::with_actor(replica_id),
                 nodes: Default::default(),
                 pending_ops: Vec::new(),
+                unflushed_ops: Vec::new(),
                 subscriptions: Default::default(),
                 change_subscriptions: Default::default(),
                 next_subscription_id: 0,
                 next_change_subscription_id: 0,
                 change_revision: 0,
                 persistence: None,
+                storage_adapter: None,
+                limits: PrimadbLimits::default(),
+                #[cfg(feature = "crypto")]
+                security: SecurityState::default(),
             })),
         }
     }
@@ -155,9 +178,50 @@ impl Primadb {
         Ok(serde_json::to_string_pretty(&self.snapshot())?)
     }
 
+    pub fn export_persisted_snapshot_json(&self) -> Result<String> {
+        #[cfg(feature = "crypto")]
+        {
+            let snapshot = self.snapshot();
+            let security = self.inner.lock().unwrap().security.clone();
+            let stored = security.encode_snapshot(snapshot)?;
+            return Ok(match stored {
+                StoredSnapshot::Plain(snapshot) => serde_json::to_string_pretty(&snapshot)?,
+                stored => serde_json::to_string_pretty(&stored)?,
+            });
+        }
+
+        #[cfg(not(feature = "crypto"))]
+        {
+            self.export_snapshot_json()
+        }
+    }
+
     pub fn import_snapshot_json(&self, payload: &str) -> Result<()> {
         let snapshot = serde_json::from_str(payload)?;
         self.load_snapshot(snapshot)
+    }
+
+    pub fn import_persisted_snapshot_json(&self, payload: &str) -> Result<()> {
+        if let Ok(snapshot) = serde_json::from_str::<DatabaseSnapshot>(payload) {
+            return self.load_snapshot(snapshot);
+        }
+
+        #[cfg(feature = "crypto")]
+        {
+            let stored: StoredSnapshot = serde_json::from_str(payload)?;
+            let snapshot = {
+                let inner = self.inner.lock().unwrap();
+                inner.security.decode_snapshot(stored)?
+            };
+            self.load_snapshot(snapshot)
+        }
+
+        #[cfg(not(feature = "crypto"))]
+        {
+            Err(PrimadbError::Message(
+                "persisted snapshot payload is not a plain snapshot".to_owned(),
+            ))
+        }
     }
 
     pub fn load_snapshot(&self, snapshot: DatabaseSnapshot) -> Result<()> {
@@ -166,6 +230,7 @@ impl Primadb {
             inner.clock = snapshot.clock;
             inner.nodes = snapshot.nodes;
             inner.pending_ops = snapshot.pending_ops;
+            inner.unflushed_ops.clear();
         }
         self.finalize_change(true)
     }
@@ -268,10 +333,45 @@ impl Primadb {
                 SyncFrame::Ack { .. } => Ok(0),
             },
             Err(_) => {
+                #[cfg(feature = "crypto")]
+                if let Ok(frame) = serde_json::from_str::<SecureSyncFrame>(payload) {
+                    return self.apply_secure_sync_frame(frame);
+                }
                 let envelope: SyncEnvelope = serde_json::from_str(payload)?;
                 self.apply_sync_envelope(envelope)
             }
         }
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn secure_sync_frame(&self, frame: SyncFrame) -> Result<SecureSyncFrame> {
+        let roots = crate::auth::roots_for_frame(&frame);
+        let inner = self.inner.lock().unwrap();
+        inner.security.encode_sync_frame(inner.clock.actor(), roots, frame)
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn secure_sync_frame_json(&self, frame: SyncFrame) -> Result<String> {
+        Ok(serde_json::to_string(&self.secure_sync_frame(frame)?)?)
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn apply_secure_sync_frame(&self, frame: SecureSyncFrame) -> Result<usize> {
+        let decoded = self.decode_secure_sync_frame(frame)?;
+        match decoded {
+            SyncFrame::Sync {
+                from,
+                message_id: _,
+                ops,
+            } => self.apply_sync_envelope(SyncEnvelope { from, ops }),
+            SyncFrame::Ack { .. } => Ok(0),
+        }
+    }
+
+    #[cfg(feature = "crypto")]
+    pub(crate) fn decode_secure_sync_frame(&self, frame: SecureSyncFrame) -> Result<SyncFrame> {
+        let inner = self.inner.lock().unwrap();
+        inner.security.decode_sync_frame(frame)
     }
 
     pub fn subscribe_changes(&self) -> ChangeSubscription {
@@ -303,10 +403,44 @@ impl Primadb {
         }
     }
 
+    pub fn stats(&self) -> PrimadbStats {
+        let inner = self.inner.lock().unwrap();
+        PrimadbStats {
+            replica_id: inner.clock.actor().to_owned(),
+            nodes: inner.nodes.len(),
+            pending_ops: inner.pending_ops.len(),
+            subscriptions: inner.subscriptions.len(),
+            change_subscriptions: inner.change_subscriptions.len(),
+            unflushed_ops: inner.unflushed_ops.len(),
+        }
+    }
+
+    pub fn limits(&self) -> PrimadbLimits {
+        self.inner.lock().unwrap().limits.clone()
+    }
+
+    pub fn set_limits(&self, limits: PrimadbLimits) {
+        self.inner.lock().unwrap().limits = limits;
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn use_file_persistence(&self, path: impl Into<std::path::PathBuf>) -> Result<bool> {
         let target = PersistenceTarget::File(path.into());
         self.configure_persistence(target)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn use_radisk_storage(
+        &self,
+        directory: impl Into<std::path::PathBuf>,
+        compaction_threshold: usize,
+    ) -> Result<bool> {
+        let adapter = crate::storage::RadiskFileAdapter::new(
+            directory,
+            self.replica_id(),
+            compaction_threshold,
+        );
+        self.attach_storage_adapter(Arc::new(adapter))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -315,10 +449,88 @@ impl Primadb {
         self.configure_persistence(target)
     }
 
-    fn configure_persistence(&self, target: PersistenceTarget) -> Result<bool> {
-        let loaded = match load_snapshot(&target)? {
+    pub fn attach_storage_adapter(&self, adapter: Arc<dyn StorageAdapter>) -> Result<bool> {
+        let loaded = match adapter.load_snapshot()? {
             Some(snapshot) => {
                 self.load_snapshot(snapshot)?;
+                true
+            }
+            None => false,
+        };
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.storage_adapter = Some(adapter);
+        }
+        self.persist_if_needed()?;
+        Ok(loaded)
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn set_require_signed_sync(&self, required: bool) {
+        self.inner.lock().unwrap().security.require_signed_sync = required;
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn register_user(
+        &self,
+        alias: impl Into<String>,
+        public_identity: PublicIdentity,
+        grants: Vec<UserGrant>,
+    ) -> Result<()> {
+        let alias = alias.into();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner
+                .security
+                .register_user(alias.clone(), &public_identity, grants);
+        }
+        let public_key = public_identity.to_base64();
+        self.root(format!("~@{alias}")).put(serde_json::json!({
+            "alias": alias,
+            "pub": public_key,
+        }))
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn authenticate_local_user(
+        &self,
+        alias: impl Into<String>,
+        identity: Identity,
+        grants: Vec<UserGrant>,
+    ) -> Result<()> {
+        let alias = alias.into();
+        let public_key = identity.public_key_base64();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner
+                .security
+                .set_local_user(alias.clone(), identity, grants.clone())?;
+        }
+        self.root(format!("~@{alias}")).put(serde_json::json!({
+            "alias": alias,
+            "pub": public_key,
+        }))?;
+        self.root(format!("~{public_key}")).put(serde_json::json!({
+            "alias": alias,
+            "pub": public_key,
+        }))
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn set_snapshot_encryption_key(&self, key: SecretBoxKey) {
+        self.inner.lock().unwrap().security.set_snapshot_encryption_key(key);
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn set_transport_encryption_key(&self, key: SecretBoxKey) {
+        self.inner.lock().unwrap().security.set_transport_encryption_key(key);
+    }
+
+    fn configure_persistence(&self, target: PersistenceTarget) -> Result<bool> {
+        let loaded = match load_snapshot_payload(&target)? {
+            Some(payload) => {
+                self.import_persisted_snapshot_json(&payload)?;
                 true
             }
             None => false,
@@ -334,20 +546,30 @@ impl Primadb {
     }
 
     fn persist_if_needed(&self) -> Result<()> {
-        let (target, snapshot) = {
+        let (target, adapter, snapshot, unflushed_ops) = {
             let inner = self.inner.lock().unwrap();
             (
                 inner.persistence.clone(),
+                inner.storage_adapter.clone(),
                 DatabaseSnapshot {
                     clock: inner.clock.clone(),
                     nodes: inner.nodes.clone(),
                     pending_ops: inner.pending_ops.clone(),
                 },
+                inner.unflushed_ops.clone(),
             )
         };
 
         if let Some(target) = target {
-            store_snapshot(&target, &snapshot)?;
+            store_snapshot_payload(&target, &self.export_persisted_snapshot_json()?)?;
+        }
+
+        if let Some(adapter) = adapter {
+            adapter.flush(&unflushed_ops, &snapshot)?;
+        }
+
+        if !unflushed_ops.is_empty() {
+            self.inner.lock().unwrap().unflushed_ops.clear();
         }
 
         Ok(())
@@ -444,6 +666,44 @@ impl Primadb {
             entries.truncate(limit);
         }
 
+        Ok(entries)
+    }
+
+    fn scan_at(&self, anchor: &str, segments: &[String], spec: &LexSpec) -> Result<Vec<LexEntry>> {
+        let inner = self.inner.lock().unwrap();
+        let mut entries = match inner.resolve_cursor(anchor, segments)? {
+            Some(Cursor::Node(node)) => {
+                let mut output = Vec::new();
+                inner.collect_lex_from_node(
+                    &node,
+                    &display_path(anchor, segments),
+                    spec,
+                    spec.depth.max(1),
+                    &mut output,
+                );
+                output
+            }
+            Some(Cursor::Field { node, field }) => {
+                let mut output = Vec::new();
+                inner.collect_lex_from_field(
+                    &node,
+                    &field,
+                    &display_path(anchor, segments),
+                    spec,
+                    spec.depth.max(1),
+                    &mut output,
+                );
+                output
+            }
+            None => Vec::new(),
+        };
+
+        if spec.reverse {
+            entries.reverse();
+        }
+        if let Some(limit) = spec.limit {
+            entries.truncate(limit);
+        }
         Ok(entries)
     }
 
@@ -689,6 +949,17 @@ impl Chain {
         self.db.map_at(&self.anchor, &self.segments)
     }
 
+    pub fn lex(&self) -> LexBuilder {
+        LexBuilder {
+            chain: self.clone(),
+            spec: LexSpec::default(),
+        }
+    }
+
+    pub fn scan(&self, spec: LexSpec) -> Result<Vec<LexEntry>> {
+        self.db.scan_at(&self.anchor, &self.segments, &spec)
+    }
+
     pub fn find(&self) -> QueryBuilder {
         QueryBuilder {
             chain: self.clone(),
@@ -810,6 +1081,61 @@ impl QueryBuilder {
 
     pub fn first(&self) -> Result<Option<MapEntry>> {
         self.chain.first(self.spec.clone())
+    }
+}
+
+impl LexBuilder {
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.spec.prefix = Some(prefix.into());
+        self
+    }
+
+    pub fn start_at(mut self, key: impl Into<String>) -> Self {
+        self.spec.start_at = Some(key.into());
+        self
+    }
+
+    pub fn start_after(mut self, key: impl Into<String>) -> Self {
+        self.spec.start_after = Some(key.into());
+        self
+    }
+
+    pub fn end_at(mut self, key: impl Into<String>) -> Self {
+        self.spec.end_at = Some(key.into());
+        self
+    }
+
+    pub fn end_before(mut self, key: impl Into<String>) -> Self {
+        self.spec.end_before = Some(key.into());
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.spec.limit = Some(limit);
+        self
+    }
+
+    pub fn reverse(mut self, reverse: bool) -> Self {
+        self.spec.reverse = reverse;
+        self
+    }
+
+    pub fn depth(mut self, depth: usize) -> Self {
+        self.spec.depth = depth.max(1);
+        self
+    }
+
+    pub fn follow_links(mut self, follow_links: bool) -> Self {
+        self.spec.follow_links = follow_links;
+        self
+    }
+
+    pub fn spec(&self) -> &LexSpec {
+        &self.spec
+    }
+
+    pub fn run(&self) -> Result<Vec<LexEntry>> {
+        self.chain.scan(self.spec.clone())
     }
 }
 
@@ -1165,6 +1491,10 @@ impl Inner {
     }
 
     fn apply_operation_internal(&mut self, op: Operation, origin: OperationOrigin) -> bool {
+        if origin == OperationOrigin::Local && self.pending_ops.len() >= self.limits.max_pending_ops
+        {
+            return false;
+        }
         self.clock.observe(&op.revision);
         let marker = VersionMarker {
             revision: op.revision.clone(),
@@ -1413,6 +1743,10 @@ impl Inner {
             }
         };
 
+        if accepted {
+            self.unflushed_ops.push(op.clone());
+        }
+
         if accepted && origin == OperationOrigin::Local {
             self.pending_ops.push(op);
         }
@@ -1477,6 +1811,101 @@ impl Inner {
             })
             .unwrap_or_default()
     }
+
+    fn collect_lex_from_node(
+        &self,
+        node: &str,
+        base_path: &str,
+        spec: &LexSpec,
+        remaining_depth: usize,
+        output: &mut Vec<LexEntry>,
+    ) {
+        let Some(state) = self.nodes.get(node) else {
+            return;
+        };
+        for (field, field_state) in &state.fields {
+            if !lex_key_matches(field, spec) {
+                continue;
+            }
+
+            let path = if base_path.is_empty() {
+                field.clone()
+            } else {
+                format!("{base_path}.{field}")
+            };
+            output.push(LexEntry {
+                path: path.clone(),
+                key: field.clone(),
+                value: self.materialize_field(&field_state.value, &mut BTreeSet::new()),
+            });
+
+            if !spec.follow_links || remaining_depth <= 1 {
+                continue;
+            }
+
+            match &field_state.value {
+                FieldValue::Link(target) => {
+                    self.collect_lex_from_node(target, &path, spec, remaining_depth - 1, output);
+                }
+                FieldValue::Set(set) => {
+                    for member in set.members.keys() {
+                        self.collect_lex_from_node(
+                            member,
+                            &format!("{path}.{member}"),
+                            spec,
+                            remaining_depth - 1,
+                            output,
+                        );
+                    }
+                }
+                FieldValue::Scalar(_) => {}
+            }
+        }
+    }
+
+    fn collect_lex_from_field(
+        &self,
+        node: &str,
+        field: &str,
+        base_path: &str,
+        spec: &LexSpec,
+        remaining_depth: usize,
+        output: &mut Vec<LexEntry>,
+    ) {
+        let Some(state) = self.nodes.get(node) else {
+            return;
+        };
+        let Some(field_state) = state.fields.get(field) else {
+            return;
+        };
+
+        match &field_state.value {
+            FieldValue::Link(target) => {
+                self.collect_lex_from_node(target, base_path, spec, remaining_depth, output);
+            }
+            FieldValue::Set(set) => {
+                for member in set.members.keys() {
+                    if !lex_key_matches(member, spec) {
+                        continue;
+                    }
+                    let path = if base_path.is_empty() {
+                        member.clone()
+                    } else {
+                        format!("{base_path}.{member}")
+                    };
+                    output.push(LexEntry {
+                        path: path.clone(),
+                        key: member.clone(),
+                        value: self.materialize_node(member, &mut BTreeSet::new()),
+                    });
+                    if spec.follow_links && remaining_depth > 1 {
+                        self.collect_lex_from_node(member, &path, spec, remaining_depth - 1, output);
+                    }
+                }
+            }
+            FieldValue::Scalar(_) => {}
+        }
+    }
 }
 
 fn display_path(anchor: &str, segments: &[String]) -> String {
@@ -1532,10 +1961,13 @@ fn parse_link_marker(object: &Map<String, JsonValue>) -> Option<String> {
     if object.len() != 1 {
         return None;
     }
-    object.get("$link").and_then(|value| match value {
-        JsonValue::String(target) => Some(target.clone()),
-        _ => None,
-    })
+    object
+        .get("$link")
+        .or_else(|| object.get("#"))
+        .and_then(|value| match value {
+            JsonValue::String(target) => Some(target.clone()),
+            _ => None,
+        })
 }
 
 fn parse_set_marker(object: &Map<String, JsonValue>) -> Option<Vec<JsonValue>> {
@@ -1674,6 +2106,35 @@ fn compare_json_values(left: &JsonValue, right: &JsonValue) -> Option<Ordering> 
         (JsonValue::Null, JsonValue::Null) => Some(Ordering::Equal),
         _ => None,
     }
+}
+
+fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
+    if let Some(prefix) = &spec.prefix {
+        if !key.starts_with(prefix) {
+            return false;
+        }
+    }
+    if let Some(start_at) = &spec.start_at {
+        if key < start_at.as_str() {
+            return false;
+        }
+    }
+    if let Some(start_after) = &spec.start_after {
+        if key <= start_after.as_str() {
+            return false;
+        }
+    }
+    if let Some(end_at) = &spec.end_at {
+        if key > end_at.as_str() {
+            return false;
+        }
+    }
+    if let Some(end_before) = &spec.end_before {
+        if key >= end_before.as_str() {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1946,6 +2407,64 @@ mod tests {
         assert_eq!(snapshot["value"], "world");
 
         let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_scan_supports_ranges_and_recursive_follow_links() -> Result<()> {
+        let db = Primadb::with_replica_id("scan-a");
+        db.root("users").field("alice").put(json!({
+            "name": "Alice",
+            "profile": { "city": "Boston" },
+            "settings": { "theme": "forest" }
+        }))?;
+        db.root("users").field("bob").put(json!({
+            "name": "Bob",
+            "profile": { "city": "Berlin" }
+        }))?;
+
+        let shallow = db
+            .root("users")
+            .lex()
+            .start_at("alice")
+            .end_before("carol")
+            .run()?;
+        assert_eq!(shallow.len(), 2);
+        assert_eq!(shallow[0].key, "alice");
+        assert_eq!(shallow[1].key, "bob");
+
+        let deep = db
+            .root("users")
+            .field("alice")
+            .lex()
+            .follow_links(true)
+            .depth(3)
+            .run()?;
+        assert!(deep.iter().any(|entry| entry.path.ends_with("profile.city")));
+        Ok(())
+    }
+
+    #[test]
+    fn radisk_storage_round_trips_state() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-radisk-{unique}"));
+
+        let first = Primadb::with_replica_id("node-a");
+        assert!(!first.use_radisk_storage(path.clone(), 2)?);
+        first
+            .root("docs")
+            .field("hello")
+            .put(json!({"value": "world"}))?;
+
+        let second = Primadb::with_replica_id("node-b");
+        assert!(second.use_radisk_storage(path.clone(), 2)?);
+        let snapshot = second.root("docs").field("hello").once_json()?.unwrap();
+        assert_eq!(snapshot["value"], "world");
+
+        let _ = std::fs::remove_dir_all(path);
         Ok(())
     }
 }

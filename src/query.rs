@@ -41,3 +41,52 @@ pub struct QuerySpec {
     #[serde(default)]
     pub offset: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LexEntry {
+    pub path: String,
+    pub key: String,
+    pub value: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LexSpec {
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub start_at: Option<String>,
+    #[serde(default)]
+    pub start_after: Option<String>,
+    #[serde(default)]
+    pub end_at: Option<String>,
+    #[serde(default)]
+    pub end_before: Option<String>,
+    #[serde(default)]
+    pub reverse: bool,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default = "default_depth")]
+    pub depth: usize,
+    #[serde(default)]
+    pub follow_links: bool,
+}
+
+impl Default for LexSpec {
+    fn default() -> Self {
+        Self {
+            prefix: None,
+            start_at: None,
+            start_after: None,
+            end_at: None,
+            end_before: None,
+            reverse: false,
+            limit: None,
+            depth: default_depth(),
+            follow_links: false,
+        }
+    }
+}
+
+fn default_depth() -> usize {
+    1
+}

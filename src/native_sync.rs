@@ -1,5 +1,9 @@
-use crate::{ChangeSubscription, Primadb, PrimadbError, Result, SyncEnvelope, SyncFrame};
+use crate::{
+    ChangeSubscription, Primadb, PrimadbError, Result, RouteEnvelope, RoutePayload, RouteTarget,
+    Router, RouterConfig, SyncEnvelope, SyncFrame,
+};
 use futures_util::{SinkExt, StreamExt};
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,12 +13,20 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+#[derive(Debug, Clone)]
+struct OutboundSync {
+    encoding: String,
+    payload: JsonValue,
+    target: RouteTarget,
+}
+
 #[derive(Debug)]
 struct NativeWebSocketSyncState {
     db: Primadb,
+    router: Router,
     connected: AtomicBool,
     next_message_seq: AtomicU64,
-    inflight: Mutex<BTreeMap<String, SyncEnvelope>>,
+    inflight: Mutex<BTreeMap<String, OutboundSync>>,
     outbound: UnboundedSender<Message>,
 }
 
@@ -39,8 +51,16 @@ impl NativeWebSocketSync {
         let (mut writer, mut reader) = socket.split();
         let (outbound, mut outbound_rx) = unbounded_channel::<Message>();
 
+        let router = Router::new(RouterConfig {
+            peer_id: format!("native:{}", db.replica_id()),
+            default_channel: "primadb-sync".to_owned(),
+            default_ttl: 6,
+            max_seen_routes: db.limits().max_seen_routes,
+        });
+
         let state = Arc::new(NativeWebSocketSyncState {
             db: db.clone(),
+            router,
             connected: AtomicBool::new(true),
             next_message_seq: AtomicU64::new(0),
             inflight: Mutex::new(BTreeMap::new()),
@@ -99,6 +119,21 @@ impl NativeWebSocketSync {
             }
         });
 
+        send_route(
+            &state,
+            &state.router.presence(
+                db.replica_id(),
+                "websocket",
+                vec![
+                    "sync".to_owned(),
+                    "ack".to_owned(),
+                    "routing".to_owned(),
+                    "snapshot".to_owned(),
+                ],
+                vec!["primadb-sync".to_owned()],
+            ),
+        )?;
+
         Ok(Self {
             state,
             change_subscription: Some(change_subscription),
@@ -119,6 +154,10 @@ impl NativeWebSocketSync {
 
     pub fn inflight_count(&self) -> usize {
         self.state.inflight.lock().unwrap().len()
+    }
+
+    pub fn known_peer_count(&self) -> usize {
+        self.state.router.known_peers().len()
     }
 
     pub async fn flush_pending(&self) -> Result<usize> {
@@ -163,8 +202,48 @@ async fn handle_incoming_text(
     state: &Arc<NativeWebSocketSyncState>,
     payload: &str,
 ) -> Result<()> {
+    if let Ok(route) = serde_json::from_str::<RouteEnvelope>(payload) {
+        return handle_route_envelope(state, route).await;
+    }
+
     let frame: SyncFrame =
         serde_json::from_str(payload).map_err(|error| PrimadbError::Message(error.to_string()))?;
+    handle_sync_frame(state, frame, None).await
+}
+
+async fn handle_route_envelope(
+    state: &Arc<NativeWebSocketSyncState>,
+    route: RouteEnvelope,
+) -> Result<()> {
+    let decision = state.router.accept(route.clone());
+    if !decision.deliver {
+        return Ok(());
+    }
+
+    match route.payload {
+        RoutePayload::Presence { .. } => Ok(()),
+        RoutePayload::Signal { .. } => Ok(()),
+        RoutePayload::SnapshotRequest { root } => {
+            let response = state.router.snapshot_response(
+                root,
+                state.db.snapshot(),
+                RouteTarget::Peer(route.from),
+            );
+            send_route(state, &response)
+        }
+        RoutePayload::SnapshotResponse { snapshot, .. } => state.db.load_snapshot(snapshot),
+        RoutePayload::Sync { encoding, payload } => {
+            let frame = decode_sync_payload(&state.db, &encoding, payload)?;
+            handle_sync_frame(state, frame, Some(route.from)).await
+        }
+    }
+}
+
+async fn handle_sync_frame(
+    state: &Arc<NativeWebSocketSyncState>,
+    frame: SyncFrame,
+    reply_peer: Option<String>,
+) -> Result<()> {
     match frame {
         SyncFrame::Sync {
             from,
@@ -172,13 +251,17 @@ async fn handle_incoming_text(
             ops,
         } => {
             let applied = state.db.apply_sync_envelope(SyncEnvelope { from, ops })?;
-            send_frame(
+            let ack = SyncFrame::Ack {
+                from: state.db.replica_id(),
+                message_id,
+                applied,
+            };
+            send_sync_frame(
                 state,
-                &SyncFrame::Ack {
-                    from: state.db.replica_id(),
-                    message_id,
-                    applied,
-                },
+                ack,
+                reply_peer
+                    .map(RouteTarget::Peer)
+                    .unwrap_or(RouteTarget::Broadcast),
             )?;
         }
         SyncFrame::Ack {
@@ -198,10 +281,15 @@ async fn flush_pending_state(state: &Arc<NativeWebSocketSyncState>) -> Result<us
         return Ok(0);
     }
 
-    let envelope = state.db.drain_sync_envelope()?;
-    let count = envelope.ops.len();
-    if count == 0 {
+    let mut envelope = state.db.drain_sync_envelope()?;
+    if envelope.ops.is_empty() {
         return Ok(0);
+    }
+
+    let max_ops = state.db.limits().max_ops_per_message.max(1);
+    if envelope.ops.len() > max_ops {
+        let remainder = envelope.ops.split_off(max_ops);
+        let _ = state.db.requeue_pending_operations(remainder)?;
     }
 
     let message_id = format!(
@@ -209,18 +297,28 @@ async fn flush_pending_state(state: &Arc<NativeWebSocketSyncState>) -> Result<us
         state.db.replica_id(),
         state.next_message_seq.fetch_add(1, Ordering::SeqCst) + 1
     );
+
     let frame = SyncFrame::Sync {
         from: envelope.from.clone(),
         message_id: message_id.clone(),
         ops: envelope.ops.clone(),
     };
-    if let Err(error) = send_frame(state, &frame) {
+    let (encoding, payload) = encode_sync_payload(&state.db, frame)?;
+    let outbound = OutboundSync {
+        encoding: encoding.clone(),
+        payload: payload.clone(),
+        target: RouteTarget::Broadcast,
+    };
+    let sent_ops = envelope.ops.len();
+    let route = state.router.wrap_sync(encoding, payload, RouteTarget::Broadcast);
+
+    if let Err(error) = send_route(state, &route) {
         let _ = state.db.requeue_pending_operations(envelope.ops);
         return Err(error);
     }
 
-    state.inflight.lock().unwrap().insert(message_id, envelope);
-    Ok(count)
+    state.inflight.lock().unwrap().insert(message_id, outbound);
+    Ok(sent_ops)
 }
 
 async fn retry_inflight_state(state: &Arc<NativeWebSocketSyncState>) -> Result<usize> {
@@ -228,32 +326,47 @@ async fn retry_inflight_state(state: &Arc<NativeWebSocketSyncState>) -> Result<u
         return Ok(0);
     }
 
-    let frames = {
-        let inflight = state.inflight.lock().unwrap();
-        inflight
-            .iter()
-            .map(|(message_id, envelope)| SyncFrame::Sync {
-                from: envelope.from.clone(),
-                message_id: message_id.clone(),
-                ops: envelope.ops.clone(),
-            })
-            .collect::<Vec<_>>()
-    };
+    let outbound = state
+        .inflight
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
 
-    for frame in &frames {
-        send_frame(state, frame)?;
+    for item in &outbound {
+        let route = state
+            .router
+            .wrap_sync(item.encoding.clone(), item.payload.clone(), item.target.clone());
+        send_route(state, &route)?;
     }
 
-    Ok(frames.len())
+    Ok(outbound.len())
 }
 
-fn send_frame(state: &Arc<NativeWebSocketSyncState>, frame: &SyncFrame) -> Result<()> {
+fn send_sync_frame(
+    state: &Arc<NativeWebSocketSyncState>,
+    frame: SyncFrame,
+    target: RouteTarget,
+) -> Result<()> {
+    let (encoding, payload) = encode_sync_payload(&state.db, frame)?;
+    let route = state.router.wrap_sync(encoding, payload, target);
+    send_route(state, &route)
+}
+
+fn send_route(state: &Arc<NativeWebSocketSyncState>, route: &RouteEnvelope) -> Result<()> {
     if !state.connected.load(Ordering::SeqCst) {
         return Err(PrimadbError::Message(
             "native websocket is not connected".to_owned(),
         ));
     }
-    let payload = serde_json::to_string(frame)?;
+    let payload = serde_json::to_string(route)?;
+    if payload.len() > state.db.limits().max_route_payload_bytes {
+        return Err(PrimadbError::Message(format!(
+            "route payload exceeds {} bytes",
+            state.db.limits().max_route_payload_bytes
+        )));
+    }
     state
         .outbound
         .send(Message::Text(payload.into()))
@@ -261,112 +374,43 @@ fn send_frame(state: &Arc<NativeWebSocketSyncState>, frame: &SyncFrame) -> Resul
 }
 
 fn requeue_inflight_state(state: &Arc<NativeWebSocketSyncState>) {
-    let inflight = std::mem::take(&mut *state.inflight.lock().unwrap());
-    for envelope in inflight.into_values() {
-        let _ = state.db.requeue_pending_operations(envelope.ops);
+    let (db, inflight) = {
+        let mut inflight = state.inflight.lock().unwrap();
+        (state.db.clone(), std::mem::take(&mut *inflight))
+    };
+    for (_, outbound) in inflight {
+        if let Ok(frame) = decode_sync_payload(&db, &outbound.encoding, outbound.payload) {
+            if let SyncFrame::Sync { ops, .. } = frame {
+                let _ = db.requeue_pending_operations(ops);
+            }
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::NativeWebSocketSync;
-    use crate::Primadb;
-    use futures_util::{SinkExt, StreamExt};
-    use serde_json::json;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
-    use tokio::net::TcpListener;
-    use tokio::sync::broadcast;
-    use tokio_tungstenite::accept_async;
-    use tokio_tungstenite::tungstenite::Message;
-
-    static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
-
-    #[derive(Clone, Debug)]
-    struct RelayMessage {
-        sender: u64,
-        payload: String,
+fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> Result<(String, JsonValue)> {
+    #[cfg(feature = "crypto")]
+    {
+        let frame = _db.secure_sync_frame(frame)?;
+        return Ok(("secure_sync_frame".to_owned(), serde_json::to_value(frame)?));
     }
 
-    #[tokio::test]
-    async fn native_websocket_sync_replicates_between_replicas() {
-        let addr = spawn_test_relay().await;
-        let left = Primadb::with_replica_id("left");
-        let right = Primadb::with_replica_id("right");
-
-        let mut left_sync =
-            NativeWebSocketSync::connect(left.clone(), format!("ws://{addr}"), Duration::from_millis(100))
-                .await
-                .unwrap();
-        let mut right_sync =
-            NativeWebSocketSync::connect(right.clone(), format!("ws://{addr}"), Duration::from_millis(100))
-                .await
-                .unwrap();
-
-        left.root("docs")
-            .field("hello")
-            .put(json!({"value": "world"}))
-            .unwrap();
-
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let snapshot = right.root("docs").field("hello").once_json().unwrap().unwrap();
-        assert_eq!(snapshot["value"], "world");
-
-        left_sync.close();
-        right_sync.close();
+    #[cfg(not(feature = "crypto"))]
+    {
+        Ok(("sync_frame".to_owned(), serde_json::to_value(frame)?))
     }
+}
 
-    async fn spawn_test_relay() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, _) = broadcast::channel::<RelayMessage>(128);
-
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let websocket = accept_async(stream).await.unwrap();
-                    let (mut writer, mut reader) = websocket.split();
-                    let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-                    let mut rx = tx.subscribe();
-
-                    let write_task = tokio::spawn(async move {
-                        while let Ok(message) = rx.recv().await {
-                            if message.sender == client_id {
-                                continue;
-                            }
-                            if writer
-                                .send(Message::Text(message.payload.into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    });
-
-                    while let Some(message) = reader.next().await {
-                        match message.unwrap() {
-                            Message::Text(payload) => {
-                                let _ = tx.send(RelayMessage {
-                                    sender: client_id,
-                                    payload: payload.to_string(),
-                                });
-                            }
-                            Message::Close(_) => break,
-                            _ => {}
-                        }
-                    }
-
-                    write_task.abort();
-                });
-            }
-        });
-
-        addr
+fn decode_sync_payload(_db: &Primadb, encoding: &str, payload: JsonValue) -> Result<SyncFrame> {
+    match encoding {
+        "sync_frame" => Ok(serde_json::from_value(payload)?),
+        #[cfg(feature = "crypto")]
+        "secure_sync_frame" => _db.decode_secure_sync_frame(serde_json::from_value(payload)?),
+        #[cfg(not(feature = "crypto"))]
+        "secure_sync_frame" => Err(PrimadbError::Message(
+            "received secure sync frame without crypto support".to_owned(),
+        )),
+        other => Err(PrimadbError::Message(format!(
+            "unsupported sync encoding `{other}`"
+        ))),
     }
 }

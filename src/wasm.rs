@@ -1,7 +1,8 @@
 use crate::{
-    Chain, ChangeSubscription, Operation, Primadb, QuerySpec, Subscription, SyncEnvelope, SyncFrame,
+    Chain, ChangeSubscription, LexSpec, Operation, Primadb, QuerySpec, RouteEnvelope,
+    RoutePayload, RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -38,9 +39,17 @@ pub struct WasmIndexedDbPersistence {
 #[derive(Debug)]
 struct WebSocketSyncState {
     db: Primadb,
+    router: Router,
     socket: web_sys::WebSocket,
-    inflight: BTreeMap<String, SyncEnvelope>,
+    inflight: BTreeMap<String, OutboundSync>,
     next_message_seq: u64,
+}
+
+#[derive(Debug, Clone)]
+struct OutboundSync {
+    encoding: String,
+    payload: JsonValue,
+    target: RouteTarget,
 }
 
 #[wasm_bindgen(js_name = WebSocketSync)]
@@ -53,6 +62,78 @@ pub struct WasmWebSocketSync {
     onerror: Option<Closure<dyn FnMut(web_sys::Event)>>,
     interval_callback: Option<Closure<dyn FnMut()>>,
     interval_id: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+struct MeshOutbound {
+    encoding: String,
+    payload: JsonValue,
+    awaiting: BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MeshSignal {
+    Join {
+        room: String,
+        from: String,
+    },
+    Offer {
+        room: String,
+        from: String,
+        to: String,
+        sdp: String,
+    },
+    Answer {
+        room: String,
+        from: String,
+        to: String,
+        sdp: String,
+    },
+    Ice {
+        room: String,
+        from: String,
+        to: String,
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    },
+    Leave {
+        room: String,
+        from: String,
+    },
+}
+
+struct MeshPeer {
+    connection: web_sys::RtcPeerConnection,
+    channel: Option<web_sys::RtcDataChannel>,
+    #[allow(dead_code)]
+    onicecandidate: Option<Closure<dyn FnMut(web_sys::RtcPeerConnectionIceEvent)>>,
+    #[allow(dead_code)]
+    ondatachannel: Option<Closure<dyn FnMut(web_sys::RtcDataChannelEvent)>>,
+    onmessage: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
+    onopen: Option<Closure<dyn FnMut(web_sys::Event)>>,
+    onclose: Option<Closure<dyn FnMut(web_sys::Event)>>,
+}
+
+struct WebRtcMeshState {
+    db: Primadb,
+    router: Router,
+    room: String,
+    peer_id: String,
+    signaling: web_sys::BroadcastChannel,
+    peers: BTreeMap<String, MeshPeer>,
+    inflight: BTreeMap<String, MeshOutbound>,
+    next_message_seq: u64,
+}
+
+#[wasm_bindgen(js_name = WebRtcMesh)]
+pub struct WasmWebRtcMesh {
+    state: Rc<RefCell<WebRtcMeshState>>,
+    change_subscription: Option<ChangeSubscription>,
+    signaling_onmessage: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
+    retry_callback: Option<Closure<dyn FnMut()>>,
+    retry_interval_id: Option<i32>,
 }
 
 #[wasm_bindgen(js_class = Primadb)]
@@ -156,6 +237,76 @@ impl WasmPrimadb {
         self.inner.use_browser_storage(key).map_err(to_js_error)
     }
 
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = registerUser)]
+    pub fn register_user(
+        &self,
+        alias: String,
+        public_key_base64: String,
+        roots: JsValue,
+    ) -> std::result::Result<(), JsValue> {
+        let roots: Vec<String> = serde_wasm_bindgen::from_value(roots)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let grants = roots
+            .into_iter()
+            .map(crate::UserGrant::write_root)
+            .collect::<Vec<_>>();
+        let public_identity =
+            crate::PublicIdentity::from_base64(&public_key_base64).map_err(to_js_error)?;
+        self.inner
+            .register_user(alias, public_identity, grants)
+            .map_err(to_js_error)
+    }
+
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = authenticateLocalUser)]
+    pub fn authenticate_local_user(
+        &self,
+        alias: String,
+        secret_key_base64: String,
+        roots: JsValue,
+    ) -> std::result::Result<(), JsValue> {
+        let roots: Vec<String> = serde_wasm_bindgen::from_value(roots)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let grants = roots
+            .into_iter()
+            .map(crate::UserGrant::write_root)
+            .collect::<Vec<_>>();
+        let identity =
+            crate::Identity::from_secret_key_base64(&secret_key_base64).map_err(to_js_error)?;
+        self.inner
+            .authenticate_local_user(alias, identity, grants)
+            .map_err(to_js_error)
+    }
+
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = requireSignedSync)]
+    pub fn require_signed_sync(&self, required: bool) {
+        self.inner.set_require_signed_sync(required);
+    }
+
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = setSnapshotEncryptionKey)]
+    pub fn set_snapshot_encryption_key(
+        &self,
+        key_base64: String,
+    ) -> std::result::Result<(), JsValue> {
+        let key = crate::SecretBoxKey::from_base64(&key_base64).map_err(to_js_error)?;
+        self.inner.set_snapshot_encryption_key(key);
+        Ok(())
+    }
+
+    #[cfg(feature = "crypto")]
+    #[wasm_bindgen(js_name = setTransportEncryptionKey)]
+    pub fn set_transport_encryption_key(
+        &self,
+        key_base64: String,
+    ) -> std::result::Result<(), JsValue> {
+        let key = crate::SecretBoxKey::from_base64(&key_base64).map_err(to_js_error)?;
+        self.inner.set_transport_encryption_key(key);
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = saveIndexedDb)]
     pub async fn save_indexed_db(
         &self,
@@ -163,7 +314,10 @@ impl WasmPrimadb {
         store_name: String,
         key: String,
     ) -> std::result::Result<(), JsValue> {
-        let payload = self.inner.export_snapshot_json().map_err(to_js_error)?;
+        let payload = self
+            .inner
+            .export_persisted_snapshot_json()
+            .map_err(to_js_error)?;
         save_snapshot_string_indexed_db(&database_name, &store_name, &key, &payload).await
     }
 
@@ -177,7 +331,7 @@ impl WasmPrimadb {
         match load_snapshot_string_indexed_db(&database_name, &store_name, &key).await? {
             Some(payload) => {
                 self.inner
-                    .import_snapshot_json(&payload)
+                    .import_persisted_snapshot_json(&payload)
                     .map_err(to_js_error)?;
                 Ok(true)
             }
@@ -210,7 +364,7 @@ impl WasmPrimadb {
                 if !event.data_changed && event.pending_ops == 0 {
                     continue;
                 }
-                if let Ok(payload) = db.export_snapshot_json() {
+                if let Ok(payload) = db.export_persisted_snapshot_json() {
                     let _ =
                         save_snapshot_string_indexed_db(&db_name, &store, &snapshot_key, &payload)
                             .await;
@@ -240,6 +394,12 @@ impl WasmPrimadb {
 
         let state = Rc::new(RefCell::new(WebSocketSyncState {
             db: self.inner.clone(),
+            router: Router::new(RouterConfig {
+                peer_id: format!("browser:{}", self.inner.replica_id()),
+                default_channel: "primadb-sync".to_owned(),
+                default_ttl: 6,
+                max_seen_routes: self.inner.limits().max_seen_routes,
+            }),
             socket: socket.clone(),
             inflight: BTreeMap::new(),
             next_message_seq: 0,
@@ -255,6 +415,21 @@ impl WasmPrimadb {
 
         let onopen_state = state.clone();
         let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            let route = {
+                let borrowed = onopen_state.borrow();
+                borrowed.router.presence(
+                    borrowed.db.replica_id(),
+                    "websocket",
+                    vec![
+                        "sync".to_owned(),
+                        "ack".to_owned(),
+                        "routing".to_owned(),
+                        "snapshot".to_owned(),
+                    ],
+                    vec!["primadb-sync".to_owned()],
+                )
+            };
+            let _ = send_route_state(&onopen_state, &route);
             let _ = retry_inflight_state(&onopen_state);
             let _ = flush_pending_state(&onopen_state);
         }) as Box<dyn FnMut(_)>);
@@ -306,6 +481,79 @@ impl WasmPrimadb {
             interval_id: Some(interval_id),
         })
     }
+
+    #[wasm_bindgen(js_name = connectWebRtcMesh)]
+    pub fn connect_web_rtc_mesh(
+        &self,
+        room: String,
+        retry_interval_ms: Option<i32>,
+    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        let signaling = web_sys::BroadcastChannel::new(&format!("primadb-mesh-{room}"))?;
+        let peer_id = format!("mesh:{}:{}", self.inner.replica_id(), js_sys::Date::now() as u64);
+        let state = Rc::new(RefCell::new(WebRtcMeshState {
+            db: self.inner.clone(),
+            router: Router::new(RouterConfig {
+                peer_id: peer_id.clone(),
+                default_channel: format!("mesh:{room}"),
+                default_ttl: 6,
+                max_seen_routes: self.inner.limits().max_seen_routes,
+            }),
+            room: room.clone(),
+            peer_id: peer_id.clone(),
+            signaling: signaling.clone(),
+            peers: BTreeMap::new(),
+            inflight: BTreeMap::new(),
+            next_message_seq: 0,
+        }));
+
+        let signal_state = state.clone();
+        let signaling_onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+            let Ok(signal) = serde_wasm_bindgen::from_value::<MeshSignal>(event.data()) else {
+                return;
+            };
+            let _ = handle_mesh_signal_state(&signal_state, signal);
+        }) as Box<dyn FnMut(_)>);
+        signaling.set_onmessage(Some(signaling_onmessage.as_ref().unchecked_ref()));
+
+        let change_subscription = self.inner.subscribe_changes();
+        let receiver = change_subscription.receiver();
+        let change_state = state.clone();
+        spawn_local(async move {
+            while let Ok(event) = receiver.recv().await {
+                if event.pending_ops > 0 {
+                    let _ = flush_mesh_pending_state(&change_state);
+                }
+            }
+        });
+
+        let retry_ms = retry_interval_ms.unwrap_or(2_000);
+        let retry_state = state.clone();
+        let retry_callback = Closure::wrap(Box::new(move || {
+            let _ = retry_mesh_inflight_state(&retry_state);
+            let _ = flush_mesh_pending_state(&retry_state);
+        }) as Box<dyn FnMut()>);
+        let retry_interval_id = browser_window()?
+            .set_interval_with_callback_and_timeout_and_arguments_0(
+                retry_callback.as_ref().unchecked_ref(),
+                retry_ms,
+            )?;
+
+        post_mesh_signal_state(
+            &state,
+            &MeshSignal::Join {
+                room,
+                from: peer_id,
+            },
+        )?;
+
+        Ok(WasmWebRtcMesh {
+            state,
+            change_subscription: Some(change_subscription),
+            signaling_onmessage: Some(signaling_onmessage),
+            retry_callback: Some(retry_callback),
+            retry_interval_id: Some(retry_interval_id),
+        })
+    }
 }
 
 #[wasm_bindgen(js_class = Chain)]
@@ -355,6 +603,13 @@ impl WasmChain {
         to_js(&entries)
     }
 
+    pub fn scan(&self, spec: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let entries = self.inner.scan(spec).map_err(to_js_error)?;
+        to_js(&entries)
+    }
+
     #[wasm_bindgen(js_name = firstQuery)]
     pub fn first_query(&self, spec: JsValue) -> std::result::Result<JsValue, JsValue> {
         let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
@@ -396,7 +651,10 @@ impl WasmSubscription {
 #[wasm_bindgen(js_class = IndexedDbPersistence)]
 impl WasmIndexedDbPersistence {
     pub async fn flush(&self) -> std::result::Result<(), JsValue> {
-        let payload = self.db.export_snapshot_json().map_err(to_js_error)?;
+        let payload = self
+            .db
+            .export_persisted_snapshot_json()
+            .map_err(to_js_error)?;
         save_snapshot_string_indexed_db(&self.database_name, &self.store_name, &self.key, &payload)
             .await
     }
@@ -476,34 +734,167 @@ impl Drop for WasmWebSocketSync {
     }
 }
 
+#[wasm_bindgen(js_class = WebRtcMesh)]
+impl WasmWebRtcMesh {
+    #[wasm_bindgen(js_name = peerId)]
+    pub fn peer_id(&self) -> String {
+        self.state.borrow().peer_id.clone()
+    }
+
+    #[wasm_bindgen(js_name = peerCount)]
+    pub fn peer_count(&self) -> usize {
+        self.state.borrow().peers.len()
+    }
+
+    #[wasm_bindgen(js_name = inflightCount)]
+    pub fn inflight_count(&self) -> usize {
+        self.state.borrow().inflight.len()
+    }
+
+    #[wasm_bindgen(js_name = flushPending)]
+    pub fn flush_pending(&self) -> std::result::Result<usize, JsValue> {
+        flush_mesh_pending_state(&self.state)
+    }
+
+    #[wasm_bindgen(js_name = retryInflight)]
+    pub fn retry_inflight(&self) -> std::result::Result<usize, JsValue> {
+        retry_mesh_inflight_state(&self.state)
+    }
+
+    pub fn close(&mut self) -> std::result::Result<(), JsValue> {
+        self.teardown()
+    }
+}
+
+impl WasmWebRtcMesh {
+    fn teardown(&mut self) -> std::result::Result<(), JsValue> {
+        let leave = {
+            let borrowed = self.state.borrow();
+            MeshSignal::Leave {
+                room: borrowed.room.clone(),
+                from: borrowed.peer_id.clone(),
+            }
+        };
+        let _ = post_mesh_signal_state(&self.state, &leave);
+        if let Some(interval_id) = self.retry_interval_id.take() {
+            browser_window()?.clear_interval_with_handle(interval_id);
+        }
+        if let Some(onmessage) = &self.signaling_onmessage {
+            self.state
+                .borrow()
+                .signaling
+                .set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+        }
+        self.state.borrow().signaling.set_onmessage(None);
+        {
+            let mut state = self.state.borrow_mut();
+            for peer in state.peers.values_mut() {
+                peer.connection.set_onicecandidate(None);
+                peer.connection.set_ondatachannel(None);
+                if let Some(channel) = &peer.channel {
+                    channel.set_onmessage(None);
+                    channel.set_onopen(None);
+                    channel.set_onclose(None);
+                    let _ = channel.close();
+                }
+                let _ = peer.connection.close();
+            }
+            state.peers.clear();
+        }
+        self.change_subscription.take();
+        self.signaling_onmessage.take();
+        self.retry_callback.take();
+        Ok(())
+    }
+}
+
+impl Drop for WasmWebRtcMesh {
+    fn drop(&mut self) {
+        let _ = self.teardown();
+    }
+}
+
 fn handle_websocket_message(
     state: &Rc<RefCell<WebSocketSyncState>>,
     payload: &str,
 ) -> std::result::Result<(), JsValue> {
+    if let Ok(route) = serde_json::from_str::<RouteEnvelope>(payload) {
+        return handle_route_message(state, route);
+    }
+
     let frame: SyncFrame =
         serde_json::from_str(payload).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    handle_sync_frame(state, frame, None)
+}
+
+fn handle_route_message(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    route: RouteEnvelope,
+) -> std::result::Result<(), JsValue> {
+    let decision = {
+        let borrowed = state.borrow();
+        borrowed.router.accept(route.clone())
+    };
+    if !decision.deliver {
+        return Ok(());
+    }
+
+    match route.payload {
+        RoutePayload::Presence { .. } => Ok(()),
+        RoutePayload::Signal { .. } => Ok(()),
+        RoutePayload::SnapshotRequest { root } => {
+            let response = {
+                let borrowed = state.borrow();
+                borrowed
+                    .router
+                    .snapshot_response(root, borrowed.db.snapshot(), RouteTarget::Peer(route.from))
+            };
+            send_route_state(state, &response)
+        }
+        RoutePayload::SnapshotResponse { snapshot, .. } => {
+            state
+                .borrow()
+                .db
+                .load_snapshot(snapshot)
+                .map_err(to_js_error)
+        }
+        RoutePayload::Sync { encoding, payload } => {
+            let frame = {
+                let borrowed = state.borrow();
+                decode_sync_payload(&borrowed.db, &encoding, payload)?
+            };
+            handle_sync_frame(state, frame, Some(route.from))
+        }
+    }
+}
+
+fn handle_sync_frame(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    frame: SyncFrame,
+    reply_peer: Option<String>,
+) -> std::result::Result<(), JsValue> {
     match frame {
         SyncFrame::Sync {
             from,
             message_id,
             ops,
         } => {
-            let (db, socket) = {
-                let state = state.borrow();
-                (state.db.clone(), state.socket.clone())
-            };
+            let db = state.borrow().db.clone();
             let applied = db
                 .apply_sync_envelope(SyncEnvelope { from, ops })
                 .map_err(to_js_error)?;
-            if socket.ready_state() == web_sys::WebSocket::OPEN {
-                let ack = SyncFrame::Ack {
-                    from: db.replica_id(),
-                    message_id,
-                    applied,
-                };
-                let payload = serde_json::to_string(&ack).map_err(to_js_error)?;
-                socket.send_with_str(&payload)?;
-            }
+            let ack = SyncFrame::Ack {
+                from: db.replica_id(),
+                message_id,
+                applied,
+            };
+            send_sync_frame_state(
+                state,
+                ack,
+                reply_peer
+                    .map(RouteTarget::Peer)
+                    .unwrap_or(RouteTarget::Broadcast),
+            )?;
         }
         SyncFrame::Ack {
             from: _,
@@ -533,11 +924,18 @@ fn flush_pending_state(
         return Ok(0);
     }
 
-    let envelope = db.drain_sync_envelope().map_err(to_js_error)?;
-    let count = envelope.ops.len();
-    if count == 0 {
+    let mut envelope = db.drain_sync_envelope().map_err(to_js_error)?;
+    if envelope.ops.is_empty() {
         return Ok(0);
     }
+
+    let max_ops = db.limits().max_ops_per_message.max(1);
+    if envelope.ops.len() > max_ops {
+        let remainder = envelope.ops.split_off(max_ops);
+        let _ = db.requeue_pending_operations(remainder);
+    }
+
+    let count = envelope.ops.len();
 
     let message_id = {
         let mut state = state.borrow_mut();
@@ -550,42 +948,55 @@ fn flush_pending_state(
         message_id: message_id.clone(),
         ops: envelope.ops.clone(),
     };
-    let payload = serde_json::to_string(&frame).map_err(to_js_error)?;
-    if let Err(error) = socket.send_with_str(&payload) {
+    let (encoding, payload) = encode_sync_payload(&db, frame)?;
+    let outbound = OutboundSync {
+        encoding: encoding.clone(),
+        payload: payload.clone(),
+        target: RouteTarget::Broadcast,
+    };
+    let route = {
+        let borrowed = state.borrow();
+        borrowed
+            .router
+            .wrap_sync(encoding, payload, RouteTarget::Broadcast)
+    };
+    if let Err(error) = send_route_state(state, &route) {
         let _ = db.requeue_pending_operations(envelope.ops);
         return Err(error);
     }
 
-    state.borrow_mut().inflight.insert(message_id, envelope);
+    state.borrow_mut().inflight.insert(message_id, outbound);
     Ok(count)
 }
 
 fn retry_inflight_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
 ) -> std::result::Result<usize, JsValue> {
-    let (socket, frames) = {
+    let routes = {
         let state = state.borrow();
         if state.socket.ready_state() != web_sys::WebSocket::OPEN {
             return Ok(0);
         }
-        let frames = state
+        state
             .inflight
             .iter()
-            .map(|(message_id, envelope)| SyncFrame::Sync {
-                from: envelope.from.clone(),
-                message_id: message_id.clone(),
-                ops: envelope.ops.clone(),
+            .map(|(_, outbound)| {
+                state
+                    .router
+                    .wrap_sync(
+                        outbound.encoding.clone(),
+                        outbound.payload.clone(),
+                        outbound.target.clone(),
+                    )
             })
-            .collect::<Vec<_>>();
-        (state.socket.clone(), frames)
+            .collect::<Vec<_>>()
     };
 
-    for frame in &frames {
-        let payload = serde_json::to_string(frame).map_err(to_js_error)?;
-        socket.send_with_str(&payload)?;
+    for route in &routes {
+        send_route_state(state, route)?;
     }
 
-    Ok(frames.len())
+    Ok(routes.len())
 }
 
 fn requeue_inflight_state(state: &Rc<RefCell<WebSocketSyncState>>) {
@@ -594,9 +1005,646 @@ fn requeue_inflight_state(state: &Rc<RefCell<WebSocketSyncState>>) {
         let inflight = std::mem::take(&mut state.inflight);
         (state.db.clone(), inflight)
     };
-    for envelope in inflight.into_values() {
-        let _ = db.requeue_pending_operations(envelope.ops);
+    for outbound in inflight.into_values() {
+        if let Ok(frame) = decode_sync_payload(&db, &outbound.encoding, outbound.payload) {
+            if let SyncFrame::Sync { ops, .. } = frame {
+                let _ = db.requeue_pending_operations(ops);
+            }
+        }
     }
+}
+
+fn send_sync_frame_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    frame: SyncFrame,
+    target: RouteTarget,
+) -> std::result::Result<(), JsValue> {
+    let db = state.borrow().db.clone();
+    let (encoding, payload) = encode_sync_payload(&db, frame)?;
+    let route = state.borrow().router.wrap_sync(encoding, payload, target);
+    send_route_state(state, &route)
+}
+
+fn send_route_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    route: &RouteEnvelope,
+) -> std::result::Result<(), JsValue> {
+    let payload = serde_json::to_string(route).map_err(to_js_error)?;
+    let (socket, max_bytes) = {
+        let borrowed = state.borrow();
+        (
+            borrowed.socket.clone(),
+            borrowed.db.limits().max_route_payload_bytes,
+        )
+    };
+    if payload.len() > max_bytes {
+        return Err(JsValue::from_str(&format!(
+            "route payload exceeds {max_bytes} bytes"
+        )));
+    }
+    socket.send_with_str(&payload)
+}
+
+fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> std::result::Result<(String, JsonValue), JsValue> {
+    #[cfg(feature = "crypto")]
+    {
+        let frame = _db.secure_sync_frame(frame).map_err(to_js_error)?;
+        return Ok((
+            "secure_sync_frame".to_owned(),
+            serde_json::to_value(frame).map_err(to_js_error)?,
+        ));
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    {
+        Ok((
+            "sync_frame".to_owned(),
+            serde_json::to_value(frame).map_err(to_js_error)?,
+        ))
+    }
+}
+
+fn decode_sync_payload(
+    _db: &Primadb,
+    encoding: &str,
+    payload: JsonValue,
+) -> std::result::Result<SyncFrame, JsValue> {
+    match encoding {
+        "sync_frame" => serde_json::from_value(payload).map_err(to_js_error),
+        #[cfg(feature = "crypto")]
+        "secure_sync_frame" => _db
+            .decode_secure_sync_frame(serde_json::from_value(payload).map_err(to_js_error)?)
+            .map_err(to_js_error),
+        #[cfg(not(feature = "crypto"))]
+        "secure_sync_frame" => Err(JsValue::from_str(
+            "received secure sync frame without crypto support",
+        )),
+        other => Err(JsValue::from_str(&format!(
+            "unsupported sync encoding `{other}`"
+        ))),
+    }
+}
+
+fn post_mesh_signal_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    signal: &MeshSignal,
+) -> std::result::Result<(), JsValue> {
+    let signaling = state.borrow().signaling.clone();
+    signaling.post_message(
+        &signal
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|error| JsValue::from_str(&error.to_string()))?,
+    )
+}
+
+fn handle_mesh_signal_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    signal: MeshSignal,
+) -> std::result::Result<(), JsValue> {
+    let (room, peer_id) = {
+        let borrowed = state.borrow();
+        (borrowed.room.clone(), borrowed.peer_id.clone())
+    };
+
+    match signal {
+        MeshSignal::Join { room: join_room, from } => {
+            if join_room != room || from == peer_id {
+                return Ok(());
+            }
+            if state.borrow().peers.contains_key(&from) {
+                return Ok(());
+            }
+            if peer_id < from {
+                let state = state.clone();
+                spawn_local(async move {
+                    let _ = create_mesh_offer(&state, from).await;
+                });
+            }
+        }
+        MeshSignal::Offer {
+            room: offer_room,
+            from,
+            to,
+            sdp,
+        } => {
+            if offer_room != room || to != peer_id {
+                return Ok(());
+            }
+            let state = state.clone();
+            spawn_local(async move {
+                let _ = accept_mesh_offer(&state, from, sdp).await;
+            });
+        }
+        MeshSignal::Answer {
+            room: answer_room,
+            from,
+            to,
+            sdp,
+        } => {
+            if answer_room != room || to != peer_id {
+                return Ok(());
+            }
+            let state = state.clone();
+            spawn_local(async move {
+                let _ = accept_mesh_answer(&state, from, sdp).await;
+            });
+        }
+        MeshSignal::Ice {
+            room: ice_room,
+            from,
+            to,
+            candidate,
+            sdp_mid,
+            sdp_mline_index,
+        } => {
+            if ice_room != room || to != peer_id {
+                return Ok(());
+            }
+            let state = state.clone();
+            spawn_local(async move {
+                let _ = add_mesh_ice_candidate(
+                    &state,
+                    from,
+                    candidate,
+                    sdp_mid,
+                    sdp_mline_index,
+                )
+                .await;
+            });
+        }
+        MeshSignal::Leave {
+            room: leave_room,
+            from,
+        } => {
+            if leave_room != room || from == peer_id {
+                return Ok(());
+            }
+            remove_mesh_peer_state(state, &from);
+        }
+    }
+
+    Ok(())
+}
+
+async fn create_mesh_offer(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: String,
+) -> std::result::Result<(), JsValue> {
+    let connection = ensure_mesh_peer(state, &remote_peer)?;
+    if state
+        .borrow()
+        .peers
+        .get(&remote_peer)
+        .and_then(|peer| peer.channel.as_ref())
+        .is_none()
+    {
+        let channel = connection.create_data_channel("primadb");
+        attach_mesh_channel_handlers(state, &remote_peer, channel)?;
+    }
+
+    let offer = JsFuture::from(connection.create_offer())
+        .await?
+        .dyn_into::<web_sys::RtcSessionDescriptionInit>()?;
+    JsFuture::from(connection.set_local_description(&offer)).await?;
+    let (room, from) = {
+        let borrowed = state.borrow();
+        (borrowed.room.clone(), borrowed.peer_id.clone())
+    };
+    post_mesh_signal_state(
+        state,
+        &MeshSignal::Offer {
+            room,
+            from,
+            to: remote_peer,
+            sdp: session_description_sdp(&offer)?,
+        },
+    )?;
+    Ok(())
+}
+
+async fn accept_mesh_offer(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: String,
+    sdp: String,
+) -> std::result::Result<(), JsValue> {
+    let connection = ensure_mesh_peer(state, &remote_peer)?;
+    let offer = web_sys::RtcSessionDescriptionInit::new(web_sys::RtcSdpType::Offer);
+    offer.set_sdp(&sdp);
+    JsFuture::from(connection.set_remote_description(&offer)).await?;
+
+    let answer = JsFuture::from(connection.create_answer())
+        .await?
+        .dyn_into::<web_sys::RtcSessionDescriptionInit>()?;
+    JsFuture::from(connection.set_local_description(&answer)).await?;
+    let (room, from) = {
+        let borrowed = state.borrow();
+        (borrowed.room.clone(), borrowed.peer_id.clone())
+    };
+    post_mesh_signal_state(
+        state,
+        &MeshSignal::Answer {
+            room,
+            from,
+            to: remote_peer,
+            sdp: session_description_sdp(&answer)?,
+        },
+    )?;
+    Ok(())
+}
+
+async fn accept_mesh_answer(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: String,
+    sdp: String,
+) -> std::result::Result<(), JsValue> {
+    let connection = ensure_mesh_peer(state, &remote_peer)?;
+    let answer = web_sys::RtcSessionDescriptionInit::new(web_sys::RtcSdpType::Answer);
+    answer.set_sdp(&sdp);
+    JsFuture::from(connection.set_remote_description(&answer)).await?;
+    Ok(())
+}
+
+async fn add_mesh_ice_candidate(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: String,
+    candidate: String,
+    sdp_mid: Option<String>,
+    sdp_mline_index: Option<u16>,
+) -> std::result::Result<(), JsValue> {
+    let connection = ensure_mesh_peer(state, &remote_peer)?;
+    let init = web_sys::RtcIceCandidateInit::new(&candidate);
+    if let Some(sdp_mid) = sdp_mid.as_deref() {
+        init.set_sdp_mid(Some(sdp_mid));
+    }
+    if let Some(index) = sdp_mline_index {
+        init.set_sdp_m_line_index(Some(index));
+    }
+    let candidate = web_sys::RtcIceCandidate::new(&init)?;
+    JsFuture::from(connection.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate))).await?;
+    Ok(())
+}
+
+fn ensure_mesh_peer(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+) -> std::result::Result<web_sys::RtcPeerConnection, JsValue> {
+    if let Some(existing) = state.borrow().peers.get(remote_peer) {
+        return Ok(existing.connection.clone());
+    }
+
+    let connection = web_sys::RtcPeerConnection::new()?;
+    let remote = remote_peer.to_owned();
+    let state_for_ice = state.clone();
+    let onicecandidate =
+        Closure::wrap(Box::new(move |event: web_sys::RtcPeerConnectionIceEvent| {
+            let Some(candidate) = event.candidate() else {
+                return;
+            };
+            let (room, from) = {
+                let borrowed = state_for_ice.borrow();
+                (borrowed.room.clone(), borrowed.peer_id.clone())
+            };
+            let signal = MeshSignal::Ice {
+                room,
+                from,
+                to: remote.clone(),
+                candidate: candidate.candidate(),
+                sdp_mid: candidate.sdp_mid(),
+                sdp_mline_index: candidate.sdp_m_line_index(),
+            };
+            let _ = post_mesh_signal_state(&state_for_ice, &signal);
+        }) as Box<dyn FnMut(_)>);
+    connection.set_onicecandidate(Some(onicecandidate.as_ref().unchecked_ref()));
+
+    let remote_for_data = remote_peer.to_owned();
+    let state_for_data = state.clone();
+    let ondatachannel = Closure::wrap(Box::new(move |event: web_sys::RtcDataChannelEvent| {
+        let channel = event.channel();
+        let _ = attach_mesh_channel_handlers(&state_for_data, &remote_for_data, channel);
+    }) as Box<dyn FnMut(_)>);
+    connection.set_ondatachannel(Some(ondatachannel.as_ref().unchecked_ref()));
+
+    state.borrow_mut().peers.insert(
+        remote_peer.to_owned(),
+        MeshPeer {
+            connection: connection.clone(),
+            channel: None,
+            onicecandidate: Some(onicecandidate),
+            ondatachannel: Some(ondatachannel),
+            onmessage: None,
+            onopen: None,
+            onclose: None,
+        },
+    );
+    Ok(connection)
+}
+
+fn attach_mesh_channel_handlers(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+    channel: web_sys::RtcDataChannel,
+) -> std::result::Result<(), JsValue> {
+    let remote_for_message = remote_peer.to_owned();
+    let message_state = state.clone();
+    let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+        if let Some(payload) = event.data().as_string() {
+            let _ = handle_mesh_data_message(&message_state, &remote_for_message, &payload);
+        }
+    }) as Box<dyn FnMut(_)>);
+    channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+
+    let open_state = state.clone();
+    let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+        let _ = flush_mesh_pending_state(&open_state);
+    }) as Box<dyn FnMut(_)>);
+    channel.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+
+    let remote_for_close = remote_peer.to_owned();
+    let close_state = state.clone();
+    let onclose = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+        remove_mesh_peer_state(&close_state, &remote_for_close);
+    }) as Box<dyn FnMut(_)>);
+    channel.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+
+    if let Some(peer) = state.borrow_mut().peers.get_mut(remote_peer) {
+        peer.channel = Some(channel);
+        peer.onmessage = Some(onmessage);
+        peer.onopen = Some(onopen);
+        peer.onclose = Some(onclose);
+    }
+    Ok(())
+}
+
+fn remove_mesh_peer_state(state: &Rc<RefCell<WebRtcMeshState>>, remote_peer: &str) {
+    let mut to_requeue = Vec::new();
+    {
+        let mut borrowed = state.borrow_mut();
+        if let Some(peer) = borrowed.peers.remove(remote_peer) {
+            peer.connection.set_onicecandidate(None);
+            peer.connection.set_ondatachannel(None);
+            if let Some(channel) = &peer.channel {
+                channel.set_onmessage(None);
+                channel.set_onopen(None);
+                channel.set_onclose(None);
+                let _ = channel.close();
+            }
+            let _ = peer.connection.close();
+        }
+
+        let mut empty = Vec::new();
+        for (message_id, outbound) in &mut borrowed.inflight {
+            outbound.awaiting.remove(remote_peer);
+            if outbound.awaiting.is_empty() {
+                empty.push(message_id.clone());
+            }
+        }
+        for message_id in empty {
+            if let Some(outbound) = borrowed.inflight.remove(&message_id) {
+                to_requeue.push(outbound);
+            }
+        }
+    }
+
+    let db = state.borrow().db.clone();
+    for outbound in to_requeue {
+        if let Ok(frame) = decode_sync_payload(&db, &outbound.encoding, outbound.payload) {
+            if let SyncFrame::Sync { ops, .. } = frame {
+                let _ = db.requeue_pending_operations(ops);
+            }
+        }
+    }
+}
+
+fn handle_mesh_data_message(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+    payload: &str,
+) -> std::result::Result<(), JsValue> {
+    if let Ok(route) = serde_json::from_str::<RouteEnvelope>(payload) {
+        return handle_mesh_route_message(state, remote_peer, route);
+    }
+    let frame: SyncFrame =
+        serde_json::from_str(payload).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    handle_mesh_sync_frame(state, remote_peer, frame)
+}
+
+fn handle_mesh_route_message(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+    route: RouteEnvelope,
+) -> std::result::Result<(), JsValue> {
+    let decision = {
+        let borrowed = state.borrow();
+        borrowed.router.accept(route.clone())
+    };
+    if !decision.deliver {
+        return Ok(());
+    }
+
+    match route.payload {
+        RoutePayload::Presence { .. } => Ok(()),
+        RoutePayload::Signal { .. } => Ok(()),
+        RoutePayload::SnapshotRequest { root } => {
+            let response = {
+                let borrowed = state.borrow();
+                borrowed.router.snapshot_response(
+                    root,
+                    borrowed.db.snapshot(),
+                    RouteTarget::Peer(remote_peer.to_owned()),
+                )
+            };
+            send_mesh_route_to_peer(state, remote_peer, &response)
+        }
+        RoutePayload::SnapshotResponse { snapshot, .. } => {
+            state
+                .borrow()
+                .db
+                .load_snapshot(snapshot)
+                .map_err(to_js_error)
+        }
+        RoutePayload::Sync { encoding, payload } => {
+            let frame = {
+                let borrowed = state.borrow();
+                decode_sync_payload(&borrowed.db, &encoding, payload)?
+            };
+            handle_mesh_sync_frame(state, remote_peer, frame)
+        }
+    }
+}
+
+fn handle_mesh_sync_frame(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+    frame: SyncFrame,
+) -> std::result::Result<(), JsValue> {
+    match frame {
+        SyncFrame::Sync {
+            from,
+            message_id,
+            ops,
+        } => {
+            let db = state.borrow().db.clone();
+            let applied = db
+                .apply_sync_envelope(SyncEnvelope { from, ops })
+                .map_err(to_js_error)?;
+            let ack = SyncFrame::Ack {
+                from: db.replica_id(),
+                message_id,
+                applied,
+            };
+            send_mesh_sync_frame(state, ack, RouteTarget::Peer(remote_peer.to_owned()))
+        }
+        SyncFrame::Ack {
+            from: _,
+            message_id,
+            applied: _,
+        } => {
+            let mut borrowed = state.borrow_mut();
+            if let Some(outbound) = borrowed.inflight.get_mut(&message_id) {
+                outbound.awaiting.remove(remote_peer);
+                if outbound.awaiting.is_empty() {
+                    borrowed.inflight.remove(&message_id);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn flush_mesh_pending_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+) -> std::result::Result<usize, JsValue> {
+    let db = state.borrow().db.clone();
+    let peer_ids = state
+        .borrow()
+        .peers
+        .iter()
+        .filter_map(|(peer_id, peer)| peer.channel.as_ref().map(|_| peer_id.clone()))
+        .collect::<Vec<_>>();
+    if peer_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut envelope = db.drain_sync_envelope().map_err(to_js_error)?;
+    if envelope.ops.is_empty() {
+        return Ok(0);
+    }
+
+    let max_ops = db.limits().max_ops_per_message.max(1);
+    if envelope.ops.len() > max_ops {
+        let remainder = envelope.ops.split_off(max_ops);
+        let _ = db.requeue_pending_operations(remainder);
+    }
+
+    let message_id = {
+        let mut borrowed = state.borrow_mut();
+        borrowed.next_message_seq = borrowed.next_message_seq.saturating_add(1);
+        format!("{}/mesh/{:x}", borrowed.db.replica_id(), borrowed.next_message_seq)
+    };
+    let frame = SyncFrame::Sync {
+        from: envelope.from.clone(),
+        message_id: message_id.clone(),
+        ops: envelope.ops.clone(),
+    };
+    let (encoding, payload) = encode_sync_payload(&db, frame)?;
+    let route = state
+        .borrow()
+        .router
+        .wrap_sync(encoding.clone(), payload.clone(), RouteTarget::Broadcast);
+
+    let mut awaiting = BTreeMap::new();
+    for peer_id in &peer_ids {
+        if send_mesh_route_to_peer(state, peer_id, &route).is_ok() {
+            awaiting.insert(peer_id.clone(), false);
+        }
+    }
+
+    if awaiting.is_empty() {
+        let _ = db.requeue_pending_operations(envelope.ops);
+        return Ok(0);
+    }
+
+    state.borrow_mut().inflight.insert(
+        message_id,
+        MeshOutbound {
+            encoding,
+            payload,
+            awaiting,
+        },
+    );
+    Ok(peer_ids.len())
+}
+
+fn retry_mesh_inflight_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+) -> std::result::Result<usize, JsValue> {
+    let outbound = state
+        .borrow()
+        .inflight
+        .iter()
+        .map(|(_, outbound)| outbound.clone())
+        .collect::<Vec<_>>();
+    for item in &outbound {
+        let route = state.borrow().router.wrap_sync(
+            item.encoding.clone(),
+            item.payload.clone(),
+            RouteTarget::Broadcast,
+        );
+        for peer_id in item.awaiting.keys() {
+            let _ = send_mesh_route_to_peer(state, peer_id, &route);
+        }
+    }
+    Ok(outbound.len())
+}
+
+fn send_mesh_sync_frame(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    frame: SyncFrame,
+    target: RouteTarget,
+) -> std::result::Result<(), JsValue> {
+    let db = state.borrow().db.clone();
+    let (encoding, payload) = encode_sync_payload(&db, frame)?;
+    let route = state.borrow().router.wrap_sync(encoding, payload, target.clone());
+    match target {
+        RouteTarget::Peer(peer_id) => send_mesh_route_to_peer(state, &peer_id, &route),
+        RouteTarget::Broadcast | RouteTarget::Topic(_) => {
+            let peer_ids = state.borrow().peers.keys().cloned().collect::<Vec<_>>();
+            for peer_id in peer_ids {
+                let _ = send_mesh_route_to_peer(state, &peer_id, &route);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn send_mesh_route_to_peer(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    peer_id: &str,
+    route: &RouteEnvelope,
+) -> std::result::Result<(), JsValue> {
+    let payload = serde_json::to_string(route).map_err(to_js_error)?;
+    let max_bytes = state.borrow().db.limits().max_route_payload_bytes;
+    if payload.len() > max_bytes {
+        return Err(JsValue::from_str(&format!(
+            "route payload exceeds {max_bytes} bytes"
+        )));
+    }
+
+    let channel = state
+        .borrow()
+        .peers
+        .get(peer_id)
+        .and_then(|peer| peer.channel.clone())
+        .ok_or_else(|| JsValue::from_str("mesh peer channel is unavailable"))?;
+    channel.send_with_str(&payload)
+}
+
+fn session_description_sdp(
+    description: &web_sys::RtcSessionDescriptionInit,
+) -> std::result::Result<String, JsValue> {
+    js_sys::Reflect::get(description.as_ref(), &JsValue::from_str("sdp"))?
+        .as_string()
+        .ok_or_else(|| JsValue::from_str("session description is missing sdp"))
 }
 
 async fn save_snapshot_string_indexed_db(
