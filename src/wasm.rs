@@ -1119,6 +1119,18 @@ fn handle_mesh_signal_state(
                 spawn_local(async move {
                     let _ = create_mesh_offer(&state, from).await;
                 });
+            } else {
+                let (room, from_local) = {
+                    let borrowed = state.borrow();
+                    (borrowed.room.clone(), borrowed.peer_id.clone())
+                };
+                let _ = post_mesh_signal_state(
+                    state,
+                    &MeshSignal::Join {
+                        room,
+                        from: from_local,
+                    },
+                );
             }
         }
         MeshSignal::Offer {
@@ -1202,9 +1214,9 @@ async fn create_mesh_offer(
         attach_mesh_channel_handlers(state, &remote_peer, channel)?;
     }
 
-    let offer = JsFuture::from(connection.create_offer())
-        .await?
-        .dyn_into::<web_sys::RtcSessionDescriptionInit>()?;
+    let offer_value = JsFuture::from(connection.create_offer()).await?;
+    let offer_sdp = session_description_sdp_value(&offer_value)?;
+    let offer = session_description_init(web_sys::RtcSdpType::Offer, &offer_sdp);
     JsFuture::from(connection.set_local_description(&offer)).await?;
     let (room, from) = {
         let borrowed = state.borrow();
@@ -1216,7 +1228,7 @@ async fn create_mesh_offer(
             room,
             from,
             to: remote_peer,
-            sdp: session_description_sdp(&offer)?,
+            sdp: offer_sdp,
         },
     )?;
     Ok(())
@@ -1232,9 +1244,9 @@ async fn accept_mesh_offer(
     offer.set_sdp(&sdp);
     JsFuture::from(connection.set_remote_description(&offer)).await?;
 
-    let answer = JsFuture::from(connection.create_answer())
-        .await?
-        .dyn_into::<web_sys::RtcSessionDescriptionInit>()?;
+    let answer_value = JsFuture::from(connection.create_answer()).await?;
+    let answer_sdp = session_description_sdp_value(&answer_value)?;
+    let answer = session_description_init(web_sys::RtcSdpType::Answer, &answer_sdp);
     JsFuture::from(connection.set_local_description(&answer)).await?;
     let (room, from) = {
         let borrowed = state.borrow();
@@ -1246,7 +1258,7 @@ async fn accept_mesh_offer(
             room,
             from,
             to: remote_peer,
-            sdp: session_description_sdp(&answer)?,
+            sdp: answer_sdp,
         },
     )?;
     Ok(())
@@ -1639,12 +1651,19 @@ fn send_mesh_route_to_peer(
     channel.send_with_str(&payload)
 }
 
-fn session_description_sdp(
-    description: &web_sys::RtcSessionDescriptionInit,
-) -> std::result::Result<String, JsValue> {
-    js_sys::Reflect::get(description.as_ref(), &JsValue::from_str("sdp"))?
+fn session_description_sdp_value(value: &JsValue) -> std::result::Result<String, JsValue> {
+    js_sys::Reflect::get(value, &JsValue::from_str("sdp"))?
         .as_string()
         .ok_or_else(|| JsValue::from_str("session description is missing sdp"))
+}
+
+fn session_description_init(
+    kind: web_sys::RtcSdpType,
+    sdp: &str,
+) -> web_sys::RtcSessionDescriptionInit {
+    let description = web_sys::RtcSessionDescriptionInit::new(kind);
+    description.set_sdp(sdp);
+    description
 }
 
 async fn save_snapshot_string_indexed_db(
