@@ -59,6 +59,7 @@ pub struct WasmWebSocketSync {
 impl WasmPrimadb {
     #[wasm_bindgen(constructor)]
     pub fn new(replica_id: Option<String>) -> Self {
+        console_error_panic_hook::set_once();
         let inner = replica_id.map(Primadb::with_replica_id).unwrap_or_default();
         Self { inner }
     }
@@ -770,7 +771,9 @@ fn to_js<T>(value: &T) -> std::result::Result<JsValue, JsValue>
 where
     T: Serialize,
 {
-    serde_wasm_bindgen::to_value(value).map_err(|error| JsValue::from_str(&error.to_string()))
+    value
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 fn to_js_error(error: impl ToString) -> JsValue {
