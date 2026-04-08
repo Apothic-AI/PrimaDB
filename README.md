@@ -160,6 +160,9 @@ const db = new primadb.Primadb("threaded-browser");
 console.log(primadb.parallelEnabled(), primadb.parallelThreadCount());
 ```
 
+For a full threaded browser P2P example on top of the same bootstrap path, see
+[examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md).
+
 ## Replication Contract
 
 Primadb does not hide the wire format from you.
