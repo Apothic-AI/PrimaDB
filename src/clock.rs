@@ -117,6 +117,15 @@ impl HybridClock {
     pub fn default_actor() -> String {
         format!("replica-{:x}", now_millis())
     }
+
+    pub(crate) fn rebased_with_actor(&self, actor: impl Into<String>) -> Self {
+        Self {
+            actor: actor.into(),
+            last_millis: self.last_millis,
+            counter: self.counter,
+            sequence: self.sequence,
+        }
+    }
 }
 
 impl Default for HybridClock {

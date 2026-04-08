@@ -203,7 +203,7 @@ impl Primadb {
 
     pub fn import_persisted_snapshot_json(&self, payload: &str) -> Result<()> {
         if let Ok(snapshot) = serde_json::from_str::<DatabaseSnapshot>(payload) {
-            return self.load_snapshot(snapshot);
+            return self.load_persisted_snapshot(snapshot);
         }
 
         #[cfg(feature = "crypto")]
@@ -213,7 +213,7 @@ impl Primadb {
                 let inner = self.inner.lock().unwrap();
                 inner.security.decode_snapshot(stored)?
             };
-            self.load_snapshot(snapshot)
+            self.load_persisted_snapshot(snapshot)
         }
 
         #[cfg(not(feature = "crypto"))]
@@ -230,6 +230,23 @@ impl Primadb {
             inner.clock = snapshot.clock;
             inner.nodes = snapshot.nodes;
             inner.pending_ops = snapshot.pending_ops;
+            inner.unflushed_ops.clear();
+        }
+        self.finalize_change(true)
+    }
+
+    fn load_persisted_snapshot(&self, snapshot: DatabaseSnapshot) -> Result<()> {
+        let local_actor = self.replica_id();
+        let keep_pending = snapshot.clock.actor() == local_actor;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.clock = snapshot.clock.rebased_with_actor(local_actor);
+            inner.nodes = snapshot.nodes;
+            inner.pending_ops = if keep_pending {
+                snapshot.pending_ops
+            } else {
+                Vec::new()
+            };
             inner.unflushed_ops.clear();
         }
         self.finalize_change(true)
@@ -2465,6 +2482,25 @@ mod tests {
         assert_eq!(snapshot["value"], "world");
 
         let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_snapshot_preserves_local_actor_and_clears_foreign_pending_ops() -> Result<()> {
+        let first = Primadb::with_replica_id("actor-a");
+        first
+            .root("docs")
+            .field("hello")
+            .put(json!({"value": "world"}))?;
+        let persisted = first.export_persisted_snapshot_json()?;
+
+        let second = Primadb::with_replica_id("actor-b");
+        second.import_persisted_snapshot_json(&persisted)?;
+
+        assert_eq!(second.replica_id(), "actor-b");
+        assert!(second.pending_operations().is_empty());
+        let value = second.root("docs").field("hello").once_json()?.unwrap();
+        assert_eq!(value["value"], "world");
         Ok(())
     }
 }
