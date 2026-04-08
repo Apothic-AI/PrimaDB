@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Primadb Threaded Mesh Notes</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <p class="eyebrow">Primadb wasm-threads + P2P</p>
+        <h1>Threaded Mesh Notes</h1>
+        <p class="lede">
+          Open two tabs on the same origin to let Primadb discover a peer through
+          <code>BroadcastChannel</code>, sync directly over WebRTC, and run note queries through
+          the threaded Rayon path.
+        </p>
+
+        <div class="status-grid">
+          <div class="status-card">
+            <span class="status-label">Replica</span>
+            <strong id="replica-id">booting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Build</span>
+            <strong id="build-mode">loading</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Thread Pool</span>
+            <strong id="thread-count">0</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Persistence</span>
+            <strong id="persistence-status">starting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Peers</span>
+            <strong id="peer-count">0</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Mesh Queue</span>
+            <strong id="mesh-queue">0</strong>
+          </div>
+        </div>
+
+        <p class="detail" id="mesh-detail">starting threaded mesh</p>
+      </section>
+
+      <section class="composer panel">
+        <form id="note-form" class="note-form">
+          <label class="field">
+            <span>Note title</span>
+            <input
+              id="note-title"
+              name="title"
+              type="text"
+              autocomplete="off"
+              maxlength="120"
+              placeholder="Stress the shared query path"
+              required
+            />
+          </label>
+
+          <label class="field">
+            <span>Body</span>
+            <textarea
+              id="note-body"
+              name="body"
+              rows="3"
+              maxlength="320"
+              placeholder="Optional details"
+            ></textarea>
+          </label>
+
+          <button class="primary-button" type="submit">Add note</button>
+        </form>
+      </section>
+
+      <section class="controls panel">
+        <div class="filters" id="filter-group">
+          <button class="filter-button is-active" data-filter="all" type="button">All</button>
+          <button class="filter-button" data-filter="open" type="button">Open</button>
+          <button class="filter-button" data-filter="done" type="button">Done</button>
+        </div>
+
+        <label class="search-field">
+          <span>Search</span>
+          <input
+            id="search-input"
+            type="search"
+            autocomplete="off"
+            placeholder="Filter by title or body"
+          />
+        </label>
+      </section>
+
+      <section class="panel workload-panel">
+        <div class="workload-actions">
+          <button class="primary-button" id="seed-button" type="button">Seed Shared Load</button>
+          <button class="ghost-button" id="query-button" type="button">Run Parallel Query</button>
+        </div>
+
+        <div class="status-grid compact-grid">
+          <div class="status-card">
+            <span class="status-label">Seeded Notes</span>
+            <strong id="seed-count">0</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Last Query</span>
+            <strong id="query-timing">not run</strong>
+          </div>
+        </div>
+
+        <pre id="query-output" class="query-output">Waiting for threaded mesh startup…</pre>
+      </section>
+
+      <section class="panel">
+        <div id="empty-state" class="empty-state" hidden>
+          <h2>No matching notes</h2>
+          <p>Add a note or adjust the active filters.</p>
+        </div>
+        <ul id="note-list" class="note-list"></ul>
+      </section>
+    </main>
+
+    <template id="note-template">
+      <li class="note-card">
+        <div class="note-header">
+          <button class="toggle-button" type="button" aria-label="Toggle complete"></button>
+          <div class="note-meta">
+            <h2 class="note-title"></h2>
+            <p class="note-body"></p>
+          </div>
+        </div>
+        <div class="note-footer">
+          <span class="note-timestamp"></span>
+          <button class="ghost-button archive-button" type="button">Archive</button>
+        </div>
+      </li>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -626,6 +626,7 @@ impl WasmPrimadb {
         let retry_ms = retry_interval_ms.unwrap_or(2_000);
         let retry_state = state.clone();
         let retry_callback = Closure::wrap(Box::new(move || {
+            let _ = announce_mesh_join_state(&retry_state);
             let _ = retry_mesh_inflight_state(&retry_state);
             let _ = flush_mesh_pending_state(&retry_state);
         }) as Box<dyn FnMut()>);
@@ -635,13 +636,7 @@ impl WasmPrimadb {
                 retry_ms,
             )?;
 
-        post_mesh_signal_state(
-            &state,
-            &MeshSignal::Join {
-                room,
-                from: peer_id,
-            },
-        )?;
+        announce_mesh_join_state(&state)?;
 
         Ok(WasmWebRtcMesh {
             state,
@@ -1036,6 +1031,16 @@ impl WasmWebRtcMesh {
     #[wasm_bindgen(js_name = peerCount)]
     pub fn peer_count(&self) -> usize {
         self.state.borrow().peers.len()
+    }
+
+    #[wasm_bindgen(js_name = openPeerCount)]
+    pub fn open_peer_count(&self) -> usize {
+        self.state
+            .borrow()
+            .peers
+            .values()
+            .filter(|peer| peer.channel.as_ref().is_some_and(mesh_channel_is_open))
+            .count()
     }
 
     #[wasm_bindgen(js_name = inflightCount)]
@@ -1680,6 +1685,16 @@ fn post_mesh_signal_state(
     )
 }
 
+fn announce_mesh_join_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+) -> std::result::Result<(), JsValue> {
+    let (room, from) = {
+        let borrowed = state.borrow();
+        (borrowed.room.clone(), borrowed.peer_id.clone())
+    };
+    post_mesh_signal_state(state, &MeshSignal::Join { room, from })
+}
+
 fn handle_mesh_signal_state(
     state: &Rc<RefCell<WebRtcMeshState>>,
     signal: MeshSignal,
@@ -2148,7 +2163,12 @@ fn flush_mesh_pending_state(
         .borrow()
         .peers
         .iter()
-        .filter_map(|(peer_id, peer)| peer.channel.as_ref().map(|_| peer_id.clone()))
+        .filter_map(|(peer_id, peer)| {
+            peer.channel
+                .as_ref()
+                .is_some_and(mesh_channel_is_open)
+                .then_some(peer_id.clone())
+        })
         .collect::<Vec<_>>();
     if peer_ids.is_empty() {
         return Ok(0);
@@ -2273,7 +2293,14 @@ fn send_mesh_route_to_peer(
         .get(peer_id)
         .and_then(|peer| peer.channel.clone())
         .ok_or_else(|| JsValue::from_str("mesh peer channel is unavailable"))?;
+    if !mesh_channel_is_open(&channel) {
+        return Err(JsValue::from_str("mesh peer channel is not open"));
+    }
     channel.send_with_str(&payload)
+}
+
+fn mesh_channel_is_open(channel: &web_sys::RtcDataChannel) -> bool {
+    channel.ready_state() == web_sys::RtcDataChannelState::Open
 }
 
 fn session_description_sdp_value(value: &JsValue) -> std::result::Result<String, JsValue> {
