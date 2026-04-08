@@ -27,12 +27,19 @@
           <strong id="persistence-status">starting</strong>
         </div>
         <div>
-          <span class="label">Relay</span>
+          <span class="label">Relay State</span>
           <strong id="relay-status">disconnected</strong>
+          <small id="relay-detail" class="status-detail">No relay connection yet.</small>
         </div>
         <div>
-          <span class="label">Inflight</span>
+          <span class="label">Queued Changes</span>
+          <strong id="pending-count">0</strong>
+          <small class="status-detail">Local writes not yet fully synced.</small>
+        </div>
+        <div>
+          <span class="label">Awaiting Ack</span>
           <strong id="inflight-count">0</strong>
+          <small class="status-detail">Messages sent to the relay and waiting for peer confirmation.</small>
         </div>
       </section>
 

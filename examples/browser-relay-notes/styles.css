@@ -84,6 +84,14 @@ h1 {
   margin-top: 0.3rem;
 }
 
+.status-detail {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
 .relay-config,
 .controls {
   display: flex;
@@ -148,6 +156,10 @@ textarea:focus {
   padding: 0.85rem 1.25rem;
   color: white;
   background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+}
+
+.primary-button.is-live {
+  background: linear-gradient(135deg, #1f7a4a 0%, #155233 100%);
 }
 
 .filters {

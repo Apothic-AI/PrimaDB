@@ -10,6 +10,7 @@ const state = {
   subscription: null,
   persistence: null,
   relay: null,
+  statusTimer: null,
   filter: "all",
   search: "",
 };
@@ -18,6 +19,8 @@ const elements = {
   replicaId: document.getElementById("replica-id"),
   persistenceStatus: document.getElementById("persistence-status"),
   relayStatus: document.getElementById("relay-status"),
+  relayDetail: document.getElementById("relay-detail"),
+  pendingCount: document.getElementById("pending-count"),
   inflightCount: document.getElementById("inflight-count"),
   relayUrl: document.getElementById("relay-url"),
   connectButton: document.getElementById("connect-button"),
@@ -55,8 +58,13 @@ async function main() {
   await ensureSeedNote();
   await render();
   updateRelayStatus();
+  startStatusLoop();
+  await connectRelay();
 
   globalThis.addEventListener("beforeunload", () => {
+    if (state.statusTimer) {
+      clearInterval(state.statusTimer);
+    }
     state.subscription?.cancel();
     state.persistence?.close();
     state.relay?.close();
@@ -125,15 +133,24 @@ function bindUi() {
 }
 
 async function connectRelay() {
+  elements.connectButton.disabled = true;
   try {
     state.relay?.close();
   } catch (error) {
     console.warn("closing previous relay failed", error);
   }
 
-  state.relay = state.db.connectWebSocket(elements.relayUrl.value.trim(), 1500);
-  updateRelayStatus();
-  flushRelay();
+  try {
+    state.relay = state.db.connectWebSocket(elements.relayUrl.value.trim(), 1500);
+    updateRelayStatus();
+    flushRelay();
+  } catch (error) {
+    console.error("relay connect failed", error);
+    state.relay = null;
+    updateRelayStatus();
+  } finally {
+    elements.connectButton.disabled = false;
+  }
 }
 
 async function ensureSeedNote() {
@@ -262,24 +279,67 @@ function flushRelay() {
   updateRelayStatus();
 }
 
+function startStatusLoop() {
+  if (state.statusTimer) {
+    clearInterval(state.statusTimer);
+  }
+  state.statusTimer = setInterval(() => {
+    updateRelayStatus();
+  }, 500);
+}
+
 function updateRelayStatus() {
   if (!state.relay) {
-    elements.relayStatus.textContent = "not connected";
+    elements.relayStatus.textContent = "offline";
+    elements.relayDetail.textContent = "Not connected to the relay. Local changes stay in this browser until you connect.";
+    elements.pendingCount.textContent = String(state.db ? state.db.pendingOperations().length : 0);
     elements.inflightCount.textContent = "0";
+    elements.connectButton.textContent = "Connect";
+    elements.connectButton.classList.remove("is-live");
     return;
   }
 
   const readyState = state.relay.readyState();
-  const label =
-    readyState === WebSocket.CONNECTING
-      ? "connecting"
-      : readyState === WebSocket.OPEN
-        ? "connected"
-        : readyState === WebSocket.CLOSING
-          ? "closing"
-          : "closed";
+  const pending = state.relay.pendingCount();
+  const inflight = state.relay.inflightCount();
 
-  elements.relayStatus.textContent = `${label} / pending ${state.relay.pendingCount()}`;
+  if (readyState === WebSocket.CONNECTING) {
+    elements.relayStatus.textContent = "connecting";
+    elements.relayDetail.textContent =
+      "The browser has opened a WebSocket and is waiting for the relay handshake to finish.";
+    elements.connectButton.textContent = "Connecting...";
+    elements.connectButton.classList.remove("is-live");
+  } else if (readyState === WebSocket.OPEN) {
+    elements.relayStatus.textContent = "connected";
+    if (inflight > 0) {
+      elements.relayDetail.textContent =
+        inflight === 1
+          ? "1 message has been sent to the relay and is waiting for another client to acknowledge it."
+          : `${inflight} messages have been sent to the relay and are waiting for peer acknowledgments.`;
+    } else if (pending > 0) {
+      elements.relayDetail.textContent =
+        pending === 1
+          ? "1 local change is queued to be sent."
+          : `${pending} local changes are queued to be sent.`;
+    } else {
+      elements.relayDetail.textContent = "Relay link is live and there are no unsynced changes right now.";
+    }
+    elements.connectButton.textContent = "Reconnect";
+    elements.connectButton.classList.add("is-live");
+  } else if (readyState === WebSocket.CLOSING) {
+    elements.relayStatus.textContent = "closing";
+    elements.relayDetail.textContent = "The relay connection is shutting down.";
+    elements.connectButton.textContent = "Reconnect";
+    elements.connectButton.classList.remove("is-live");
+  } else {
+    elements.relayStatus.textContent = "closed";
+    elements.relayDetail.textContent =
+      "The relay socket is closed. Any unsynced changes stay local and will send again after reconnecting.";
+    elements.connectButton.textContent = "Reconnect";
+    elements.connectButton.classList.remove("is-live");
+  }
+
+  elements.pendingCount.textContent = String(pending);
   elements.inflightCount.textContent = String(state.relay.inflightCount());
 }
 
