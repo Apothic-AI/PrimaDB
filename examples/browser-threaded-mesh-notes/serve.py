@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
+import os
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PORT = 4175
+HOST = os.environ.get("PRIMADB_HOST", "127.0.0.1")
+PORT = int(os.environ.get("PRIMADB_PORT", "4175"))
+
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
 
 
 class CoopCoepHandler(SimpleHTTPRequestHandler):
@@ -20,6 +26,6 @@ class CoopCoepHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), CoopCoepHandler)
-    print(f"Serving {ROOT} at http://127.0.0.1:{PORT}/")
+    server = ReusableThreadingHTTPServer((HOST, PORT), CoopCoepHandler)
+    print(f"Serving {ROOT} at http://{HOST}:{PORT}/")
     server.serve_forever()
