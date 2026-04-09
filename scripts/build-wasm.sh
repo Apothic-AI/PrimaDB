@@ -10,6 +10,18 @@ TOOLCHAIN="${PRIMADB_WASM_TOOLCHAIN:-stable}"
 TARGET="${PRIMADB_WASM_TARGET:-web}"
 THREADS=0
 DEV=0
+WASM_RUSTFLAGS="${RUSTFLAGS:-}"
+
+append_feature() {
+  local feature="$1"
+  local existing="${FEATURES:-}"
+  for candidate in $existing; do
+    if [[ "$candidate" == "$feature" ]]; then
+      return
+    fi
+  done
+  FEATURES="${existing:+$existing }$feature"
+}
 
 while (($# > 0)); do
   case "$1" in
@@ -80,22 +92,28 @@ if ((DEV)); then
 fi
 
 CARGO_ARGS=()
-if [[ -n "$FEATURES" ]]; then
-  CARGO_ARGS+=(--features "$FEATURES")
-fi
+THREAD_BUILD_STD=0
 
 if ((THREADS)); then
   TOOLCHAIN="${PRIMADB_WASM_THREADS_TOOLCHAIN:-nightly}"
+  append_feature "wasm-threads"
   rustup component add rust-src --toolchain "$TOOLCHAIN" >/dev/null
   rustup target add wasm32-unknown-unknown --toolchain "$TOOLCHAIN" >/dev/null
-  CARGO_ARGS+=(-Z build-std=panic_abort,std)
-  export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
+  THREAD_BUILD_STD=1
+  WASM_RUSTFLAGS="${WASM_RUSTFLAGS:+$WASM_RUSTFLAGS }-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
 else
   rustup target add wasm32-unknown-unknown --toolchain "$TOOLCHAIN" >/dev/null
 fi
 
+if [[ -n "$FEATURES" ]]; then
+  CARGO_ARGS+=(--features "$FEATURES")
+fi
+if ((THREAD_BUILD_STD)); then
+  CARGO_ARGS+=(-Z build-std=panic_abort,std)
+fi
+
 if ((${#CARGO_ARGS[@]} > 0)); then
-  RUSTUP_TOOLCHAIN="$TOOLCHAIN" wasm-pack "${PACK_ARGS[@]}" -- "${CARGO_ARGS[@]}"
+  RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$WASM_RUSTFLAGS" wasm-pack "${PACK_ARGS[@]}" -- "${CARGO_ARGS[@]}"
 else
-  RUSTUP_TOOLCHAIN="$TOOLCHAIN" wasm-pack "${PACK_ARGS[@]}"
+  RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$WASM_RUSTFLAGS" wasm-pack "${PACK_ARGS[@]}"
 fi

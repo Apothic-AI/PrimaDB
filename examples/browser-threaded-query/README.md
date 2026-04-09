@@ -15,7 +15,7 @@ Build:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb
-./build-wasm-threads.sh --out-dir examples/browser-threaded-query/pkg --features wasm-threads
+./build-wasm-threads.sh --out-dir examples/browser-threaded-query/pkg
 ```
 
 or use the example wrapper:

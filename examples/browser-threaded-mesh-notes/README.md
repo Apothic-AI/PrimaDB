@@ -18,7 +18,7 @@ It demonstrates:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb
-./build-wasm-threads.sh --out-dir examples/browser-threaded-mesh-notes/pkg --features wasm-threads
+./build-wasm-threads.sh --out-dir examples/browser-threaded-mesh-notes/pkg
 ```
 
 or use the example wrapper:

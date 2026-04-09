@@ -166,7 +166,7 @@ build path. That path is intentionally opt-in because it requires:
 The canonical threaded build entrypoint is:
 
 ```bash
-./build-wasm-threads.sh --features wasm-threads
+./build-wasm-threads.sh
 ```
 
 That produces a threaded package in `./pkg` by default. Example-level threaded `build.sh` scripts
@@ -233,6 +233,110 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - [examples/authenticated_sync.rs](/home/bitnom/Code/gunport/primadb/examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
 - [examples/radisk_storage.rs](/home/bitnom/Code/gunport/primadb/examples/radisk_storage.rs): Incremental segment-backed native storage demo through the current `use_radisk_storage(...)` entrypoint, runnable with `cargo run --example radisk_storage`.
 - [examples/gun_compat.rs](/home/bitnom/Code/gunport/primadb/examples/gun_compat.rs): Gun-compatible API demo, runnable with `cargo run --example gun_compat`.
+
+## Running Examples
+
+Standard browser build:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./build-wasm.sh
+```
+
+Threaded browser build:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./build-wasm-threads.sh
+```
+
+Local-only browser board:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-notes/build.sh
+./examples/browser-notes/serve.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:4173/examples/browser-notes/
+```
+
+Relay-backed browser board:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-relay-notes/build.sh
+cargo run --example ws_relay_server -- 127.0.0.1:9010
+```
+
+In a second terminal:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-relay-notes/serve.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:4173/examples/browser-relay-notes/
+```
+
+Gun-style relay example:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-gun-notes/build.sh
+cargo run --example ws_relay_server -- 127.0.0.1:9010
+```
+
+In a second terminal:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-gun-notes/serve.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:4173/examples/browser-gun-notes/
+```
+
+Threaded relay-signaled WebRTC mesh example:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-threaded-mesh-notes/build.sh
+cargo run --example ws_relay_server -- 127.0.0.1:9010
+```
+
+In a second terminal:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-threaded-mesh-notes/serve.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:4175/examples/browser-threaded-mesh-notes/
+```
+
+Browser smoke tests:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+bash examples/browser-segment-notes/test-live-sync.sh
+bash examples/browser-mesh-notes/test-two-page-smoke.sh
+bash examples/browser-threaded-mesh-notes/test-two-page-smoke.sh
+bash examples/browser-threaded-mesh-notes/test-cross-browser-smoke.sh
+bash examples/browser-gun-notes/test-runtime-smoke.sh
+```
 
 ## Query Layer
 

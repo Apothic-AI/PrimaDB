@@ -6,5 +6,4 @@ cd "$ROOT_DIR"
 
 exec ./build-wasm-threads.sh \
   --out-dir examples/browser-threaded-query/pkg \
-  --features wasm-threads \
   "$@"
