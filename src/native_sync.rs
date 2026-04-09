@@ -1,7 +1,7 @@
 use crate::{
     ChangeSubscription, HybridClock, LexEntry, MapEntry, Operation, PeerRecommendation, Primadb,
-    PrimadbError, RemotePath, RemoteResult, Result, RouteBatchItem, RouteEnvelope, RoutePayload,
-    RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
+    PrimadbError, RelayClientConfig, RemotePath, RemoteResult, Result, RouteBatchItem,
+    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
 };
 use async_channel::{Sender, bounded};
 use futures_util::{SinkExt, StreamExt};
@@ -71,6 +71,11 @@ pub struct NativeWebSocketSync {
 }
 
 impl NativeWebSocketSync {
+    pub async fn connect_with_config(db: Primadb, config: RelayClientConfig) -> Result<Self> {
+        let retry_interval = Duration::from_millis(config.retry_interval_ms.max(1));
+        Self::connect(db, config.url, retry_interval).await
+    }
+
     pub async fn connect(
         db: Primadb,
         url: impl AsRef<str>,

@@ -6,4 +6,4 @@ cd "$ROOT_DIR"
 
 ./examples/browser-threaded-mesh-notes/build.sh
 
-node ./examples/browser-threaded-mesh-notes/test-cross-browser-smoke.mjs
+node ./examples/browser-threaded-mesh-notes/test-browser-native-smoke.mjs

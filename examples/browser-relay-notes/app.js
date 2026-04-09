@@ -161,7 +161,10 @@ async function connectRelay() {
   }
 
   try {
-    state.relay = state.db.connectWebSocket(elements.relayUrl.value.trim(), 1500);
+    state.relay = state.db.connectRelay({
+      url: elements.relayUrl.value.trim(),
+      retryIntervalMs: 1500,
+    });
     updateRelayStatus();
     flushRelay();
   } catch (error) {

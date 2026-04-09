@@ -3,17 +3,24 @@
 - `browser-notes/`: Browser-only local-first task board using Primadb's WASM build, IndexedDB persistence, query filters, and cross-tab sync over `BroadcastChannel`.
 - `browser-segment-notes/`: Browser-only task board using Primadb's segment-backed IndexedDB persistence hook with canonical node/index records and cross-tab sync over `BroadcastChannel`.
   - Includes `test-live-sync.sh`, a two-page Playwright smoke test for live cross-tab delivery.
-- `browser-relay-notes/`: Browser task board using Primadb's WASM build, automatic IndexedDB persistence, peer recommendations, and remote `get/query/lex/snapshot` over the relay.
-- `browser-mesh-notes/`: Browser-to-browser notes board using Primadb's `WebRtcMesh` helper with peer discovery over `BroadcastChannel` and direct sync over WebRTC data channels.
+- `browser-relay-notes/`: Browser task board using Primadb's shared relay client facade, automatic IndexedDB persistence, peer recommendations, and remote `get/query/lex/snapshot` over the relay.
+  - Includes `test-browser-native-smoke.sh`, a browser/native relay smoke test.
+- `browser-mesh-notes/`: Default browser mesh board using Primadb's shared `connectMesh(...)` facade, relay-backed signaling by default, optional `BroadcastChannel` fallback, and direct sync over WebRTC data channels.
   - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for the default WebRTC mesh build.
+  - Includes `test-browser-native-smoke.sh`, a browser/native relay-signaled mesh smoke test.
 - `browser-gun-notes/`: Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the relay-backed DAM path.
   - Includes `test-runtime-smoke.sh`, a browser smoke test covering relay sync plus `load`, `not`, `map`, and `back`.
 - `browser-threaded-query/`: Opt-in `wasm-threads` browser demo with COOP/COEP serving, `initThreadPool(...)`, and a Rayon-backed query workload.
 - `browser-threaded-mesh-notes/`: Opt-in `wasm-threads` browser mesh demo with COOP/COEP serving, relay-backed signaling by default, configurable ICE servers, and peer-to-peer note sync over WebRTC.
   - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for threaded relay-signaled WebRTC sync and parallel query execution.
+  - Includes `test-browser-native-smoke.sh`, a threaded browser/native mesh smoke test.
   - Includes `test-cross-browser-smoke.sh`, a Chromium + Firefox smoke test for live cross-browser replication over the relay-backed mesh.
 - `ws_relay_server.rs`: Rust DAM relay with peer presence, peer exchange, targeted routing, batch bootstrap, and relay-friendly dedupe hints for browser examples. Run with `cargo run --example ws_relay_server`.
 - `native_relay_client.rs`: Native client using Primadb's feature-gated `NativeWebSocketSync` adapter. Run with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
+- `native_relay_probe.rs`: Native relay probe used by the relay smoke tests. Run with `cargo run --features native-websocket --example native_relay_probe -- --relay ws://127.0.0.1:9010 --action status`.
+- `native_mesh_probe.rs`: Native WebRTC mesh probe interoperable with the browser relay-signaled mesh. Run with `cargo run --features native-webrtc --example native_mesh_probe -- --relay ws://127.0.0.1:9010 --room demo --action status`.
+- `test-native-relay-smoke.sh`: Native/native relay smoke test.
+- `test-native-mesh-smoke.sh`: Native/native mesh smoke test.
 - `native_parallel_query.rs`: Native Rayon verification example. Run with `cargo run --example native_parallel_query`.
 - `crypto_foundation.rs`: Feature-gated identity/signing/encryption demo. Run with `cargo run --features crypto --example crypto_foundation`.
 - `authenticated_sync.rs`: Feature-gated signed/encrypted sync policy demo. Run with `cargo run --features crypto --example authenticated_sync`.

@@ -75,3 +75,14 @@ bash examples/browser-threaded-mesh-notes/test-cross-browser-smoke.sh
 
 That script launches Chromium and Firefox against the same relay-backed room and confirms live
 cross-browser replication over WebRTC.
+
+Run the threaded browser/native mixed-host smoke test:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+bash examples/browser-threaded-mesh-notes/test-browser-native-smoke.sh
+```
+
+That script connects a native WebRTC mesh probe to the same relay-backed room, verifies
+browser -> native and native -> browser replication, and confirms the threaded query path is still
+active.

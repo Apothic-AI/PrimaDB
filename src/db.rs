@@ -20,6 +20,12 @@ use crate::{
     Identity, PublicIdentity, SecretBoxKey, SecureSyncFrame, SecurityState, StoredSnapshot,
     UserGrant, owner_public_key_for_path,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::durable::{DurableStorageBinding, DurableStorageConfig};
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
+use crate::{MeshConfig, NativeWebRtcMesh};
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
+use crate::{NativeWebSocketSync, RelayClientConfig};
 use async_channel::{Receiver, Sender};
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
@@ -599,6 +605,48 @@ impl Primadb {
     pub fn use_browser_storage(&self, key: impl Into<String>) -> Result<bool> {
         let target = PersistenceTarget::BrowserStorage(key.into());
         self.configure_persistence(target)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_durable_storage(&self, config: DurableStorageConfig) -> Result<DurableStorageBinding> {
+        match config {
+            DurableStorageConfig::SnapshotFile { path } => {
+                let loaded = self.use_file_persistence(path)?;
+                Ok(DurableStorageBinding {
+                    backend: "snapshot_file".to_owned(),
+                    incremental: false,
+                    loaded_existing: loaded,
+                    auto_persist: true,
+                })
+            }
+            DurableStorageConfig::SegmentFiles {
+                directory,
+                journal_retention,
+            } => {
+                let loaded = self.use_radisk_storage(directory, journal_retention)?;
+                Ok(DurableStorageBinding {
+                    backend: "segment_file".to_owned(),
+                    incremental: true,
+                    loaded_existing: loaded,
+                    auto_persist: true,
+                })
+            }
+            DurableStorageConfig::BrowserStorage { .. }
+            | DurableStorageConfig::IndexedDbSnapshots { .. }
+            | DurableStorageConfig::IndexedDbSegments { .. } => Err(PrimadbError::Message(
+                "browser durable storage config is not available on native targets".to_owned(),
+            )),
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
+    pub async fn connect_relay(&self, config: RelayClientConfig) -> Result<NativeWebSocketSync> {
+        NativeWebSocketSync::connect_with_config(self.clone(), config).await
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
+    pub async fn connect_mesh(&self, config: MeshConfig) -> Result<NativeWebRtcMesh> {
+        NativeWebRtcMesh::connect_with_config(self.clone(), config).await
     }
 
     pub fn attach_storage_adapter(&self, adapter: Arc<dyn StorageAdapter>) -> Result<bool> {

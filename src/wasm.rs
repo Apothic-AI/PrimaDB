@@ -1,12 +1,14 @@
 use crate::{
-    Chain, ChangeSubscription, HybridClock, LexEntry, LexSpec, MapEntry, Operation,
-    PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody,
-    QuerySpec, RemotePath, RemoteResult, RouteBatchItem, RouteEnvelope,
-    RoutePayload, RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame,
-    build_storage_metadata, build_storage_transaction, encode_component,
+    Chain, ChangeSubscription, DurableStorageBinding, DurableStorageConfig, HybridClock,
+    IceServerConfig, LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode,
+    Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind,
+    PullResponse, PullResponseBody, QuerySpec, RelayClientConfig, RemotePath, RemoteResult,
+    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, Subscription,
+    SyncEnvelope, SyncFrame, build_storage_metadata, build_storage_transaction,
+    encode_component,
 };
 use async_channel::{Sender, bounded};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -33,6 +35,7 @@ pub fn parallel_thread_count_js() -> usize {
 #[wasm_bindgen(js_name = Primadb)]
 pub struct WasmPrimadb {
     inner: Primadb,
+    durable_storage_hooks: Rc<RefCell<Vec<WasmDurableStorageHook>>>,
 }
 
 #[wasm_bindgen(js_name = Chain)]
@@ -61,6 +64,16 @@ pub struct WasmIndexedDbSegmentPersistence {
     store_name: String,
     namespace: String,
     subscription: Option<ChangeSubscription>,
+}
+
+#[allow(dead_code)]
+enum WasmDurableStorageHook {
+    Snapshot {
+        _hook: WasmIndexedDbPersistence,
+    },
+    Segment {
+        _hook: WasmIndexedDbSegmentPersistence,
+    },
 }
 
 #[derive(Debug)]
@@ -108,52 +121,6 @@ enum PullAccumulator {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct WebRtcMeshOptions {
-    #[serde(default, alias = "iceServers")]
-    ice_servers: Vec<WebRtcIceServerConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct WebRtcIceServerConfig {
-    urls: WebRtcIceServerUrls,
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    credential: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum WebRtcIceServerUrls {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl WebRtcIceServerUrls {
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            Self::One(url) => vec![url],
-            Self::Many(urls) => urls,
-        }
-    }
-}
-
-impl WebRtcIceServerConfig {
-    fn default_stun_servers() -> Vec<Self> {
-        vec![
-            Self {
-                urls: WebRtcIceServerUrls::Many(vec![
-                    "stun:stun.l.google.com:19302".to_owned(),
-                    "stun:stun.cloudflare.com:3478".to_owned(),
-                ]),
-                username: None,
-                credential: None,
-            },
-        ]
-    }
-}
-
 #[wasm_bindgen(js_name = WebSocketSync)]
 pub struct WasmWebSocketSync {
     state: Rc<RefCell<WebSocketSyncState>>,
@@ -171,39 +138,6 @@ struct MeshOutbound {
     encoding: String,
     payload: JsonValue,
     awaiting: BTreeMap<String, bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum MeshSignal {
-    Join {
-        room: String,
-        from: String,
-    },
-    Offer {
-        room: String,
-        from: String,
-        to: String,
-        sdp: String,
-    },
-    Answer {
-        room: String,
-        from: String,
-        to: String,
-        sdp: String,
-    },
-    Ice {
-        room: String,
-        from: String,
-        to: String,
-        candidate: String,
-        sdp_mid: Option<String>,
-        sdp_mline_index: Option<u16>,
-    },
-    Leave {
-        room: String,
-        from: String,
-    },
 }
 
 struct MeshPeer {
@@ -224,13 +158,6 @@ enum MeshSignalingTransport {
     Relay {
         socket: web_sys::WebSocket,
         relay_url: String,
-    },
-}
-
-enum MeshSignalingTransportInit {
-    BroadcastChannel,
-    Relay {
-        url: String,
     },
 }
 
@@ -264,7 +191,10 @@ impl WasmPrimadb {
     pub fn new(replica_id: Option<String>) -> Self {
         console_error_panic_hook::set_once();
         let inner = replica_id.map(Primadb::with_replica_id).unwrap_or_default();
-        Self { inner }
+        Self {
+            inner,
+            durable_storage_hooks: Rc::new(RefCell::new(Vec::new())),
+        }
     }
 
     #[wasm_bindgen(js_name = replicaId)]
@@ -369,6 +299,95 @@ impl WasmPrimadb {
     #[wasm_bindgen(js_name = useBrowserStorage)]
     pub fn use_browser_storage(&self, key: String) -> std::result::Result<bool, JsValue> {
         self.inner.use_browser_storage(key).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = openDurableStorage)]
+    pub async fn open_durable_storage(
+        &self,
+        config: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let config: DurableStorageConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let binding = match config {
+            DurableStorageConfig::BrowserStorage { key } => DurableStorageBinding {
+                backend: "browser_storage".to_owned(),
+                incremental: false,
+                loaded_existing: self.inner.use_browser_storage(key).map_err(to_js_error)?,
+                auto_persist: true,
+            },
+            DurableStorageConfig::IndexedDbSnapshots {
+                database_name,
+                store_name,
+                key,
+                load_existing,
+                auto_persist,
+            } => {
+                if auto_persist {
+                    let hook = self
+                        .enable_indexed_db_persistence(
+                            database_name,
+                            store_name,
+                            key,
+                            Some(load_existing),
+                        )
+                        .await?;
+                    self.durable_storage_hooks
+                        .borrow_mut()
+                        .push(WasmDurableStorageHook::Snapshot { _hook: hook });
+                } else if load_existing {
+                    let _ = self
+                        .load_indexed_db(database_name.clone(), store_name.clone(), key.clone())
+                        .await?;
+                }
+                DurableStorageBinding {
+                    backend: "indexeddb_snapshot".to_owned(),
+                    incremental: false,
+                    loaded_existing: load_existing,
+                    auto_persist,
+                }
+            }
+            DurableStorageConfig::IndexedDbSegments {
+                database_name,
+                store_name,
+                namespace,
+                load_existing,
+                auto_persist,
+            } => {
+                if auto_persist {
+                    let hook = self
+                        .enable_indexed_db_segment_persistence(
+                            database_name,
+                            store_name,
+                            namespace,
+                            Some(load_existing),
+                        )
+                        .await?;
+                    self.durable_storage_hooks
+                        .borrow_mut()
+                        .push(WasmDurableStorageHook::Segment { _hook: hook });
+                } else if load_existing {
+                    let _ = self
+                        .load_indexed_db_segments(
+                            database_name.clone(),
+                            store_name.clone(),
+                            namespace.clone(),
+                        )
+                        .await?;
+                }
+                DurableStorageBinding {
+                    backend: "indexeddb_segments".to_owned(),
+                    incremental: true,
+                    loaded_existing: load_existing,
+                    auto_persist,
+                }
+            }
+            DurableStorageConfig::SnapshotFile { .. } | DurableStorageConfig::SegmentFiles { .. } => {
+                return Err(JsValue::from_str(
+                    "native durable storage config is not available in the browser",
+                ));
+            }
+        };
+        to_js(&binding)
     }
 
     #[cfg(feature = "crypto")]
@@ -637,6 +656,60 @@ impl WasmPrimadb {
         url: String,
         retry_interval_ms: Option<i32>,
     ) -> std::result::Result<WasmWebSocketSync, JsValue> {
+        self.connect_relay_config(RelayClientConfig {
+            url,
+            retry_interval_ms: retry_interval_ms.unwrap_or(2_000).max(1) as u64,
+        })
+    }
+
+    #[wasm_bindgen(js_name = connectRelay)]
+    pub fn connect_relay(&self, config: JsValue) -> std::result::Result<WasmWebSocketSync, JsValue> {
+        let config: RelayClientConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.connect_relay_config(config)
+    }
+
+    #[wasm_bindgen(js_name = connectWebRtcMesh)]
+    pub fn connect_web_rtc_mesh(
+        &self,
+        room: String,
+        retry_interval_ms: Option<i32>,
+        options: Option<JsValue>,
+    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        let mut config = parse_mesh_config(room, retry_interval_ms, options)?;
+        config.signaling = MeshSignalingMode::BroadcastChannel;
+        self.connect_mesh_config(config)
+    }
+
+    #[wasm_bindgen(js_name = connectWebRtcMeshViaRelay)]
+    pub fn connect_web_rtc_mesh_via_relay(
+        &self,
+        url: String,
+        room: String,
+        retry_interval_ms: Option<i32>,
+        options: Option<JsValue>,
+    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        let mut config = parse_mesh_config(room, retry_interval_ms, options)?;
+        config.signaling = MeshSignalingMode::Relay;
+        config.relay_url = Some(url);
+        self.connect_mesh_config(config)
+    }
+
+    #[wasm_bindgen(js_name = connectMesh)]
+    pub fn connect_mesh(&self, config: JsValue) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        let config: MeshConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.connect_mesh_config(config)
+    }
+}
+
+impl WasmPrimadb {
+    fn connect_relay_config(
+        &self,
+        config: RelayClientConfig,
+    ) -> std::result::Result<WasmWebSocketSync, JsValue> {
+        let url = config.url;
+        let retry_interval_ms = config.retry_interval_ms.min(i32::MAX as u64) as i32;
         let socket = web_sys::WebSocket::new(&url)?;
         socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
@@ -726,7 +799,7 @@ impl WasmPrimadb {
             }
         });
 
-        let interval_ms = retry_interval_ms.unwrap_or(2_000);
+        let interval_ms = retry_interval_ms;
         let interval_state = state.clone();
         let interval_callback = Closure::wrap(Box::new(move || {
             let _ = retry_inflight_state(&interval_state);
@@ -750,60 +823,25 @@ impl WasmPrimadb {
         })
     }
 
-    #[wasm_bindgen(js_name = connectWebRtcMesh)]
-    pub fn connect_web_rtc_mesh(
-        &self,
-        room: String,
-        retry_interval_ms: Option<i32>,
-        options: Option<JsValue>,
-    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
-        self.connect_web_rtc_mesh_inner(
-            MeshSignalingTransportInit::BroadcastChannel,
-            room,
-            retry_interval_ms,
-            options,
-        )
-    }
-
-    #[wasm_bindgen(js_name = connectWebRtcMeshViaRelay)]
-    pub fn connect_web_rtc_mesh_via_relay(
-        &self,
-        url: String,
-        room: String,
-        retry_interval_ms: Option<i32>,
-        options: Option<JsValue>,
-    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
-        self.connect_web_rtc_mesh_inner(
-            MeshSignalingTransportInit::Relay { url },
-            room,
-            retry_interval_ms,
-            options,
-        )
-    }
-}
-
-impl WasmPrimadb {
-    fn connect_web_rtc_mesh_inner(
-        &self,
-        signaling_init: MeshSignalingTransportInit,
-        room: String,
-        retry_interval_ms: Option<i32>,
-        options: Option<JsValue>,
-    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
-        let options = parse_web_rtc_mesh_options(options)?;
-        let rtc_configuration = build_web_rtc_configuration(&options)?;
+    fn connect_mesh_config(&self, config: MeshConfig) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        let room = config.room.clone();
+        let rtc_configuration = build_web_rtc_configuration(&config.effective_ice_servers())?;
         let peer_id = format!(
             "mesh:{}:{}",
             self.inner.replica_id(),
             js_sys::Date::now() as u64
         );
-        let signaling = match signaling_init {
-            MeshSignalingTransportInit::BroadcastChannel => {
+        let signaling = match config.signaling {
+            MeshSignalingMode::BroadcastChannel => {
                 MeshSignalingTransport::BroadcastChannel(web_sys::BroadcastChannel::new(
                     &format!("primadb-mesh-{room}"),
                 )?)
             }
-            MeshSignalingTransportInit::Relay { url } => {
+            MeshSignalingMode::Relay => {
+                let url = config
+                    .relay_url
+                    .clone()
+                    .ok_or_else(|| JsValue::from_str("relay mesh signaling requires a relayUrl"))?;
                 let socket = web_sys::WebSocket::new(&url)?;
                 socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
                 MeshSignalingTransport::Relay {
@@ -884,7 +922,7 @@ impl WasmPrimadb {
             }
         });
 
-        let retry_ms = retry_interval_ms.unwrap_or(2_000);
+        let retry_ms = config.retry_interval_ms.min(i32::MAX as u64) as i32;
         let retry_state = state.clone();
         let retry_callback = Closure::wrap(Box::new(move || {
             let _ = announce_mesh_join_state(&retry_state);
@@ -3093,29 +3131,32 @@ async fn await_idb_transaction(
     result
 }
 
-fn parse_web_rtc_mesh_options(
+fn parse_mesh_config(
+    room: String,
+    retry_interval_ms: Option<i32>,
     options: Option<JsValue>,
-) -> std::result::Result<WebRtcMeshOptions, JsValue> {
-    match options {
-        None => Ok(WebRtcMeshOptions::default()),
-        Some(value) if value.is_null() || value.is_undefined() => Ok(WebRtcMeshOptions::default()),
+) -> std::result::Result<MeshConfig, JsValue> {
+    let mut config = match options {
+        None => MeshConfig::broadcast(room.clone()),
+        Some(value) if value.is_null() || value.is_undefined() => {
+            MeshConfig::broadcast(room.clone())
+        }
         Some(value) => serde_wasm_bindgen::from_value(value)
-            .map_err(|error| JsValue::from_str(&error.to_string())),
+            .map_err(|error| JsValue::from_str(&error.to_string()))?,
+    };
+    config.room = room;
+    if let Some(retry_interval_ms) = retry_interval_ms {
+        config.retry_interval_ms = retry_interval_ms.max(1) as u64;
     }
+    Ok(config)
 }
 
 fn build_web_rtc_configuration(
-    options: &WebRtcMeshOptions,
+    ice_servers: &[IceServerConfig],
 ) -> std::result::Result<JsValue, JsValue> {
-    let ice_servers = if options.ice_servers.is_empty() {
-        WebRtcIceServerConfig::default_stun_servers()
-    } else {
-        options.ice_servers.clone()
-    };
-
     let config = js_sys::Object::new();
     let servers = js_sys::Array::new();
-    for server in ice_servers {
+    for server in ice_servers.iter().cloned() {
         let server_value = js_sys::Object::new();
         let urls = server.urls.into_vec();
         let urls_value = if urls.len() == 1 {

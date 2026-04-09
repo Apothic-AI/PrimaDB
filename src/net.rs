@@ -1,0 +1,158 @@
+use serde::{Deserialize, Serialize};
+
+fn default_retry_interval_ms() -> u64 {
+    2_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshSignalingMode {
+    Relay,
+    BroadcastChannel,
+}
+
+impl Default for MeshSignalingMode {
+    fn default() -> Self {
+        Self::Relay
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum IceServerUrls {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl IceServerUrls {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(url) => vec![url],
+            Self::Many(urls) => urls,
+        }
+    }
+
+    pub fn as_slice(&self) -> Vec<&str> {
+        match self {
+            Self::One(url) => vec![url.as_str()],
+            Self::Many(urls) => urls.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IceServerConfig {
+    pub urls: IceServerUrls,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub credential: Option<String>,
+}
+
+impl IceServerConfig {
+    pub fn default_stun_servers() -> Vec<Self> {
+        vec![Self {
+            urls: IceServerUrls::Many(vec![
+                "stun:stun.l.google.com:19302".to_owned(),
+                "stun:stun.cloudflare.com:3478".to_owned(),
+            ]),
+            username: None,
+            credential: None,
+        }]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayClientConfig {
+    pub url: String,
+    #[serde(default = "default_retry_interval_ms")]
+    pub retry_interval_ms: u64,
+}
+
+impl RelayClientConfig {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            retry_interval_ms: default_retry_interval_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshConfig {
+    pub room: String,
+    #[serde(default)]
+    pub signaling: MeshSignalingMode,
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    #[serde(default = "default_retry_interval_ms")]
+    pub retry_interval_ms: u64,
+    #[serde(default, alias = "iceServers")]
+    pub ice_servers: Vec<IceServerConfig>,
+}
+
+impl MeshConfig {
+    pub fn relay(room: impl Into<String>, relay_url: impl Into<String>) -> Self {
+        Self {
+            room: room.into(),
+            signaling: MeshSignalingMode::Relay,
+            relay_url: Some(relay_url.into()),
+            retry_interval_ms: default_retry_interval_ms(),
+            ice_servers: IceServerConfig::default_stun_servers(),
+        }
+    }
+
+    pub fn broadcast(room: impl Into<String>) -> Self {
+        Self {
+            room: room.into(),
+            signaling: MeshSignalingMode::BroadcastChannel,
+            relay_url: None,
+            retry_interval_ms: default_retry_interval_ms(),
+            ice_servers: IceServerConfig::default_stun_servers(),
+        }
+    }
+
+    pub fn effective_ice_servers(&self) -> Vec<IceServerConfig> {
+        if self.ice_servers.is_empty() {
+            IceServerConfig::default_stun_servers()
+        } else {
+            self.ice_servers.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MeshSignal {
+    Join {
+        room: String,
+        from: String,
+    },
+    Offer {
+        room: String,
+        from: String,
+        to: String,
+        sdp: String,
+    },
+    Answer {
+        room: String,
+        from: String,
+        to: String,
+        sdp: String,
+    },
+    Ice {
+        room: String,
+        from: String,
+        to: String,
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    },
+    Leave {
+        room: String,
+        from: String,
+    },
+}

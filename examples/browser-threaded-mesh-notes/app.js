@@ -77,10 +77,12 @@ async function main() {
   elements.threadCount.textContent = String(primadb.parallelThreadCount());
 
   await setupPersistence();
-  state.mesh =
-    session.signal === "broadcast"
-      ? db.connectWebRtcMesh(session.room, 1500)
-      : db.connectWebRtcMeshViaRelay(session.relayUrl, session.room, 1500);
+  state.mesh = db.connectMesh({
+    room: session.room,
+    signaling: session.signal === "broadcast" ? "broadcast_channel" : "relay",
+    relayUrl: session.signal === "broadcast" ? undefined : session.relayUrl,
+    retryIntervalMs: 1500,
+  });
   bindUi();
   startStatusLoop();
 

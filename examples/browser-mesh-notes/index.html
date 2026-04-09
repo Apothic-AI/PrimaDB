@@ -12,8 +12,9 @@
         <p class="eyebrow">Primadb Mesh Example</p>
         <h1>Browser Mesh Notes</h1>
         <p class="lede">
-          Open two tabs on the same origin to watch Primadb discover peers through
-          <code>BroadcastChannel</code> and sync notes directly over WebRTC data channels.
+          By default this demo discovers peers through a relay-backed signaling path and syncs
+          notes directly over WebRTC data channels. Append <code>?signal=broadcast</code> to fall
+          back to same-browser <code>BroadcastChannel</code> signaling.
         </p>
 
         <div class="status-grid">
@@ -24,6 +25,14 @@
           <div class="status-card">
             <span class="status-label">Persistence</span>
             <strong id="persistence-status">starting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Signaling</span>
+            <strong id="signaling-mode">starting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Relay</span>
+            <strong id="relay-status">starting</strong>
           </div>
           <div class="status-card">
             <span class="status-label">Peers</span>

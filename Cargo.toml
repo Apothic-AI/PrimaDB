@@ -21,6 +21,10 @@ native-websocket = [
     "dep:tokio",
     "dep:tokio-tungstenite",
 ]
+native-webrtc = [
+    "native-websocket",
+    "dep:webrtc",
+]
 wasm-threads = [
     "dep:rayon",
     "dep:wasm-bindgen-rayon",
@@ -42,6 +46,7 @@ getrandom = { version = "0.2", features = ["js"], optional = true }
 rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-tungstenite = { version = "0.26", optional = true }
+webrtc = { version = "0.8", optional = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

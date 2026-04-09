@@ -18,7 +18,7 @@ const SERVER_ROOT =
   process.env.PRIMADB_MESH_ROOT ?? "/home/bitnom/Code/gunport/primadb";
 const CHROME_PATH =
   process.env.PLAYWRIGHT_BROWSER_PATH ?? "/usr/bin/google-chrome-stable";
-const ROOM = process.env.PRIMADB_MESH_ROOM ?? `mesh-smoke-${Date.now()}`;
+const ROOM = process.env.PRIMADB_MESH_ROOM ?? `mesh-native-${Date.now()}`;
 
 async function loadPlaywright() {
   const override = process.env.PLAYWRIGHT_MODULE_PATH;
@@ -125,6 +125,56 @@ async function maybeBuild() {
   });
 }
 
+async function runNativeMeshProbe(args) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(
+      "cargo",
+      [
+        "run",
+        "--quiet",
+        "--features",
+        "native-webrtc",
+        "--example",
+        "native_mesh_probe",
+        "--",
+        ...args,
+      ],
+      {
+        cwd: SERVER_ROOT,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.once("exit", (code) => {
+      if (code === 0) {
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (error) {
+          reject(new Error(`native mesh probe did not produce JSON: ${stdout}\n${error}`));
+        }
+      } else {
+        reject(new Error(`native mesh probe failed with ${code}\n${stderr}`));
+      }
+    });
+  });
+}
+
+function killDetached(child) {
+  if (child?.pid) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {}
+  }
+}
+
 async function main() {
   await maybeBuild();
   const { chromium } = await loadPlaywright();
@@ -142,76 +192,85 @@ async function main() {
 
   try {
     const context = await browser.newContext();
-    const page1 = await context.newPage();
-    const page2 = await context.newPage();
+    const page = await context.newPage();
     const url = `${ROOT_URL}?room=${encodeURIComponent(ROOM)}&signal=relay&relay=${encodeURIComponent(RELAY_URL)}`;
-    const noteTitle = `Mesh note ${Date.now()}`;
+    const browserToNativeTitle = `Browser->Native ${Date.now()}`;
+    const nativeToBrowserTitle = `Native->Browser ${Date.now()}`;
 
-    const waitForReady = async (page) => {
-      await page.goto(url, { waitUntil: "networkidle" });
-      await page.waitForFunction(() => {
-        const persistence = document.querySelector("#persistence-status")?.textContent ?? "";
-        const signaling = document.querySelector("#signaling-mode")?.textContent ?? "";
-        const relay = document.querySelector("#relay-status")?.textContent ?? "";
-        const count = document.querySelectorAll(".note-title").length;
-        return persistence.length > 0 && signaling.includes("relay") && relay === "connected" && count >= 1;
-      }, { timeout: 30_000 });
-    };
+    await page.goto(url, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => {
+      const persistence = document.querySelector("#persistence-status")?.textContent ?? "";
+      const signaling = document.querySelector("#signaling-mode")?.textContent ?? "";
+      const relay = document.querySelector("#relay-status")?.textContent ?? "";
+      return persistence.length > 0 && signaling.includes("relay") && relay === "connected";
+    }, { timeout: 30_000 });
 
-    await waitForReady(page1);
-    await waitForReady(page2);
-
-    await Promise.all([
-      page1.waitForFunction(() => Number(document.querySelector("#peer-count")?.textContent ?? "0") >= 1, { timeout: 30_000 }),
-      page2.waitForFunction(() => Number(document.querySelector("#peer-count")?.textContent ?? "0") >= 1, { timeout: 30_000 }),
-      page1.waitForFunction(() => (document.querySelector("#mesh-detail")?.textContent ?? "").includes("connected to 1 peer"), { timeout: 30_000 }),
-      page2.waitForFunction(() => (document.querySelector("#mesh-detail")?.textContent ?? "").includes("connected to 1 peer"), { timeout: 30_000 }),
+    const nativeWait = runNativeMeshProbe([
+      "--relay", RELAY_URL,
+      "--room", ROOM,
+      "--replica", "native-mesh-waiter",
+      "--action", "wait-note",
+      "--title", browserToNativeTitle,
+      "--timeout-ms", "45000",
+      "--hold-ms", "0",
+      "--expected-peers", "1",
     ]);
 
-    const before = await page2.locator(".note-title").count();
+    await page.waitForFunction(
+      () => Number(document.querySelector("#peer-count")?.textContent ?? "0") >= 1,
+      { timeout: 45_000 },
+    );
+    await page.waitForFunction(
+      () => Number(document.querySelector("#mesh-queue")?.textContent ?? "0") >= 0 &&
+        (document.querySelector("#mesh-detail")?.textContent ?? "").includes("connected to 1 peer"),
+      { timeout: 45_000 },
+    );
 
-    await page1.locator("#note-title").fill(noteTitle);
-    await page1.locator("#note-body").fill("Two-page default mesh smoke test");
-    await page1.getByRole("button", { name: "Add note" }).click();
+    await page.locator("#note-title").fill(browserToNativeTitle);
+    await page.locator("#note-body").fill("browser to native mesh smoke");
+    await page.getByRole("button", { name: "Add note" }).click();
 
-    await page2.waitForFunction((expectedTitle) => {
+    const nativeWaitResult = await nativeWait;
+
+    const nativeWriteResult = await runNativeMeshProbe([
+      "--relay", RELAY_URL,
+      "--room", ROOM,
+      "--replica", "native-mesh-writer",
+      "--action", "write-note",
+      "--title", nativeToBrowserTitle,
+      "--body", "native to browser mesh smoke",
+      "--timeout-ms", "45000",
+      "--hold-ms", "1500",
+      "--expected-peers", "1",
+    ]);
+
+    await page.waitForFunction((expectedTitle) => {
       return [...document.querySelectorAll(".note-title")].some(
         (node) => node.textContent === expectedTitle,
       );
-    }, noteTitle, { timeout: 30_000 });
+    }, nativeToBrowserTitle, { timeout: 45_000 });
 
-    const after = await page2.locator(".note-title").count();
     const result = {
       url,
       room: ROOM,
-      persistence1: await page1.locator("#persistence-status").textContent(),
-      persistence2: await page2.locator("#persistence-status").textContent(),
-      signaling1: await page1.locator("#signaling-mode").textContent(),
-      signaling2: await page2.locator("#signaling-mode").textContent(),
-      relay1: await page1.locator("#relay-status").textContent(),
-      relay2: await page2.locator("#relay-status").textContent(),
-      peers1: Number(await page1.locator("#peer-count").textContent()),
-      peers2: Number(await page2.locator("#peer-count").textContent()),
-      before,
-      after,
-      title: noteTitle,
-      live_note_replicated: after >= before + 1,
-      default_p2p_confirmed: after >= before + 1,
+      browser: {
+        signaling: await page.locator("#signaling-mode").textContent(),
+        relay: await page.locator("#relay-status").textContent(),
+        peers: Number(await page.locator("#peer-count").textContent()),
+      },
+      browser_to_native: nativeWaitResult,
+      native_to_browser: nativeWriteResult,
+      cross_platform_mesh_confirmed: true,
     };
 
     console.log(JSON.stringify(result, null, 2));
-
-    if (!result.default_p2p_confirmed) {
-      throw new Error("Default mesh note did not replicate live");
-    }
-
   } finally {
     await browser.close();
-    if (relay.started && relay.process?.pid) {
-      process.kill(-relay.process.pid, "SIGTERM");
+    if (relay.started) {
+      killDetached(relay.process);
     }
-    if (server.started && server.process?.pid) {
-      process.kill(-server.process.pid, "SIGTERM");
+    if (server.started) {
+      killDetached(server.process);
     }
   }
 }

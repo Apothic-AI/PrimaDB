@@ -4,6 +4,7 @@ const SNAPSHOT_DB = "primadb-browser-mesh-notes";
 const SNAPSHOT_STORE = "snapshots";
 const SNAPSHOT_KEY = "main";
 const DEFAULT_ROOM = "primadb-browser-mesh-notes";
+const DEFAULT_SIGNAL_MODE = "relay";
 
 const session = createSessionConfig();
 
@@ -21,6 +22,8 @@ const state = {
 const elements = {
   replicaId: document.getElementById("replica-id"),
   persistenceStatus: document.getElementById("persistence-status"),
+  signalingMode: document.getElementById("signaling-mode"),
+  relayStatus: document.getElementById("relay-status"),
   peerCount: document.getElementById("peer-count"),
   meshQueue: document.getElementById("mesh-queue"),
   meshDetail: document.getElementById("mesh-detail"),
@@ -45,11 +48,16 @@ async function main() {
   const replicaId = `mesh-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
   const db = new Primadb(replicaId);
   state.db = db;
-  state.listChain = db.chain("boards").field("mesh").field("notes");
+  state.listChain = db.chain("boards").field(session.room).field("notes");
   elements.replicaId.textContent = replicaId;
 
   await setupPersistence();
-  state.mesh = db.connectWebRtcMesh(session.room, 1500);
+  state.mesh = db.connectMesh({
+    room: session.room,
+    signaling: session.signal === "broadcast" ? "broadcast_channel" : "relay",
+    relayUrl: session.signal === "broadcast" ? undefined : session.relayUrl,
+    retryIntervalMs: 1500,
+  });
   bindUi();
   startStatusLoop();
 
@@ -89,8 +97,14 @@ async function setupPersistence() {
 function createSessionConfig() {
   const params = new URLSearchParams(globalThis.location.search);
   const room = params.get("room")?.trim() || DEFAULT_ROOM;
+  const signal = (params.get("signal")?.trim() || DEFAULT_SIGNAL_MODE).toLowerCase();
+  const protocol = globalThis.location.protocol === "https:" ? "wss" : "ws";
+  const relayUrl =
+    params.get("relay")?.trim() || `${protocol}://${globalThis.location.hostname}:9010`;
   return {
     room,
+    signal: signal === "broadcast" ? "broadcast" : "relay",
+    relayUrl,
     snapshotDb: `${SNAPSHOT_DB}-${room}`,
   };
 }
@@ -140,15 +154,36 @@ function bindUi() {
 function startStatusLoop() {
   const update = () => {
     const peerCount = state.mesh ? state.mesh.peerCount() : 0;
+    const openPeerCount = state.mesh ? state.mesh.openPeerCount() : 0;
     const inflight = state.mesh ? state.mesh.inflightCount() : 0;
+    const signalingMode = state.mesh?.signalingMode?.() ?? "unknown";
+    const relayReadyState = state.mesh?.signalingReadyState?.();
+    elements.signalingMode.textContent = signalingMode.replace("_", " ");
+    elements.relayStatus.textContent =
+      relayReadyState == null
+        ? "local"
+        : relayReadyState === WebSocket.OPEN
+          ? "connected"
+          : relayReadyState === WebSocket.CONNECTING
+            ? "connecting"
+            : relayReadyState === WebSocket.CLOSING
+              ? "closing"
+              : "closed";
     elements.peerCount.textContent = String(peerCount);
     elements.meshQueue.textContent = String(inflight);
     if (!state.mesh) {
       elements.meshDetail.textContent = "mesh unavailable";
+    } else if (peerCount === 0 && signalingMode === "relay") {
+      elements.meshDetail.textContent =
+        relayReadyState === WebSocket.OPEN
+          ? `waiting for another browser to join via ${session.relayUrl}`
+          : `connecting to signaling relay ${session.relayUrl}`;
     } else if (peerCount === 0) {
-      elements.meshDetail.textContent = "waiting for another tab to join the room";
+      elements.meshDetail.textContent = "waiting for another browser context to join the room";
+    } else if (openPeerCount === 0) {
+      elements.meshDetail.textContent = "peer discovered, waiting for the WebRTC data channel to open";
     } else {
-      elements.meshDetail.textContent = `connected to ${peerCount} peer${peerCount === 1 ? "" : "s"} over WebRTC`;
+      elements.meshDetail.textContent = `connected to ${openPeerCount} peer${openPeerCount === 1 ? "" : "s"} over WebRTC`;
     }
   };
 
@@ -170,7 +205,7 @@ async function ensureSeedNote() {
   const noteId = seedNoteId();
   state.db.chain(noteId).put({
     title: "Open this page in a second tab",
-    body: "Primadb will discover the peer through BroadcastChannel and sync directly over WebRTC.",
+    body: "Primadb uses relay-backed signaling by default and syncs directly over WebRTC.",
     done: false,
     archived: false,
     created_at: now,

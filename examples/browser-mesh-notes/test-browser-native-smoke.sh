@@ -6,4 +6,4 @@ cd "$ROOT_DIR"
 
 ./examples/browser-mesh-notes/build.sh
 
-node ./examples/browser-mesh-notes/test-two-page-smoke.mjs
+node ./examples/browser-mesh-notes/test-browser-native-smoke.mjs

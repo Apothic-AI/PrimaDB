@@ -56,6 +56,7 @@ That gives the project a more inspectable merge model and makes it easier to tes
 ## Planning
 
 - [docs/scale-and-storage-maturity-plan.md](/home/bitnom/Code/gunport/primadb/docs/scale-and-storage-maturity-plan.md): Storage-boundary redesign plan for incremental reads, page/segment persistence, query pushdown, browser/native backends, compaction, and scale-oriented testing.
+- [docs/cross-platform-parity-plan.md](/home/bitnom/Code/gunport/primadb/docs/cross-platform-parity-plan.md): Cross-platform parity plan for shared relay, durable storage, and browser/native WebRTC mesh.
 
 ## Rust Example
 
@@ -142,7 +143,10 @@ const matches = db.chain("users").query({
   limit: 10,
 });
 
-const peer = db.connectWebSocket("ws://127.0.0.1:9010", 2000);
+const peer = db.connectRelay({
+  url: "ws://127.0.0.1:9010",
+  retryIntervalMs: 2000,
+});
 peer.flushPending();
 
 sub.cancel();
@@ -221,13 +225,15 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 
 - [examples/browser-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-notes/README.md): Browser-only local-first board with IndexedDB persistence and cross-tab sync over `BroadcastChannel`.
 - [examples/browser-segment-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-segment-notes/README.md): Browser-only local-first board using the canonical node/index segment records in IndexedDB plus cross-tab sync over `BroadcastChannel`.
-- [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's `WebSocketSync` API and the included relay server.
-- [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Browser board using Primadb's `WebRtcMesh` API, peer discovery over `BroadcastChannel`, direct WebRTC data-channel sync, and a two-page Playwright smoke test.
+- [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's relay client API, automatic IndexedDB persistence, and the included relay server.
+- [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Default browser mesh board using Primadb's shared `connectMesh(...)` facade, relay-backed signaling by default, optional `BroadcastChannel` fallback, and browser/native smoke coverage.
 - [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, the DAM relay, and a browser runtime smoke test for `load/not/map/back`.
 - [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md): Opt-in `wasm-threads` browser demo that initializes `initThreadPool(...)` and exercises the Rayon-backed query path under COOP/COEP.
 - [examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md): Opt-in `wasm-threads` browser P2P demo using `WebRtcMesh`, relay-backed signaling by default, COOP/COEP serving, configurable ICE servers, and a threaded shared-query workload over WebRTC-synced notes.
 - [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
 - [examples/native_relay_client.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
+- [examples/native_relay_probe.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_probe.rs): Native relay probe used by the browser/native and native/native relay smoke tests.
+- [examples/native_mesh_probe.rs](/home/bitnom/Code/gunport/primadb/examples/native_mesh_probe.rs): Native WebRTC mesh probe interoperable with the browser relay-signaled mesh.
 - [examples/native_parallel_query.rs](/home/bitnom/Code/gunport/primadb/examples/native_parallel_query.rs): Native Rayon verification example, runnable with `cargo run --example native_parallel_query`.
 - [examples/crypto_foundation.rs](/home/bitnom/Code/gunport/primadb/examples/crypto_foundation.rs): Signing and encryption primitives, runnable with `cargo run --features crypto --example crypto_foundation`.
 - [examples/authenticated_sync.rs](/home/bitnom/Code/gunport/primadb/examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
@@ -285,6 +291,27 @@ Open:
 http://127.0.0.1:4173/examples/browser-relay-notes/
 ```
 
+Default relay-signaled WebRTC mesh example:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-mesh-notes/build.sh
+cargo run --example ws_relay_server -- 127.0.0.1:9010
+```
+
+In a second terminal:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+./examples/browser-mesh-notes/serve.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:4173/examples/browser-mesh-notes/
+```
+
 Gun-style relay example:
 
 ```bash
@@ -332,10 +359,15 @@ Browser smoke tests:
 ```bash
 cd /home/bitnom/Code/gunport/primadb
 bash examples/browser-segment-notes/test-live-sync.sh
+bash examples/browser-relay-notes/test-browser-native-smoke.sh
 bash examples/browser-mesh-notes/test-two-page-smoke.sh
+bash examples/browser-mesh-notes/test-browser-native-smoke.sh
 bash examples/browser-threaded-mesh-notes/test-two-page-smoke.sh
+bash examples/browser-threaded-mesh-notes/test-browser-native-smoke.sh
 bash examples/browser-threaded-mesh-notes/test-cross-browser-smoke.sh
 bash examples/browser-gun-notes/test-runtime-smoke.sh
+bash examples/test-native-relay-smoke.sh
+bash examples/test-native-mesh-smoke.sh
 ```
 
 ## Query Layer
@@ -421,10 +453,11 @@ Primadb now routes transport messages through `RouteEnvelope` with:
 - snapshot request/response
 - reply correlation, content hashes, seen-by hints, TTL, and dedupe tracking
 
-The browser build includes two WebRTC mesh entrypoints:
+The browser build includes three network convenience entrypoints:
 
-- `connectWebRtcMesh(...)` for local `BroadcastChannel` signaling and direct WebRTC sync
-- `connectWebRtcMeshViaRelay(...)` for relay-backed signaling across different browsers or machines
+- `connectRelay(...)` for relay-backed sync and remote pull/query
+- `connectMesh(...)` for the shared mesh facade, including relay signaling and configurable ICE servers
+- `connectWebRtcMesh(...)` / `connectWebRtcMeshViaRelay(...)` as narrower browser aliases over the same mesh surface
 
 Both paths support configurable ICE servers, and default to a small STUN set when you do not
 provide one explicitly.
@@ -436,10 +469,14 @@ The included relay example upgrades that into a networked DAM-style path:
 - targeted `peer` routes are forwarded only to the addressed client
 - disconnects broadcast offline presence so peer lists converge
 
-## Native Sync
+## Native Sync And Mesh
 
 ```bash
 cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010
+```
+
+```bash
+cargo run --features native-webrtc --example native_mesh_probe -- --relay ws://127.0.0.1:9010 --room demo --action status
 ```
 
 ## Storage Adapters
@@ -449,6 +486,7 @@ Primadb supports:
 - snapshot file persistence with `use_file_persistence(...)`
 - browser `localStorage` persistence with `use_browser_storage(...)`
 - explicit IndexedDB persistence hooks in WASM
+- shared durable storage configuration via `open_durable_storage(...)` / `openDurableStorage(...)`
 - storage adapters via `attach_storage_adapter(...)`
 - a RADisk-style file adapter with `use_radisk_storage(...)`
 

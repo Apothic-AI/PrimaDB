@@ -5,9 +5,13 @@ mod compat;
 #[cfg(feature = "crypto")]
 mod crypto;
 mod db;
+mod durable;
 mod engine;
 mod error;
 mod hardening;
+mod net;
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
+mod native_mesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 mod native_sync;
 mod operation;
@@ -39,6 +43,7 @@ pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, Primadb, QueryBuilder,
     Subscription,
 };
+pub use durable::{DurableStorageBinding, DurableStorageConfig};
 pub use engine::{
     AuthNodeMeta, DirectScalarIndexEntry, IncrementalStore, NodeIndexManifest, StorageMetadata,
     StorageTransaction, StoredAuthFieldMeta, build_storage_metadata,
@@ -48,6 +53,11 @@ pub use engine::{
 };
 pub use error::{PrimadbError, Result};
 pub use hardening::{PrimadbLimits, PrimadbStats};
+pub use net::{
+    IceServerConfig, IceServerUrls, MeshConfig, MeshSignal, MeshSignalingMode, RelayClientConfig,
+};
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
+pub use native_mesh::NativeWebRtcMesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 pub use native_sync::NativeWebSocketSync;
 pub use operation::{Operation, OperationAction, OperationValue};
