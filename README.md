@@ -50,6 +50,10 @@ This is intentionally not a 1:1 port of Gun internals.
 
 That gives the project a more inspectable merge model and makes it easier to test and evolve without carrying over Gun's event-routing bugs.
 
+## Planning
+
+- [docs/scale-and-storage-maturity-plan.md](/home/bitnom/Code/gunport/primadb/docs/scale-and-storage-maturity-plan.md): Storage-boundary redesign plan for incremental reads, page/segment persistence, query pushdown, browser/native backends, compaction, and scale-oriented testing.
+
 ## Rust Example
 
 ```rust
