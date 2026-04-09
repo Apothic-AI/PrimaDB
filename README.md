@@ -100,6 +100,15 @@ fn main() -> primadb::Result<()> {
 
 ## Browser Example
 
+The canonical browser build entrypoint is now:
+
+```bash
+./build-wasm.sh
+```
+
+That produces a package in `./pkg` by default. Example-specific `build.sh` scripts are now just
+thin wrappers around this main build path.
+
 After building with `wasm-pack build --target web` or an equivalent toolchain, the generated bindings expose `Primadb`, `Chain`, and `Subscription`.
 
 ```js
@@ -153,6 +162,15 @@ build path. That path is intentionally opt-in because it requires:
 - shared-memory linker flags
 - `SharedArrayBuffer`
 - COOP/COEP headers at runtime
+
+The canonical threaded build entrypoint is:
+
+```bash
+./build-wasm-threads.sh --features wasm-threads
+```
+
+That produces a threaded package in `./pkg` by default. Example-level threaded `build.sh` scripts
+wrap this same path with example-specific output directories.
 
 The dedicated example in [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md)
 shows the intended JS bootstrap pattern:
