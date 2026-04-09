@@ -33,3 +33,17 @@ cd /home/bitnom/Code/gunport/primadb
 
 The tabs should discover each other automatically, sync the seeded notes over WebRTC, and report
 that the threaded query path is active.
+
+## Automated Check
+
+Run the two-page threaded P2P smoke test:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+bash examples/browser-threaded-mesh-notes/test-two-page-smoke.sh
+```
+
+The script builds the threaded package if needed, starts the COOP/COEP server if needed, opens
+two Playwright pages in the same room, confirms the `wasm-threads` build is active, waits for a
+live WebRTC peer connection, checks that a note replicates without reload, seeds the shared load,
+and verifies the parallel query output.
