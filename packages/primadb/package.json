@@ -1,0 +1,42 @@
+{
+  "name": "primadb",
+  "version": "0.1.0",
+  "description": "TypeScript package for Primadb's browser WASM runtime.",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./threads": {
+      "types": "./dist/threads.d.ts",
+      "default": "./dist/threads.js"
+    },
+    "./gun": {
+      "types": "./dist/gun.d.ts",
+      "default": "./dist/gun.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/vendor/**/*.js",
+    "./dist/vendor/**/*.wasm"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node ./scripts/smoke.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

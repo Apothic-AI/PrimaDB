@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
+    "strict": true,
+    "declaration": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noEmitOnError": true
+  },
+  "include": [
+    "*.ts",
+    "*.d.ts",
+    "runtime/**/*.ts",
+    "runtime/**/*.d.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "vendor"
+  ]
+}

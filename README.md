@@ -192,6 +192,43 @@ console.log(primadb.parallelEnabled(), primadb.parallelThreadCount());
 For a full threaded browser P2P example on top of the same bootstrap path, see
 [examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md).
 
+## TypeScript Package
+
+Primadb now also has an in-repo TypeScript package in
+[packages/primadb](/home/bitnom/Code/gunport/primadb/packages/primadb). It wraps the existing
+Rust/WASM browser runtime instead of reimplementing it.
+
+Build it from the repo with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/packages/primadb
+npm install
+npm run build
+```
+
+That package exposes three browser-facing entrypoints:
+
+- `primadb`: default browser build
+- `primadb/threads`: threaded browser build
+- `primadb/gun`: Gun-compatible browser runtime
+
+Example usage:
+
+```ts
+import { Primadb, initPrimadb } from "primadb";
+
+await initPrimadb();
+
+const db = new Primadb("browser-a");
+const mesh = db.connectMesh({
+  room: "demo-room",
+  relayUrl: "ws://127.0.0.1:9010",
+});
+```
+
+See [packages/primadb/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/README.md)
+for the full package-specific flow.
+
 ## Replication Contract
 
 Primadb does not hide the wire format from you.
