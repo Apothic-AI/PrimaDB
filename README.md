@@ -267,6 +267,53 @@ db.chain("notes").field("items").set({
 See [packages/primadb-node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/README.md)
 for the full package-specific flow.
 
+## Native Python Package
+
+Primadb also now has a native Python package in
+[packages/primadb-python](/home/bitnom/Code/gunport/primadb/packages/primadb-python). Like the
+Node package, it wraps the native Rust runtime directly instead of the browser WASM layer.
+
+Install it locally with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+python3 -m pip install -e .
+```
+
+Example usage:
+
+```python
+from primadb import Primadb
+
+db = Primadb("python-a")
+db.open_durable_storage(
+    {
+        "kind": "segment_files",
+        "directory": "/tmp/primadb-python-demo",
+    }
+)
+
+db.chain("notes").field("items").set(
+    {
+        "title": "Native Python note",
+        "body": "Stored through the Python extension",
+    }
+)
+```
+
+Smoke it with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+python3 scripts/smoke_core.py
+python3 scripts/smoke_relay.py
+python3 scripts/smoke_mesh.py
+python3 scripts/pack_check.py
+```
+
+See [packages/primadb-python/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/README.md)
+for the package-specific flow.
+
 ## Replication Contract
 
 Primadb does not hide the wire format from you.

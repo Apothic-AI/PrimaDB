@@ -1,0 +1,8 @@
+.venv/
+dist/
+build/
+*.whl
+*.tar.gz
+python/primadb/_native*.so
+python/primadb/_native*.pyd
+python/primadb/_native*.dylib
