@@ -10,6 +10,9 @@ import init, {
 } from "./pkg/primadb.js";
 import { installPrimadbGunRuntime } from "../../js/primadb-gun.js";
 
+const DEFAULT_ROOM = "browser-gun-notes";
+const session = createSessionConfig();
+
 const state = {
   Gun: null,
   gun: null,
@@ -71,20 +74,20 @@ async function main() {
   const gun = Gun({
     replicaId: `gun-demo-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`,
     peers: [elements.relayUrl.value.trim()],
-    room: "browser-gun-notes",
+    room: session.room,
     remember: true,
     indexedDb: {
-      databaseName: "primadb-browser-gun-notes",
+      databaseName: `primadb-browser-gun-notes-${session.room}`,
       storeName: "snapshots",
       key: "main",
     },
-    localStorageKey: "primadb-browser-gun-notes-fallback",
+    localStorageKey: `primadb-browser-gun-notes-${session.room}-fallback`,
   });
 
   state.Gun = Gun;
   state.gun = gun;
   state.user = gun.user();
-  state.notes = gun.get("rooms").get("lobby").get("notes");
+  state.notes = gun.get("rooms").get(session.room).get("notes");
 
   await gun.ready;
 
@@ -208,6 +211,13 @@ function bindUi() {
     elements.runtimeState.textContent = "queued shared note";
     updateUi();
   });
+}
+
+function createSessionConfig() {
+  const params = new URLSearchParams(globalThis.location.search);
+  return {
+    room: params.get("room")?.trim() || DEFAULT_ROOM,
+  };
 }
 
 function subscribeToNotes() {

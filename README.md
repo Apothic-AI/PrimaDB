@@ -26,6 +26,7 @@
 - Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.
 - Data-level auth in the core database for signed user-owned fields, certificate-authorized delegated writes, and read-time signature verification/unwrapping.
 - Gun-compatible browser runtime in [js/primadb-gun.js](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
+- Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
 - SEA-style browser crypto surface with pair generation, password work, sign/verify, encrypt/decrypt, shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
 - Incremental segment-backed native storage with lazy node restore, canonical node/index records, manifest metadata, direct-scalar indexes, and journaled transactions.
@@ -195,6 +196,7 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - peer presence and discovery over the relay
 - targeted routing and signal payloads
 - sync/ack over the relay without `BroadcastChannel`
+- replay of active browser chain interests to newly discovered peers via root snapshot hydration
 - current Gun-style session recall and browser `user()` flows
 
 ## Examples
@@ -202,8 +204,8 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - [examples/browser-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-notes/README.md): Browser-only local-first board with IndexedDB persistence and cross-tab sync over `BroadcastChannel`.
 - [examples/browser-segment-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-segment-notes/README.md): Browser-only local-first board using the canonical node/index segment records in IndexedDB plus cross-tab sync over `BroadcastChannel`.
 - [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's `WebSocketSync` API and the included relay server.
-- [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Browser board using Primadb's `WebRtcMesh` API, peer discovery over `BroadcastChannel`, and direct WebRTC data-channel sync.
-- [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the DAM relay.
+- [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Browser board using Primadb's `WebRtcMesh` API, peer discovery over `BroadcastChannel`, direct WebRTC data-channel sync, and a two-page Playwright smoke test.
+- [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, the DAM relay, and a browser runtime smoke test for `load/not/map/back`.
 - [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md): Opt-in `wasm-threads` browser demo that initializes `initThreadPool(...)` and exercises the Rayon-backed query path under COOP/COEP.
 - [examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md): Opt-in `wasm-threads` browser P2P demo using `WebRtcMesh`, COOP/COEP serving, and a threaded shared-query workload over WebRTC-synced notes.
 - [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.

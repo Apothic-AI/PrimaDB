@@ -239,6 +239,11 @@ impl Primadb {
         self.load_snapshot(snapshot)
     }
 
+    pub fn merge_snapshot_json(&self, payload: &str) -> Result<()> {
+        let snapshot = serde_json::from_str(payload)?;
+        self.merge_snapshot(snapshot)
+    }
+
     pub fn import_persisted_snapshot_json(&self, payload: &str) -> Result<()> {
         if let Ok(snapshot) = serde_json::from_str::<DatabaseSnapshot>(payload) {
             return self.load_persisted_snapshot(snapshot);
@@ -270,6 +275,14 @@ impl Primadb {
             inner.pending_ops = snapshot.pending_ops;
             inner.unflushed_ops.clear();
             inner.missing_nodes.clear();
+        }
+        self.finalize_change(true)
+    }
+
+    pub fn merge_snapshot(&self, snapshot: DatabaseSnapshot) -> Result<()> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            merge_snapshot_into_inner(&mut inner, snapshot);
         }
         self.finalize_change(true)
     }
@@ -461,7 +474,7 @@ impl Primadb {
         };
 
         let mut snapshot = if let Some(engine) = engine {
-            engine.export_snapshot(root).unwrap_or(DatabaseSnapshot {
+            engine.export_snapshot(None).unwrap_or(DatabaseSnapshot {
                 clock: clock.clone(),
                 nodes: BTreeMap::new(),
                 pending_ops: Vec::new(),
@@ -475,19 +488,19 @@ impl Primadb {
         };
 
         snapshot.clock = clock;
-        snapshot.pending_ops = match root {
-            Some(root) => pending_ops
-                .into_iter()
-                .filter(|op| operation_matches_root(op, root))
-                .collect(),
-            None => pending_ops,
-        };
-
         for (node_id, node_state) in loaded_nodes {
-            if root.is_some_and(|root| !node_matches_root(&node_id, root)) {
-                continue;
-            }
             snapshot.nodes.insert(node_id, node_state);
+        }
+
+        if let Some(root) = root {
+            let reachable = collect_snapshot_root_closure(&snapshot.nodes, root);
+            snapshot.nodes.retain(|node_id, _| reachable.contains(node_id));
+            snapshot.pending_ops = pending_ops
+                .into_iter()
+                .filter(|op| operation_matches_snapshot_nodes(op, &reachable))
+                .collect();
+        } else {
+            snapshot.pending_ops = pending_ops;
         }
 
         snapshot
@@ -2647,6 +2660,149 @@ fn parse_member_reference(value: JsonValue, path: &str) -> Result<String> {
     }
 }
 
+fn merge_snapshot_into_inner(inner: &mut Inner, snapshot: DatabaseSnapshot) {
+    for node in snapshot.nodes.into_values() {
+        observe_node_state(&mut inner.clock, &node);
+        merge_node_state(&mut inner.nodes, node);
+    }
+    inner.missing_nodes.clear();
+}
+
+fn observe_node_state(clock: &mut HybridClock, node: &NodeState) {
+    for marker in node.tombstones.values() {
+        clock.observe(&marker.revision);
+    }
+    for field in node.fields.values() {
+        clock.observe(&field.version.revision);
+        if let FieldValue::Set(set) = &field.value {
+            clock.observe(&set.baseline.revision);
+            for marker in set.members.values() {
+                clock.observe(&marker.revision);
+            }
+            for marker in set.removed.values() {
+                clock.observe(&marker.revision);
+            }
+        }
+    }
+}
+
+fn merge_node_state(nodes: &mut BTreeMap<NodeId, NodeState>, incoming: NodeState) {
+    let node_id = incoming.id.clone();
+    let current = nodes
+        .entry(node_id.clone())
+        .or_insert_with(|| NodeState::new(node_id));
+
+    for (field, tombstone) in incoming.tombstones {
+        let tombstone_blocks = current
+            .tombstones
+            .get(&field)
+            .map(|existing| tombstone <= *existing)
+            .unwrap_or(false);
+        let field_blocks = current
+            .fields
+            .get(&field)
+            .map(|existing| tombstone <= existing.version)
+            .unwrap_or(false);
+        if tombstone_blocks || field_blocks {
+            continue;
+        }
+        current.fields.remove(&field);
+        current.tombstones.insert(field, tombstone);
+    }
+
+    for (field, incoming_field) in incoming.fields {
+        let tombstone_blocks = current
+            .tombstones
+            .get(&field)
+            .map(|existing| incoming_field.version <= *existing)
+            .unwrap_or(false);
+        if tombstone_blocks {
+            continue;
+        }
+        current.tombstones.remove(&field);
+        match current.fields.get_mut(&field) {
+            Some(existing) => merge_field_state(existing, incoming_field),
+            None => {
+                current.fields.insert(field, incoming_field);
+            }
+        }
+    }
+}
+
+fn merge_field_state(existing: &mut FieldState, incoming: FieldState) {
+    match (&mut existing.value, incoming.value) {
+        (FieldValue::Set(current_set), FieldValue::Set(incoming_set)) => {
+            existing.value = FieldValue::Set(merge_set_state(current_set, &incoming_set));
+            if incoming.version > existing.version {
+                existing.version = incoming.version;
+            }
+        }
+        (_, incoming_value) => {
+            if incoming.version > existing.version {
+                existing.value = incoming_value;
+                existing.version = incoming.version;
+            }
+        }
+    }
+}
+
+fn merge_set_state(current: &SetState, incoming: &SetState) -> SetState {
+    let baseline = std::cmp::max(current.baseline.clone(), incoming.baseline.clone());
+    let mut candidate_ids = BTreeSet::new();
+    candidate_ids.extend(current.members.keys().cloned());
+    candidate_ids.extend(current.removed.keys().cloned());
+    candidate_ids.extend(incoming.members.keys().cloned());
+    candidate_ids.extend(incoming.removed.keys().cloned());
+
+    let mut members = BTreeMap::new();
+    let mut removed = BTreeMap::new();
+
+    for member in candidate_ids {
+        let add = max_marker(
+            current.members.get(&member).cloned(),
+            incoming.members.get(&member).cloned(),
+        );
+        let drop = max_marker(
+            current.removed.get(&member).cloned(),
+            incoming.removed.get(&member).cloned(),
+        );
+        let add_valid = add.as_ref().is_some_and(|marker| marker > &baseline);
+        let drop_valid = drop.as_ref().is_some_and(|marker| marker > &baseline);
+
+        match (add_valid, drop_valid) {
+            (true, true) => {
+                if add > drop {
+                    members.insert(member, add.expect("validated add marker"));
+                } else {
+                    removed.insert(member, drop.expect("validated remove marker"));
+                }
+            }
+            (true, false) => {
+                members.insert(member, add.expect("validated add marker"));
+            }
+            (false, true) => {
+                removed.insert(member, drop.expect("validated remove marker"));
+            }
+            (false, false) => {}
+        }
+    }
+
+    SetState {
+        baseline,
+        members,
+        removed,
+    }
+}
+
+fn max_marker(left: Option<VersionMarker>, right: Option<VersionMarker>) -> Option<VersionMarker> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(std::cmp::max(left, right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
 fn zero_marker() -> VersionMarker {
     VersionMarker {
         revision: Revision {
@@ -2666,12 +2822,42 @@ fn node_matches_root(node_id: &str, root: &str) -> bool {
     node_id == root || node_id.starts_with(&format!("{root}/"))
 }
 
-fn operation_matches_root(op: &Operation, root: &str) -> bool {
+fn collect_snapshot_root_closure(
+    nodes: &BTreeMap<NodeId, NodeState>,
+    root: &str,
+) -> BTreeSet<NodeId> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = nodes
+        .keys()
+        .filter(|node_id| node_matches_root(node_id, root))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    while let Some(node_id) = pending.pop() {
+        if !reachable.insert(node_id.clone()) {
+            continue;
+        }
+        let Some(node) = nodes.get(&node_id) else {
+            continue;
+        };
+        for field in node.fields.values() {
+            match &field.value {
+                FieldValue::Scalar(_) => {}
+                FieldValue::Link(target) => pending.push(target.clone()),
+                FieldValue::Set(set) => pending.extend(set.members.keys().cloned()),
+            }
+        }
+    }
+
+    reachable
+}
+
+fn operation_matches_snapshot_nodes(op: &Operation, nodes: &BTreeSet<NodeId>) -> bool {
     match &op.action {
         OperationAction::SetField { node, .. }
         | OperationAction::AddSetMember { node, .. }
         | OperationAction::RemoveSetMember { node, .. }
-        | OperationAction::DeleteField { node, .. } => node_matches_root(node, root),
+        | OperationAction::DeleteField { node, .. } => nodes.contains(node),
     }
 }
 
@@ -3566,6 +3752,39 @@ mod tests {
         assert!(second.pending_operations().is_empty());
         let value = second.root("docs").field("hello").once_json()?.unwrap();
         assert_eq!(value["value"], "world");
+        Ok(())
+    }
+
+    #[test]
+    fn merge_snapshot_preserves_local_state_and_merges_remote_sets() -> Result<()> {
+        let source = Primadb::with_replica_id("source");
+        let remote_notes = source.root("rooms").field("lobby").field("notes");
+        remote_notes.set(json!({
+            "title": "Remote note",
+            "done": false,
+            "created_at": 1,
+        }))?;
+        let snapshot = source.snapshot_for_root(Some("rooms"));
+
+        let local = Primadb::with_replica_id("local");
+        local.root("status").field("message").put(json!("keep-local"))?;
+        local.merge_snapshot(snapshot)?;
+
+        assert_eq!(local.replica_id(), "local");
+        assert_eq!(
+            local.root("status").field("message").once_json()?.unwrap(),
+            json!("keep-local")
+        );
+
+        let merged_notes = local.root("rooms").field("lobby").field("notes").query(QuerySpec {
+            filters: Vec::new(),
+            order: None,
+            limit: Some(10),
+            offset: 0,
+        })?;
+        assert_eq!(merged_notes.len(), 1);
+        assert_eq!(merged_notes[0].value["title"], "Remote note");
+        assert_eq!(local.pending_operations().len(), 1);
         Ok(())
     }
 

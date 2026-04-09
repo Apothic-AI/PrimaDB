@@ -37,3 +37,19 @@ on top of the Primadb WASM bindings and exercises:
 
 5. Open the page in a second tab or browser and sign in as another user. Peer
    discovery happens over the relay, and shared notes sync across clients.
+
+6. For isolated sessions, append `?room=my-room` to the URL. The room name also
+   scopes the example's browser storage.
+
+## Automated Check
+
+Run the Gun runtime browser smoke test:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+bash examples/browser-gun-notes/test-runtime-smoke.sh
+```
+
+The script builds the example if needed, starts the relay and static server if
+needed, opens two pages in a fresh room, verifies relay-backed note sync, and
+exercises `not`, `load`, `map`, and `back(-1)` against the browser runtime.

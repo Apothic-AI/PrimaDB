@@ -3,6 +3,9 @@ import init, { Primadb } from "./pkg/primadb.js";
 const SNAPSHOT_DB = "primadb-browser-mesh-notes";
 const SNAPSHOT_STORE = "snapshots";
 const SNAPSHOT_KEY = "main";
+const DEFAULT_ROOM = "primadb-browser-mesh-notes";
+
+const session = createSessionConfig();
 
 const state = {
   db: null,
@@ -46,7 +49,7 @@ async function main() {
   elements.replicaId.textContent = replicaId;
 
   await setupPersistence();
-  state.mesh = db.connectWebRtcMesh("primadb-browser-mesh-notes", 1500);
+  state.mesh = db.connectWebRtcMesh(session.room, 1500);
   bindUi();
   startStatusLoop();
 
@@ -70,7 +73,7 @@ async function main() {
 async function setupPersistence() {
   try {
     state.persistence = await state.db.enableIndexedDbPersistence(
-      SNAPSHOT_DB,
+      session.snapshotDb,
       SNAPSHOT_STORE,
       SNAPSHOT_KEY,
       true,
@@ -78,9 +81,18 @@ async function setupPersistence() {
     elements.persistenceStatus.textContent = "indexeddb";
   } catch (error) {
     console.warn("IndexedDB unavailable, falling back to localStorage", error);
-    state.db.useBrowserStorage("primadb-browser-mesh-notes-fallback");
+    state.db.useBrowserStorage(`${session.snapshotDb}-fallback`);
     elements.persistenceStatus.textContent = "localStorage";
   }
+}
+
+function createSessionConfig() {
+  const params = new URLSearchParams(globalThis.location.search);
+  const room = params.get("room")?.trim() || DEFAULT_ROOM;
+  return {
+    room,
+    snapshotDb: `${SNAPSHOT_DB}-${room}`,
+  };
 }
 
 function bindUi() {
@@ -155,7 +167,8 @@ async function ensureSeedNote() {
   }
 
   const now = Date.now();
-  state.listChain.set({
+  const noteId = seedNoteId();
+  state.db.chain(noteId).put({
     title: "Open this page in a second tab",
     body: "Primadb will discover the peer through BroadcastChannel and sync directly over WebRTC.",
     done: false,
@@ -163,6 +176,7 @@ async function ensureSeedNote() {
     created_at: now,
     updated_at: now,
   });
+  state.listChain.set({ $link: noteId });
   await flushMesh("seeded");
 }
 
@@ -259,4 +273,8 @@ function formatTimestamp(value) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function seedNoteId() {
+  return `mesh-room/${session.room}/welcome-note`;
 }

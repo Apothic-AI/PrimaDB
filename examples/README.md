@@ -5,7 +5,9 @@
   - Includes `test-live-sync.sh`, a two-page Playwright smoke test for live cross-tab delivery.
 - `browser-relay-notes/`: Browser task board using Primadb's WASM build, automatic IndexedDB persistence, peer recommendations, and remote `get/query/lex/snapshot` over the relay.
 - `browser-mesh-notes/`: Browser-to-browser notes board using Primadb's `WebRtcMesh` helper with peer discovery over `BroadcastChannel` and direct sync over WebRTC data channels.
+  - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for the default WebRTC mesh build.
 - `browser-gun-notes/`: Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the relay-backed DAM path.
+  - Includes `test-runtime-smoke.sh`, a browser smoke test covering relay sync plus `load`, `not`, `map`, and `back`.
 - `browser-threaded-query/`: Opt-in `wasm-threads` browser demo with COOP/COEP serving, `initThreadPool(...)`, and a Rayon-backed query workload.
 - `browser-threaded-mesh-notes/`: Opt-in `wasm-threads` browser mesh demo with COOP/COEP serving, `initThreadPool(...)`, and peer-to-peer note sync over WebRTC.
   - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for threaded WebRTC sync and parallel query execution.

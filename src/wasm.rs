@@ -217,6 +217,11 @@ impl WasmPrimadb {
         to_js(&self.inner.snapshot())
     }
 
+    #[wasm_bindgen(js_name = snapshotForRoot)]
+    pub fn snapshot_for_root(&self, root: Option<String>) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot_for_root(root.as_deref()))
+    }
+
     #[wasm_bindgen(js_name = exportSnapshotJson)]
     pub fn export_snapshot_json(&self) -> std::result::Result<String, JsValue> {
         self.inner.export_snapshot_json().map_err(to_js_error)
@@ -226,6 +231,13 @@ impl WasmPrimadb {
     pub fn import_snapshot_json(&self, payload: &str) -> std::result::Result<(), JsValue> {
         self.inner
             .import_snapshot_json(payload)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = mergeSnapshotJson)]
+    pub fn merge_snapshot_json(&self, payload: &str) -> std::result::Result<(), JsValue> {
+        self.inner
+            .merge_snapshot_json(payload)
             .map_err(to_js_error)
     }
 
