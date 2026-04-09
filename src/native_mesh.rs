@@ -3,6 +3,8 @@ use crate::{
     PeerRecommendation, Primadb, PrimadbError, Result, RouteEnvelope, RoutePayload, RouteTarget,
     Router, RouterConfig, SyncEnvelope, SyncFrame,
 };
+#[cfg(feature = "crypto")]
+use crate::SecureSyncFrame;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -37,7 +39,10 @@ struct NativeMeshPeer {
     connection: Option<Arc<RTCPeerConnection>>,
     channel: Option<Arc<RTCDataChannel>>,
     pending_remote_ice: Vec<RTCIceCandidateInit>,
+    created_at_millis: u64,
 }
+
+const STALE_MESH_PEER_MILLIS: u64 = 5_000;
 
 struct NativeWebRtcMeshState {
     db: Primadb,
@@ -368,8 +373,27 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
             if join_room != room || from == peer_id {
                 return Ok(());
             }
-            if state.peers.lock().await.contains_key(&from) {
+            let (already_open, is_stale) = {
+                let peers = state.peers.lock().await;
+                let peer = peers.get(&from);
+                let already_open = peer
+                    .and_then(|peer| peer.channel.as_ref())
+                    .is_some_and(mesh_channel_is_open);
+                let is_stale = peer.is_some_and(|peer| {
+                    !peer
+                        .channel
+                        .as_ref()
+                        .is_some_and(mesh_channel_is_open)
+                        && crate::clock::now_millis().saturating_sub(peer.created_at_millis)
+                            >= STALE_MESH_PEER_MILLIS
+                });
+                (already_open, is_stale)
+            };
+            if already_open {
                 return Ok(());
+            }
+            if is_stale {
+                remove_mesh_peer_state(state, &from).await;
             }
             if peer_id < from {
                 create_mesh_offer(state, from).await?;
@@ -620,6 +644,7 @@ async fn ensure_mesh_peer(
             connection: Some(connection.clone()),
             channel: None,
             pending_remote_ice: Vec::new(),
+            created_at_millis: crate::clock::now_millis(),
         },
     );
     Ok(connection)
@@ -1033,7 +1058,12 @@ fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> Result<(String, JsonV
     #[cfg(feature = "crypto")]
     {
         let frame = _db.secure_sync_frame(frame)?;
-        return Ok(("secure_sync_frame".to_owned(), serde_json::to_value(frame)?));
+        return match frame {
+            SecureSyncFrame::Plain(frame) => {
+                Ok(("sync_frame".to_owned(), serde_json::to_value(frame)?))
+            }
+            secure => Ok(("secure_sync_frame".to_owned(), serde_json::to_value(secure)?)),
+        };
     }
 
     #[cfg(not(feature = "crypto"))]

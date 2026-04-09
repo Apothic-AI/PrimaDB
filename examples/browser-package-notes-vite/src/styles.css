@@ -58,7 +58,7 @@ p {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 16px;
   padding: 18px 20px;
   margin-bottom: 18px;
@@ -75,6 +75,11 @@ p {
 
 .compose {
   padding: 20px;
+  margin-bottom: 18px;
+}
+
+.mesh-status {
+  padding: 16px 20px;
   margin-bottom: 18px;
 }
 
@@ -170,7 +175,7 @@ button {
   }
 
   .stats {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .notes-head {

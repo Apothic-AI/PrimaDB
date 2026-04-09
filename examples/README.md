@@ -11,6 +11,7 @@
 - `browser-gun-notes/`: Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the relay-backed DAM path.
 - `browser-package-notes-vite/`: Vite app that consumes the in-repo `primadb` npm package instead of raw generated bindings.
   - Includes `npm run smoke`, a Chromium package-consumer smoke test that creates a note and verifies persistence after reload.
+  - Supports optional relay-signaled mesh mode through `?room=...&relay=...`.
   - Includes `test-runtime-smoke.sh`, a browser smoke test covering relay sync plus `load`, `not`, `map`, and `back`.
 - `browser-threaded-query/`: Opt-in `wasm-threads` browser demo with COOP/COEP serving, `initThreadPool(...)`, and a Rayon-backed query workload.
 - `browser-threaded-mesh-notes/`: Opt-in `wasm-threads` browser mesh demo with COOP/COEP serving, relay-backed signaling by default, configurable ICE servers, and peer-to-peer note sync over WebRTC.
@@ -21,6 +22,8 @@
 - `native_relay_client.rs`: Native client using Primadb's feature-gated `NativeWebSocketSync` adapter. Run with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
 - `native_relay_probe.rs`: Native relay probe used by the relay smoke tests. Run with `cargo run --features native-websocket --example native_relay_probe -- --relay ws://127.0.0.1:9010 --action status`.
 - `native_mesh_probe.rs`: Native WebRTC mesh probe interoperable with the browser relay-signaled mesh. Run with `cargo run --features native-webrtc --example native_mesh_probe -- --relay ws://127.0.0.1:9010 --room demo --action status`.
+- `native_mesh_agent.rs`: Native mesh agent used by the mixed-target end-to-end harness. Run with `cargo run --features native-webrtc --example native_mesh_agent -- --action live --relay ws://127.0.0.1:9010 --room demo`.
+- `test-all-targets-mesh-e2e.sh`: Mixed-target end-to-end suite covering default WASM, threaded WASM, the browser npm package app, the Node package, the Python package, and native Rust mesh/storage together.
 - `test-native-relay-smoke.sh`: Native/native relay smoke test.
 - `test-native-mesh-smoke.sh`: Native/native mesh smoke test.
 - `native_parallel_query.rs`: Native Rayon verification example. Run with `cargo run --example native_parallel_query`.

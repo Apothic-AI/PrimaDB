@@ -7,6 +7,8 @@ use crate::{
     SyncEnvelope, SyncFrame, build_storage_metadata, build_storage_transaction,
     encode_component,
 };
+#[cfg(feature = "crypto")]
+use crate::SecureSyncFrame;
 use async_channel::{Sender, bounded};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -143,6 +145,7 @@ struct MeshOutbound {
 struct MeshPeer {
     connection: web_sys::RtcPeerConnection,
     channel: Option<web_sys::RtcDataChannel>,
+    created_at_millis: u64,
     #[allow(dead_code)]
     onicecandidate: Option<Closure<dyn FnMut(web_sys::RtcPeerConnectionIceEvent)>>,
     #[allow(dead_code)]
@@ -151,6 +154,8 @@ struct MeshPeer {
     onopen: Option<Closure<dyn FnMut(web_sys::Event)>>,
     onclose: Option<Closure<dyn FnMut(web_sys::Event)>>,
 }
+
+const STALE_MESH_PEER_MILLIS: u64 = 5_000;
 
 #[derive(Clone)]
 enum MeshSignalingTransport {
@@ -2005,10 +2010,16 @@ fn encode_sync_payload(
     #[cfg(feature = "crypto")]
     {
         let frame = _db.secure_sync_frame(frame).map_err(to_js_error)?;
-        return Ok((
-            "secure_sync_frame".to_owned(),
-            serde_json::to_value(frame).map_err(to_js_error)?,
-        ));
+        return match frame {
+            SecureSyncFrame::Plain(frame) => Ok((
+                "sync_frame".to_owned(),
+                serde_json::to_value(frame).map_err(to_js_error)?,
+            )),
+            secure => Ok((
+                "secure_sync_frame".to_owned(),
+                serde_json::to_value(secure).map_err(to_js_error)?,
+            )),
+        };
     }
 
     #[cfg(not(feature = "crypto"))]
@@ -2238,8 +2249,27 @@ fn handle_mesh_signal_state(
             if join_room != room || from == peer_id {
                 return Ok(());
             }
-            if state.borrow().peers.contains_key(&from) {
+            let (already_open, is_stale) = {
+                let borrowed = state.borrow();
+                let peer = borrowed.peers.get(&from);
+                let already_open = peer
+                    .and_then(|peer| peer.channel.as_ref())
+                    .is_some_and(mesh_channel_is_open);
+                let is_stale = peer.is_some_and(|peer| {
+                    !peer
+                        .channel
+                        .as_ref()
+                        .is_some_and(mesh_channel_is_open)
+                        && (js_sys::Date::now() as u64).saturating_sub(peer.created_at_millis)
+                            >= STALE_MESH_PEER_MILLIS
+                });
+                (already_open, is_stale)
+            };
+            if already_open {
                 return Ok(());
+            }
+            if is_stale {
+                remove_mesh_peer_state(state, &from);
             }
             if peer_id < from {
                 let state = state.clone();
@@ -2464,6 +2494,7 @@ fn ensure_mesh_peer(
         MeshPeer {
             connection: connection.clone(),
             channel: None,
+            created_at_millis: js_sys::Date::now() as u64,
             onicecandidate: Some(onicecandidate),
             ondatachannel: Some(ondatachannel),
             onmessage: None,

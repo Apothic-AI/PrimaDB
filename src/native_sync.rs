@@ -3,6 +3,8 @@ use crate::{
     PrimadbError, RelayClientConfig, RemotePath, RemoteResult, Result, RouteBatchItem,
     RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
 };
+#[cfg(feature = "crypto")]
+use crate::SecureSyncFrame;
 use async_channel::{Sender, bounded};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
@@ -755,7 +757,12 @@ fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> Result<(String, JsonV
     #[cfg(feature = "crypto")]
     {
         let frame = _db.secure_sync_frame(frame)?;
-        return Ok(("secure_sync_frame".to_owned(), serde_json::to_value(frame)?));
+        return match frame {
+            SecureSyncFrame::Plain(frame) => {
+                Ok(("sync_frame".to_owned(), serde_json::to_value(frame)?))
+            }
+            secure => Ok(("secure_sync_frame".to_owned(), serde_json::to_value(secure)?)),
+        };
     }
 
     #[cfg(not(feature = "crypto"))]

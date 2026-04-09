@@ -10,6 +10,7 @@ It demonstrates:
 - `Primadb` and `initPrimadb()` imports from the package entrypoint
 - IndexedDB segment persistence through `openDurableStorage(...)`
 - live note rendering through package-level chain subscriptions
+- optional relay-signaled WebRTC mesh mode via `?room=...&relay=...`
 
 ## Run
 
@@ -23,6 +24,12 @@ Open:
 
 ```text
 http://127.0.0.1:4182/
+```
+
+For shared mesh mode, append a room and relay:
+
+```text
+http://127.0.0.1:4182/?room=demo-room&signal=relay&relay=ws://127.0.0.1:9010
 ```
 
 ## Smoke Test
