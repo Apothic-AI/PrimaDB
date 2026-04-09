@@ -1,8 +1,9 @@
 use crate::{
     Chain, ChangeSubscription, HybridClock, LexEntry, LexSpec, MapEntry, Operation,
     PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody,
-    QuerySpec, RemotePath, RemoteResult, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
-    Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame,
+    QuerySpec, RemotePath, RemoteResult, RouteBatchItem, RouteEnvelope,
+    RoutePayload, RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame,
+    build_storage_metadata, build_storage_transaction, encode_component,
 };
 use async_channel::{Sender, bounded};
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,15 @@ pub struct WasmIndexedDbPersistence {
     database_name: String,
     store_name: String,
     key: String,
+    subscription: Option<ChangeSubscription>,
+}
+
+#[wasm_bindgen(js_name = IndexedDbSegmentPersistence)]
+pub struct WasmIndexedDbSegmentPersistence {
+    db: Primadb,
+    database_name: String,
+    store_name: String,
+    namespace: String,
     subscription: Option<ChangeSubscription>,
 }
 
@@ -456,6 +466,93 @@ impl WasmPrimadb {
         Ok(hook)
     }
 
+    #[wasm_bindgen(js_name = saveIndexedDbSegments)]
+    pub async fn save_indexed_db_segments(
+        &self,
+        database_name: String,
+        store_name: String,
+        namespace: String,
+    ) -> std::result::Result<(), JsValue> {
+        let snapshot = self.inner.snapshot();
+        let metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+        let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
+        save_segment_transaction_indexed_db(&database_name, &store_name, &namespace, &transaction)
+            .await
+    }
+
+    #[wasm_bindgen(js_name = loadIndexedDbSegments)]
+    pub async fn load_indexed_db_segments(
+        &self,
+        database_name: String,
+        store_name: String,
+        namespace: String,
+    ) -> std::result::Result<bool, JsValue> {
+        match load_segment_snapshot_indexed_db(&database_name, &store_name, &namespace).await? {
+            Some(snapshot) => {
+                let payload = serde_json::to_string(&snapshot)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                self.inner
+                    .import_persisted_snapshot_json(&payload)
+                    .map_err(to_js_error)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    #[wasm_bindgen(js_name = enableIndexedDbSegmentPersistence)]
+    pub async fn enable_indexed_db_segment_persistence(
+        &self,
+        database_name: String,
+        store_name: String,
+        namespace: String,
+        load_existing: Option<bool>,
+    ) -> std::result::Result<WasmIndexedDbSegmentPersistence, JsValue> {
+        if load_existing.unwrap_or(true) {
+            let _ = self
+                .load_indexed_db_segments(
+                    database_name.clone(),
+                    store_name.clone(),
+                    namespace.clone(),
+                )
+                .await?;
+        }
+
+        let subscription = self.inner.subscribe_changes();
+        let receiver = subscription.receiver();
+        let db = self.inner.clone();
+        let db_name = database_name.clone();
+        let store = store_name.clone();
+        let namespace_key = namespace.clone();
+        spawn_local(async move {
+            while let Ok(event) = receiver.recv().await {
+                if !event.data_changed && event.pending_ops == 0 {
+                    continue;
+                }
+                let snapshot = db.snapshot();
+                let metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+                let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
+                let _ = save_segment_transaction_indexed_db(
+                    &db_name,
+                    &store,
+                    &namespace_key,
+                    &transaction,
+                )
+                .await;
+            }
+        });
+
+        let hook = WasmIndexedDbSegmentPersistence {
+            db: self.inner.clone(),
+            database_name,
+            store_name,
+            namespace,
+            subscription: Some(subscription),
+        };
+        hook.flush().await?;
+        Ok(hook)
+    }
+
     #[wasm_bindgen(js_name = connectWebSocket)]
     pub fn connect_web_socket(
         &self,
@@ -856,6 +953,32 @@ impl WasmIndexedDbPersistence {
 }
 
 impl Drop for WasmIndexedDbPersistence {
+    fn drop(&mut self) {
+        self.subscription.take();
+    }
+}
+
+#[wasm_bindgen(js_class = IndexedDbSegmentPersistence)]
+impl WasmIndexedDbSegmentPersistence {
+    pub async fn flush(&self) -> std::result::Result<(), JsValue> {
+        let snapshot = self.db.snapshot();
+        let metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+        let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
+        save_segment_transaction_indexed_db(
+            &self.database_name,
+            &self.store_name,
+            &self.namespace,
+            &transaction,
+        )
+        .await
+    }
+
+    pub fn close(&mut self) {
+        self.subscription.take();
+    }
+}
+
+impl Drop for WasmIndexedDbSegmentPersistence {
     fn drop(&mut self) {
         self.subscription.take();
     }
@@ -2355,6 +2478,131 @@ async fn load_snapshot_string_indexed_db(
             .map(Some)
             .ok_or_else(|| JsValue::from_str("IndexedDB value is not a snapshot string"))
     }
+}
+
+fn segment_namespace_prefix(namespace: &str) -> String {
+    format!("segment/{namespace}/")
+}
+
+async fn save_segment_transaction_indexed_db(
+    database_name: &str,
+    store_name: &str,
+    namespace: &str,
+    transaction: &crate::StorageTransaction,
+) -> std::result::Result<(), JsValue> {
+    let db = open_indexed_db(database_name, store_name).await?;
+    let tx = db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readwrite)?;
+    let store = tx.object_store(store_name)?;
+    let _ = await_idb_request(store.clear()?.unchecked_ref()).await?;
+
+    let prefix = segment_namespace_prefix(namespace);
+    let metadata_key = format!("{prefix}meta");
+    let metadata_value =
+        serde_wasm_bindgen::to_value(&transaction.metadata).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let _ = await_idb_request(
+        store
+            .put_with_key(&metadata_value, &JsValue::from_str(&metadata_key))?
+            .unchecked_ref(),
+    )
+    .await?;
+
+    for (node_id, node_state) in &transaction.nodes {
+        let key = format!("{prefix}node/{}", encode_component(node_id));
+        let value =
+            serde_wasm_bindgen::to_value(node_state).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let _ = await_idb_request(
+            store
+                .put_with_key(&value, &JsValue::from_str(&key))?
+                .unchecked_ref(),
+        )
+        .await?;
+    }
+
+    for (node_id, auth_meta) in &transaction.auth_meta {
+        let key = format!("{prefix}auth/{}", encode_component(node_id));
+        let value =
+            serde_wasm_bindgen::to_value(auth_meta).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let _ = await_idb_request(
+            store
+                .put_with_key(&value, &JsValue::from_str(&key))?
+                .unchecked_ref(),
+        )
+        .await?;
+    }
+
+    for (node_id, manifest) in &transaction.node_indexes {
+        let key = format!("{prefix}node_index/{}", encode_component(node_id));
+        let value =
+            serde_wasm_bindgen::to_value(manifest).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let _ = await_idb_request(
+            store
+                .put_with_key(&value, &JsValue::from_str(&key))?
+                .unchecked_ref(),
+        )
+        .await?;
+    }
+
+    for (key, entry) in &transaction.direct_indexes {
+        let full_key = format!("{prefix}index/{key}");
+        let value =
+            serde_wasm_bindgen::to_value(entry).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let _ = await_idb_request(
+            store
+                .put_with_key(&value, &JsValue::from_str(&full_key))?
+                .unchecked_ref(),
+        )
+        .await?;
+    }
+
+    await_idb_transaction(&tx).await?;
+    Ok(())
+}
+
+async fn load_segment_snapshot_indexed_db(
+    database_name: &str,
+    store_name: &str,
+    namespace: &str,
+) -> std::result::Result<Option<crate::DatabaseSnapshot>, JsValue> {
+    let db = open_indexed_db(database_name, store_name).await?;
+    let tx = db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readonly)?;
+    let store = tx.object_store(store_name)?;
+    let request = store.open_cursor()?;
+    let prefix = segment_namespace_prefix(namespace);
+    let node_prefix = format!("{prefix}node/");
+    let mut metadata: Option<crate::StorageMetadata> = None;
+    let mut nodes = BTreeMap::new();
+
+    let mut cursor = await_idb_request(request.unchecked_ref()).await?;
+    while !cursor.is_null() && !cursor.is_undefined() {
+        let current: web_sys::IdbCursorWithValue = cursor.dyn_into()?;
+        let key = current
+            .key()?
+            .as_string()
+            .ok_or_else(|| JsValue::from_str("IndexedDB cursor key is not a string"))?;
+
+        if key == format!("{prefix}meta") {
+            metadata = Some(
+                serde_wasm_bindgen::from_value(current.value()?)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?,
+            );
+        } else if let Some(encoded_node) = key.strip_prefix(&node_prefix) {
+            let node_id = crate::engine::decode_component(encoded_node).map_err(to_js_error)?;
+            let node_state: crate::NodeState = serde_wasm_bindgen::from_value(current.value()?)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            nodes.insert(node_id, node_state);
+        }
+
+        current.continue_()?;
+        cursor = await_idb_request(request.unchecked_ref()).await?;
+    }
+
+    await_idb_transaction(&tx).await?;
+
+    Ok(metadata.map(|metadata| crate::DatabaseSnapshot {
+        clock: metadata.clock,
+        nodes,
+        pending_ops: metadata.pending_ops,
+    }))
 }
 
 async fn open_indexed_db(

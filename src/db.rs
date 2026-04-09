@@ -1,4 +1,8 @@
 use crate::clock::{HybridClock, Revision, VersionMarker};
+use crate::engine::{
+    IncrementalStore, build_storage_metadata, build_storage_transaction,
+    build_storage_transaction_from_ops,
+};
 use crate::error::{PrimadbError, Result};
 use crate::hardening::{PrimadbLimits, PrimadbStats};
 use crate::operation::{Operation, OperationAction, OperationValue};
@@ -100,6 +104,9 @@ struct Inner {
     change_revision: u64,
     persistence: Option<PersistenceTarget>,
     storage_adapter: Option<Arc<dyn StorageAdapter>>,
+    storage_engine: Option<Arc<dyn IncrementalStore>>,
+    missing_nodes: BTreeSet<NodeId>,
+    next_storage_tx_id: u64,
     limits: PrimadbLimits,
     #[cfg(feature = "crypto")]
     security: SecurityState,
@@ -156,6 +163,9 @@ impl Primadb {
                 change_revision: 0,
                 persistence: None,
                 storage_adapter: None,
+                storage_engine: None,
+                missing_nodes: BTreeSet::new(),
+                next_storage_tx_id: 1,
                 limits: PrimadbLimits::default(),
                 #[cfg(feature = "crypto")]
                 security: SecurityState::default(),
@@ -176,11 +186,29 @@ impl Primadb {
     }
 
     pub fn snapshot(&self) -> DatabaseSnapshot {
-        let inner = self.inner.lock().unwrap();
+        let (engine, clock, pending_ops, nodes) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.storage_engine.clone(),
+                inner.clock.clone(),
+                inner.pending_ops.clone(),
+                inner.nodes.clone(),
+            )
+        };
+        if let Some(engine) = engine {
+            if let Ok(mut snapshot) = engine.export_snapshot(None) {
+                snapshot.clock = clock;
+                snapshot.pending_ops = pending_ops;
+                for (node_id, node_state) in nodes {
+                    snapshot.nodes.insert(node_id, node_state);
+                }
+                return snapshot;
+            }
+        }
         DatabaseSnapshot {
-            clock: inner.clock.clone(),
-            nodes: inner.nodes.clone(),
-            pending_ops: inner.pending_ops.clone(),
+            clock,
+            nodes,
+            pending_ops,
         }
     }
 
@@ -241,6 +269,7 @@ impl Primadb {
             inner.nodes = snapshot.nodes;
             inner.pending_ops = snapshot.pending_ops;
             inner.unflushed_ops.clear();
+            inner.missing_nodes.clear();
         }
         self.finalize_change(true)
     }
@@ -258,6 +287,7 @@ impl Primadb {
                 Vec::new()
             };
             inner.unflushed_ops.clear();
+            inner.missing_nodes.clear();
         }
         self.finalize_change(true)
     }
@@ -420,29 +450,47 @@ impl Primadb {
     }
 
     pub fn snapshot_for_root(&self, root: Option<&str>) -> DatabaseSnapshot {
-        let inner = self.inner.lock().unwrap();
-        match root {
-            None => DatabaseSnapshot {
-                clock: inner.clock.clone(),
-                nodes: inner.nodes.clone(),
-                pending_ops: inner.pending_ops.clone(),
-            },
-            Some(root) => DatabaseSnapshot {
-                clock: inner.clock.clone(),
-                nodes: inner
-                    .nodes
-                    .iter()
-                    .filter(|(node_id, _)| node_matches_root(node_id, root))
-                    .map(|(node_id, node)| (node_id.clone(), node.clone()))
-                    .collect(),
-                pending_ops: inner
-                    .pending_ops
-                    .iter()
-                    .filter(|op| operation_matches_root(op, root))
-                    .cloned()
-                    .collect(),
-            },
+        let (engine, clock, pending_ops, loaded_nodes) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.storage_engine.clone(),
+                inner.clock.clone(),
+                inner.pending_ops.clone(),
+                inner.nodes.clone(),
+            )
+        };
+
+        let mut snapshot = if let Some(engine) = engine {
+            engine.export_snapshot(root).unwrap_or(DatabaseSnapshot {
+                clock: clock.clone(),
+                nodes: BTreeMap::new(),
+                pending_ops: Vec::new(),
+            })
+        } else {
+            DatabaseSnapshot {
+                clock: clock.clone(),
+                nodes: BTreeMap::new(),
+                pending_ops: Vec::new(),
+            }
+        };
+
+        snapshot.clock = clock;
+        snapshot.pending_ops = match root {
+            Some(root) => pending_ops
+                .into_iter()
+                .filter(|op| operation_matches_root(op, root))
+                .collect(),
+            None => pending_ops,
+        };
+
+        for (node_id, node_state) in loaded_nodes {
+            if root.is_some_and(|root| !node_matches_root(&node_id, root)) {
+                continue;
+            }
+            snapshot.nodes.insert(node_id, node_state);
         }
+
+        snapshot
     }
 
     pub fn execute_pull_request(&self, request: &PullRequest) -> Result<RemoteResult> {
@@ -530,12 +578,8 @@ impl Primadb {
         directory: impl Into<std::path::PathBuf>,
         compaction_threshold: usize,
     ) -> Result<bool> {
-        let adapter = crate::storage::RadiskFileAdapter::new(
-            directory,
-            self.replica_id(),
-            compaction_threshold,
-        );
-        self.attach_storage_adapter(Arc::new(adapter))
+        let store = crate::SegmentFileStore::new(directory, compaction_threshold);
+        self.attach_incremental_store(Arc::new(store))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -559,6 +603,27 @@ impl Primadb {
         }
         self.persist_if_needed()?;
         Ok(loaded)
+    }
+
+    pub fn attach_incremental_store(&self, store: Arc<dyn IncrementalStore>) -> Result<bool> {
+        let metadata = store.load_metadata()?;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(metadata) = metadata.clone() {
+                inner.clock = metadata.clock;
+                inner.pending_ops = metadata.pending_ops;
+                inner.unflushed_ops.clear();
+                inner.nodes.clear();
+                inner.missing_nodes.clear();
+                inner.next_storage_tx_id = metadata.next_tx_id.max(1);
+            } else {
+                inner.next_storage_tx_id = 1;
+                inner.missing_nodes.clear();
+            }
+            inner.storage_engine = Some(store);
+        }
+        self.persist_if_needed()?;
+        Ok(metadata.is_some())
     }
 
     #[cfg(feature = "crypto")]
@@ -666,17 +731,32 @@ impl Primadb {
     }
 
     fn persist_if_needed(&self) -> Result<()> {
-        let (target, adapter, snapshot, unflushed_ops) = {
+        let (
+            target,
+            adapter,
+            engine,
+            snapshot,
+            unflushed_ops,
+            next_storage_tx_id,
+            clock,
+            pending_ops,
+            nodes,
+        ) = {
             let inner = self.inner.lock().unwrap();
             (
                 inner.persistence.clone(),
                 inner.storage_adapter.clone(),
+                inner.storage_engine.clone(),
                 DatabaseSnapshot {
                     clock: inner.clock.clone(),
                     nodes: inner.nodes.clone(),
                     pending_ops: inner.pending_ops.clone(),
                 },
                 inner.unflushed_ops.clone(),
+                inner.next_storage_tx_id,
+                inner.clock.clone(),
+                inner.pending_ops.clone(),
+                inner.nodes.clone(),
             )
         };
 
@@ -686,6 +766,17 @@ impl Primadb {
 
         if let Some(adapter) = adapter {
             adapter.flush(&unflushed_ops, &snapshot)?;
+        }
+
+        if let Some(engine) = engine {
+            let metadata = build_storage_metadata(clock, pending_ops, next_storage_tx_id + 1);
+            let transaction = if unflushed_ops.is_empty() {
+                build_storage_transaction(next_storage_tx_id, metadata, nodes)
+            } else {
+                build_storage_transaction_from_ops(next_storage_tx_id, metadata, &nodes, &unflushed_ops)
+            };
+            engine.apply_transaction(&transaction)?;
+            self.inner.lock().unwrap().next_storage_tx_id = next_storage_tx_id + 1;
         }
 
         if !unflushed_ops.is_empty() {
@@ -710,7 +801,7 @@ impl Primadb {
     }
 
     fn materialize(&self, anchor: &str, segments: &[String]) -> Result<Option<JsonValue>> {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         match inner.resolve_cursor(anchor, segments)? {
             Some(Cursor::Node(node)) => Ok(Some(inner.materialize_node(
                 &node,
@@ -718,44 +809,45 @@ impl Primadb {
                 &mut BTreeSet::new(),
             ))),
             Some(Cursor::Field { node, field }) => {
-                let node_state = match inner.nodes.get(&node) {
-                    Some(node_state) => node_state,
+                let value = match inner
+                    .nodes
+                    .get(&node)
+                    .and_then(|node_state| node_state.fields.get(&field))
+                    .map(|field_state| field_state.value.clone())
+                {
+                    Some(value) => value,
                     None => return Ok(None),
                 };
-                let field_state = match node_state.fields.get(&field) {
-                    Some(field_state) => field_state,
-                    None => return Ok(None),
-                };
-                Ok(Some(inner.materialize_field(
-                    &node,
-                    &field,
-                    &field_state.value,
-                    &mut BTreeSet::new(),
-                )))
+                Ok(Some(inner.materialize_field(&node, &field, &value, &mut BTreeSet::new())))
             }
             None => Ok(None),
         }
     }
 
     fn map_at(&self, anchor: &str, segments: &[String]) -> Result<Vec<MapEntry>> {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         match inner.resolve_cursor(anchor, segments)? {
             Some(Cursor::Node(node)) => Ok(inner.map_node(&node)),
             Some(Cursor::Field { node, field }) => {
-                let Some(node_state) = inner.nodes.get(&node) else {
+                let Some(value) = inner
+                    .nodes
+                    .get(&node)
+                    .and_then(|node_state| node_state.fields.get(&field))
+                    .map(|field_state| field_state.value.clone())
+                else {
                     return Ok(Vec::new());
                 };
-                let Some(field_state) = node_state.fields.get(&field) else {
-                    return Ok(Vec::new());
-                };
-                match &field_state.value {
+                match &value {
                     FieldValue::Link(target) => Ok(inner.map_node(target)),
                     FieldValue::Set(set) => Ok(set
                         .members
                         .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into_iter()
                         .map(|member| MapEntry {
                             key: member.clone(),
-                            value: inner.materialize_node(member, member, &mut BTreeSet::new()),
+                            value: inner.materialize_node(&member, &member, &mut BTreeSet::new()),
                         })
                         .collect()),
                     FieldValue::Scalar(_) => Ok(Vec::new()),
@@ -771,6 +863,10 @@ impl Primadb {
         segments: &[String],
         spec: &QuerySpec,
     ) -> Result<Vec<MapEntry>> {
+        if let Some(entries) = self.query_with_storage_indexes(anchor, segments, spec)? {
+            return Ok(entries);
+        }
+
         let mut entries = filter_query_entries(self.map_at(anchor, segments)?, spec);
 
         if let Some(order) = &spec.order {
@@ -788,8 +884,95 @@ impl Primadb {
         Ok(entries)
     }
 
+    fn query_with_storage_indexes(
+        &self,
+        anchor: &str,
+        segments: &[String],
+        spec: &QuerySpec,
+    ) -> Result<Option<Vec<MapEntry>>> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(engine) = inner.storage_engine.clone() else {
+            return Ok(None);
+        };
+
+        let Some(Cursor::Field { node, field }) = inner.resolve_cursor(anchor, segments)? else {
+            return Ok(None);
+        };
+        let Some(node_state) = inner.nodes.get(&node).cloned() else {
+            return Ok(None);
+        };
+        let Some(field_state) = node_state.fields.get(&field) else {
+            return Ok(None);
+        };
+        let FieldValue::Set(set) = &field_state.value else {
+            return Ok(None);
+        };
+
+        let indexed_path = spec
+            .filters
+            .iter()
+            .find_map(indexed_filter_path)
+            .or_else(|| spec.order.as_ref().and_then(indexed_order_path));
+        let Some(indexed_path) = indexed_path else {
+            return Ok(None);
+        };
+
+        let direction = spec
+            .order
+            .as_ref()
+            .filter(|order| order.path == indexed_path)
+            .map(|order| order.direction)
+            .unwrap_or(QueryDirection::Asc);
+
+        let candidate_ids: BTreeSet<_> = set.members.keys().cloned().collect();
+        let indexed_filters: Vec<_> = spec
+            .filters
+            .iter()
+            .filter(|filter| indexed_filter_path(filter).as_deref() == Some(indexed_path.as_str()))
+            .collect();
+
+        let mut ordered_member_ids = Vec::new();
+        let mut seen = BTreeSet::new();
+        for entry in engine.list_direct_index_entries(&indexed_path, direction)? {
+            if !candidate_ids.contains(&entry.node_id) || !seen.insert(entry.node_id.clone()) {
+                continue;
+            }
+            if indexed_filters
+                .iter()
+                .all(|filter| filter_matches_index_entry(filter, &entry.value))
+            {
+                ordered_member_ids.push(entry.node_id);
+            }
+        }
+
+        let mut entries = Vec::new();
+        for member_id in ordered_member_ids {
+            entries.push(MapEntry {
+                key: member_id.clone(),
+                value: inner.materialize_node(&member_id, &member_id, &mut BTreeSet::new()),
+            });
+        }
+
+        entries = filter_query_entries(entries, spec);
+        if let Some(order) = &spec.order {
+            if order.path != indexed_path {
+                sort_query_entries(&mut entries, order);
+            }
+        }
+
+        let offset = spec.offset.min(entries.len());
+        if offset > 0 {
+            entries.drain(0..offset);
+        }
+        if let Some(limit) = spec.limit {
+            entries.truncate(limit);
+        }
+
+        Ok(Some(entries))
+    }
+
     fn scan_at(&self, anchor: &str, segments: &[String], spec: &LexSpec) -> Result<Vec<LexEntry>> {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let mut entries = match inner.resolve_cursor(anchor, segments)? {
             Some(Cursor::Node(node)) => {
                 let mut output = Vec::new();
@@ -828,7 +1011,7 @@ impl Primadb {
 
     fn subscribe_to(&self, anchor: &str, segments: &[String]) -> Result<Subscription> {
         let _ = {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
             inner.resolve_cursor(anchor, segments)?
         };
 
@@ -1435,7 +1618,31 @@ impl Drop for ChangeSubscriptionInner {
 }
 
 impl Inner {
+    fn maybe_load_node(&mut self, node: &str) -> Result<bool> {
+        if self.nodes.contains_key(node) {
+            return Ok(true);
+        }
+        if self.missing_nodes.contains(node) {
+            return Ok(false);
+        }
+        let Some(engine) = self.storage_engine.clone() else {
+            return Ok(false);
+        };
+        match engine.get_node(node)? {
+            Some(node_state) => {
+                self.nodes.insert(node.to_owned(), node_state);
+                self.missing_nodes.remove(node);
+                Ok(true)
+            }
+            None => {
+                self.missing_nodes.insert(node.to_owned());
+                Ok(false)
+            }
+        }
+    }
+
     fn ensure_node(&mut self, node: &str) {
+        self.missing_nodes.remove(node);
         self.nodes
             .entry(node.to_owned())
             .or_insert_with(|| NodeState::new(node.to_owned()));
@@ -1446,9 +1653,12 @@ impl Inner {
             return Ok(Cursor::Node(anchor.to_owned()));
         }
 
-        self.ensure_node(anchor);
+        if !self.maybe_load_node(anchor)? {
+            self.ensure_node(anchor);
+        }
         let mut current = anchor.to_owned();
         for segment in &segments[..segments.len().saturating_sub(1)] {
+            let _ = self.maybe_load_node(&current)?;
             let next = match self
                 .nodes
                 .get(&current)
@@ -1496,19 +1706,21 @@ impl Inner {
         })
     }
 
-    fn resolve_cursor(&self, anchor: &str, segments: &[String]) -> Result<Option<Cursor>> {
+    fn resolve_cursor(&mut self, anchor: &str, segments: &[String]) -> Result<Option<Cursor>> {
         if segments.is_empty() {
             return Ok(self
-                .nodes
-                .contains_key(anchor)
+                .maybe_load_node(anchor)?
                 .then(|| Cursor::Node(anchor.to_owned())));
         }
 
         let mut current = anchor.to_owned();
-        let Some(_) = self.nodes.get(&current) else {
+        if !self.maybe_load_node(&current)? {
             return Ok(None);
-        };
+        }
         for segment in &segments[..segments.len().saturating_sub(1)] {
+            if !self.maybe_load_node(&current)? {
+                return Ok(None);
+            }
             let Some(node) = self.nodes.get(&current) else {
                 return Ok(None);
             };
@@ -1530,6 +1742,10 @@ impl Inner {
                     });
                 }
             }
+        }
+
+        if !self.maybe_load_node(&current)? {
+            return Ok(None);
         }
 
         Ok(Some(Cursor::Field {
@@ -2133,7 +2349,7 @@ impl Inner {
     }
 
     fn materialize_node(
-        &self,
+        &mut self,
         node: &str,
         _path: &str,
         visited: &mut BTreeSet<NodeId>,
@@ -2145,13 +2361,15 @@ impl Inner {
             )]));
         }
 
-        let output = if let Some(state) = self.nodes.get(node) {
+        let _ = self.maybe_load_node(node);
+
+        let output = if let Some(state) = self.nodes.get(node).cloned() {
             let mut object = Map::new();
-            object.insert("$id".to_owned(), JsonValue::String(state.id.clone()));
-            for (field, state) in &state.fields {
+            object.insert("$id".to_owned(), JsonValue::String(state.id));
+            for (field, state) in state.fields {
                 object.insert(
                     field.clone(),
-                    self.materialize_field(node, field, &state.value, visited),
+                    self.materialize_field(node, &field, &state.value, visited),
                 );
             }
             JsonValue::Object(object)
@@ -2167,7 +2385,7 @@ impl Inner {
     }
 
     fn materialize_field(
-        &self,
+        &mut self,
         node: &str,
         field: &str,
         value: &FieldValue,
@@ -2205,18 +2423,20 @@ impl Inner {
         }
     }
 
-    fn map_node(&self, node: &str) -> Vec<MapEntry> {
+    fn map_node(&mut self, node: &str) -> Vec<MapEntry> {
+        let _ = self.maybe_load_node(node);
         self.nodes
             .get(node)
+            .cloned()
             .map(|state| {
                 state
                     .fields
-                    .iter()
+                    .into_iter()
                     .map(|(field, state)| MapEntry {
                         key: field.clone(),
                         value: self.materialize_field(
                             node,
-                            field,
+                            &field,
                             &state.value,
                             &mut BTreeSet::new(),
                         ),
@@ -2227,18 +2447,19 @@ impl Inner {
     }
 
     fn collect_lex_from_node(
-        &self,
+        &mut self,
         node: &str,
         base_path: &str,
         spec: &LexSpec,
         remaining_depth: usize,
         output: &mut Vec<LexEntry>,
     ) {
-        let Some(state) = self.nodes.get(node) else {
+        let _ = self.maybe_load_node(node);
+        let Some(state) = self.nodes.get(node).cloned() else {
             return;
         };
-        for (field, field_state) in &state.fields {
-            if !lex_key_matches(field, spec) {
+        for (field, field_state) in state.fields {
+            if !lex_key_matches(&field, spec) {
                 continue;
             }
 
@@ -2252,7 +2473,7 @@ impl Inner {
                 key: field.clone(),
                 value: self.materialize_field(
                     node,
-                    field,
+                    &field,
                     &field_state.value,
                     &mut BTreeSet::new(),
                 ),
@@ -2283,7 +2504,7 @@ impl Inner {
     }
 
     fn collect_lex_from_field(
-        &self,
+        &mut self,
         node: &str,
         field: &str,
         base_path: &str,
@@ -2291,7 +2512,8 @@ impl Inner {
         remaining_depth: usize,
         output: &mut Vec<LexEntry>,
     ) {
-        let Some(state) = self.nodes.get(node) else {
+        let _ = self.maybe_load_node(node);
+        let Some(state) = self.nodes.get(node).cloned() else {
             return;
         };
         let Some(field_state) = state.fields.get(field) else {
@@ -2804,6 +3026,59 @@ fn matches_filter(entry: &MapEntry, filter: &QueryFilter) -> bool {
     }
 }
 
+fn indexed_filter_path(filter: &QueryFilter) -> Option<String> {
+    let path = match filter {
+        QueryFilter::Eq { path, .. }
+        | QueryFilter::Ne { path, .. }
+        | QueryFilter::Gt { path, .. }
+        | QueryFilter::Gte { path, .. }
+        | QueryFilter::Lt { path, .. }
+        | QueryFilter::Lte { path, .. }
+        | QueryFilter::Prefix { path, .. }
+        | QueryFilter::Contains { path, .. }
+        | QueryFilter::Exists { path } => path,
+    };
+    is_direct_index_path(path).then_some(path.clone())
+}
+
+fn indexed_order_path(order: &crate::query::QueryOrder) -> Option<String> {
+    is_direct_index_path(&order.path).then_some(order.path.clone())
+}
+
+fn is_direct_index_path(path: &str) -> bool {
+    !path.is_empty() && path != "$key" && path != "$value" && !path.contains('.')
+}
+
+fn filter_matches_index_entry(filter: &QueryFilter, value: &JsonValue) -> bool {
+    match filter {
+        QueryFilter::Eq { value: expected, .. } => value == expected,
+        QueryFilter::Ne { value: expected, .. } => value != expected,
+        QueryFilter::Gt { value: expected, .. } => {
+            compare_json_values(value, expected) == Some(Ordering::Greater)
+        }
+        QueryFilter::Gte { value: expected, .. } => matches!(
+            compare_json_values(value, expected),
+            Some(Ordering::Greater | Ordering::Equal)
+        ),
+        QueryFilter::Lt { value: expected, .. } => {
+            compare_json_values(value, expected) == Some(Ordering::Less)
+        }
+        QueryFilter::Lte { value: expected, .. } => matches!(
+            compare_json_values(value, expected),
+            Some(Ordering::Less | Ordering::Equal)
+        ),
+        QueryFilter::Prefix { value: expected, .. } => value
+            .as_str()
+            .map(|candidate| candidate.starts_with(expected))
+            .unwrap_or(false),
+        QueryFilter::Contains { value: expected, .. } => value
+            .as_str()
+            .map(|candidate| candidate.contains(expected))
+            .unwrap_or(false),
+        QueryFilter::Exists { .. } => true,
+    }
+}
+
 fn compare_entries(
     left: &MapEntry,
     right: &MapEntry,
@@ -3216,6 +3491,60 @@ mod tests {
         assert!(second.use_radisk_storage(path.clone(), 2)?);
         let snapshot = second.root("docs").field("hello").once_json()?.unwrap();
         assert_eq!(snapshot["value"], "world");
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_storage_lazily_restores_and_uses_direct_indexes_for_set_queries() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-{unique}"));
+
+        let writer = Primadb::with_replica_id("writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        for index in 0..24 {
+            writer
+                .root("lists")
+                .field("main")
+                .field("items")
+                .set(json!({
+                    "title": format!("Task {index}"),
+                    "done": index % 2 == 0,
+                    "archived": false,
+                    "created_at": index,
+                }))?;
+        }
+
+        let reader = Primadb::with_replica_id("reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert_eq!(reader.stats().nodes, 0);
+
+        let open_tasks = reader.root("lists").field("main").field("items").query(QuerySpec {
+            filters: vec![
+                QueryFilter::Eq {
+                    path: "done".to_owned(),
+                    value: json!(false),
+                },
+                QueryFilter::Eq {
+                    path: "archived".to_owned(),
+                    value: json!(false),
+                },
+            ],
+            order: Some(crate::query::QueryOrder {
+                path: "created_at".to_owned(),
+                direction: QueryDirection::Asc,
+            }),
+            limit: Some(50),
+            offset: 0,
+        })?;
+
+        assert_eq!(open_tasks.len(), 12);
+        assert_eq!(open_tasks[0].value["title"], "Task 1");
+        assert!(reader.stats().nodes < 24);
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Primadb Browser Segment Notes</title>
+    <link rel="stylesheet" href="../browser-notes/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <p class="eyebrow">Primadb Example</p>
+        <h1>Browser Segment Notes</h1>
+        <p class="lede">
+          Local-first task tracking with canonical node/index records persisted in
+          IndexedDB, reactive rendering, query filters, and cross-tab sync over
+          <code>BroadcastChannel</code>.
+        </p>
+
+        <div class="status-grid">
+          <div class="status-card">
+            <span class="status-label">Replica</span>
+            <strong id="replica-id">booting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Persistence</span>
+            <strong id="persistence-status">starting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Sync</span>
+            <strong id="sync-status">idle</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Visible Tasks</span>
+            <strong id="task-count">0</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="composer panel">
+        <form id="task-form" class="task-form">
+          <label class="field">
+            <span>Task title</span>
+            <input
+              id="task-title"
+              name="title"
+              type="text"
+              autocomplete="off"
+              maxlength="120"
+              placeholder="Ship a segment-backed browser demo"
+              required
+            />
+          </label>
+
+          <label class="field">
+            <span>Note</span>
+            <textarea
+              id="task-note"
+              name="note"
+              rows="3"
+              maxlength="280"
+              placeholder="Optional details"
+            ></textarea>
+          </label>
+
+          <button class="primary-button" type="submit">Add task</button>
+        </form>
+      </section>
+
+      <section class="controls panel">
+        <div class="filters" id="filter-group">
+          <button class="filter-button is-active" data-filter="all" type="button">All</button>
+          <button class="filter-button" data-filter="open" type="button">Open</button>
+          <button class="filter-button" data-filter="done" type="button">Done</button>
+        </div>
+
+        <label class="search-field">
+          <span>Search</span>
+          <input
+            id="search-input"
+            type="search"
+            autocomplete="off"
+            placeholder="Filter by title or note"
+          />
+        </label>
+      </section>
+
+      <section class="panel">
+        <div id="empty-state" class="empty-state" hidden>
+          <h2>No matching tasks</h2>
+          <p>Add a task or change the current filters.</p>
+        </div>
+        <ul id="task-list" class="task-list"></ul>
+      </section>
+    </main>
+
+    <template id="task-template">
+      <li class="task-card">
+        <div class="task-header">
+          <button class="toggle-button" type="button" aria-label="Toggle complete"></button>
+          <div class="task-meta">
+            <h2 class="task-title"></h2>
+            <p class="task-note"></p>
+          </div>
+        </div>
+        <div class="task-footer">
+          <span class="task-timestamp"></span>
+          <button class="ghost-button archive-button" type="button">Archive</button>
+        </div>
+      </li>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

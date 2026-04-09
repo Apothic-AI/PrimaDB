@@ -1,5 +1,6 @@
 use crate::clock::now_millis;
 use crate::crypto::{EncryptedPayload, Identity, PublicIdentity, SecretBoxKey};
+use crate::engine::StoredAuthFieldMeta;
 use crate::error::{PrimadbError, Result};
 use crate::{DatabaseSnapshot, Operation, SignedPayload, SyncFrame};
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,13 @@ pub struct SignedValueClaims {
     pub value: JsonValue,
     #[serde(default)]
     pub cert: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InspectedSignedFieldValue {
+    pub meta: StoredAuthFieldMeta,
+    #[serde(default)]
+    pub unwrapped_value: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -464,6 +472,65 @@ pub fn owner_public_key_for_path(path: &str) -> Option<String> {
         return None;
     }
     Some(root.trim_start_matches('~').to_owned())
+}
+
+pub fn inspect_signed_field_value(
+    expected_path: &str,
+    value: &JsonValue,
+) -> Result<Option<InspectedSignedFieldValue>> {
+    let Some(signed) = decode_signed_value(value)? else {
+        return Ok(None);
+    };
+
+    let owner = owner_public_key_for_path(expected_path);
+    let certificate = signed.payload.cert.clone();
+    let mut meta = StoredAuthFieldMeta {
+        signer: signed.signer.clone(),
+        certificate: certificate.clone(),
+        owner: owner.clone(),
+        verified: false,
+    };
+
+    let claims = match signed.verify() {
+        Ok(claims) => claims,
+        Err(_) => {
+            return Ok(Some(InspectedSignedFieldValue {
+                meta,
+                unwrapped_value: None,
+            }));
+        }
+    };
+
+    if claims.path != expected_path {
+        return Ok(Some(InspectedSignedFieldValue {
+            meta,
+            unwrapped_value: None,
+        }));
+    }
+
+    if let Some(owner_pub) = owner {
+        if signed.signer != owner_pub {
+            let Some(certificate) = claims.cert.as_deref() else {
+                return Ok(Some(InspectedSignedFieldValue {
+                    meta,
+                    unwrapped_value: None,
+                }));
+            };
+            if validate_certificate(certificate, &owner_pub, &signed.signer, expected_path).is_err()
+            {
+                return Ok(Some(InspectedSignedFieldValue {
+                    meta,
+                    unwrapped_value: None,
+                }));
+            }
+        }
+    }
+
+    meta.verified = true;
+    Ok(Some(InspectedSignedFieldValue {
+        meta,
+        unwrapped_value: Some(claims.value),
+    }))
 }
 
 fn encode_sea_envelope(value: JsonValue) -> Result<String> {
