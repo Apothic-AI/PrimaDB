@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Primadb Package Notes</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="hero">
+        <p class="eyebrow">Package Example</p>
+        <h1>Primadb via npm in a Vite app</h1>
+        <p class="lede">
+          This page consumes the in-repo <code>primadb</code> package instead of importing raw
+          generated WASM files directly.
+        </p>
+      </header>
+
+      <section class="panel stats">
+        <div>
+          <span class="label">Replica</span>
+          <strong id="replica-id">starting...</strong>
+        </div>
+        <div>
+          <span class="label">Storage</span>
+          <strong id="storage-backend">starting...</strong>
+        </div>
+        <div>
+          <span class="label">Notes</span>
+          <strong id="note-count">0</strong>
+        </div>
+      </section>
+
+      <section class="panel compose">
+        <form id="note-form">
+          <label>
+            <span>Title</span>
+            <input id="note-title" name="title" type="text" maxlength="80" required />
+          </label>
+          <label>
+            <span>Body</span>
+            <textarea id="note-body" name="body" rows="4" maxlength="400" required></textarea>
+          </label>
+          <button id="note-submit" type="submit">Save note</button>
+        </form>
+      </section>
+
+      <section class="panel notes">
+        <div class="notes-head">
+          <h2>Saved Notes</h2>
+          <p id="status-line">loading…</p>
+        </div>
+        <ul id="notes-list"></ul>
+      </section>
+    </div>
+  </body>
+  </html>

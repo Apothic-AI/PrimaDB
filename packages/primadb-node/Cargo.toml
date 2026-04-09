@@ -1,0 +1,20 @@
+[package]
+name = "primadb-node"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "primadb_node"
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2.16", default-features = false, features = ["napi8", "tokio_rt", "serde-json"] }
+napi-derive = "2.16"
+primadb = { path = "../..", features = ["crypto", "native-websocket", "native-webrtc"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["sync"] }
+
+[build-dependencies]
+napi-build = "2.1"

@@ -229,6 +229,44 @@ const mesh = db.connectMesh({
 See [packages/primadb/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/README.md)
 for the full package-specific flow.
 
+For a real browser app that consumes the package through npm and Vite, see
+[examples/browser-package-notes-vite/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite/README.md).
+
+## Native Node Package
+
+Primadb also now has a native Node.js package in
+[packages/primadb-node](/home/bitnom/Code/gunport/primadb/packages/primadb-node). Unlike the
+browser package, this one wraps the native Rust runtime directly through a Node addon.
+
+Build it with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+npm install
+npm run build
+```
+
+Example usage:
+
+```js
+import { Primadb } from "primadb-node";
+
+const db = new Primadb("node-a");
+db.openDurableStorage({
+  kind: "segment_files",
+  directory: "/tmp/primadb-node-demo",
+});
+
+db.chain("notes").field("items").set({
+  title: "Native Node note",
+  body: "Stored through the Node addon",
+  createdAt: new Date().toISOString(),
+});
+```
+
+See [packages/primadb-node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/README.md)
+for the full package-specific flow.
+
 ## Replication Contract
 
 Primadb does not hide the wire format from you.
@@ -265,6 +303,7 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's relay client API, automatic IndexedDB persistence, and the included relay server.
 - [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Default browser mesh board using Primadb's shared `connectMesh(...)` facade, relay-backed signaling by default, optional `BroadcastChannel` fallback, and browser/native smoke coverage.
 - [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, the DAM relay, and a browser runtime smoke test for `load/not/map/back`.
+- [examples/browser-package-notes-vite/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite/README.md): Vite browser app that installs the local `primadb` npm package and exercises IndexedDB-backed note persistence through the package entrypoint.
 - [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md): Opt-in `wasm-threads` browser demo that initializes `initThreadPool(...)` and exercises the Rayon-backed query path under COOP/COEP.
 - [examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md): Opt-in `wasm-threads` browser P2P demo using `WebRtcMesh`, relay-backed signaling by default, COOP/COEP serving, configurable ICE servers, and a threaded shared-query workload over WebRTC-synced notes.
 - [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
@@ -291,6 +330,20 @@ Threaded browser build:
 ```bash
 cd /home/bitnom/Code/gunport/primadb
 ./build-wasm-threads.sh
+```
+
+Vite browser app consuming the npm package:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:4182/
 ```
 
 Local-only browser board:
@@ -405,6 +458,13 @@ bash examples/browser-threaded-mesh-notes/test-cross-browser-smoke.sh
 bash examples/browser-gun-notes/test-runtime-smoke.sh
 bash examples/test-native-relay-smoke.sh
 bash examples/test-native-mesh-smoke.sh
+```
+
+Package browser smoke:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
+npm run smoke
 ```
 
 ## Query Layer

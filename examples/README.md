@@ -9,6 +9,8 @@
   - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for the default WebRTC mesh build.
   - Includes `test-browser-native-smoke.sh`, a browser/native relay-signaled mesh smoke test.
 - `browser-gun-notes/`: Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the relay-backed DAM path.
+- `browser-package-notes-vite/`: Vite app that consumes the in-repo `primadb` npm package instead of raw generated bindings.
+  - Includes `npm run smoke`, a Chromium package-consumer smoke test that creates a note and verifies persistence after reload.
   - Includes `test-runtime-smoke.sh`, a browser smoke test covering relay sync plus `load`, `not`, `map`, and `back`.
 - `browser-threaded-query/`: Opt-in `wasm-threads` browser demo with COOP/COEP serving, `initThreadPool(...)`, and a Rayon-backed query workload.
 - `browser-threaded-mesh-notes/`: Opt-in `wasm-threads` browser mesh demo with COOP/COEP serving, relay-backed signaling by default, configurable ICE servers, and peer-to-peer note sync over WebRTC.

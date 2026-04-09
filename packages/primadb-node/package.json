@@ -1,0 +1,27 @@
+{
+  "name": "primadb-node",
+  "version": "0.1.0",
+  "description": "Native Node.js package for Primadb.",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "binding-name.js",
+    "README.md",
+    "*.node"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build-native.mjs",
+    "smoke:core": "npm run build && node ./scripts/smoke-core.mjs",
+    "smoke:relay": "npm run build && node ./scripts/smoke-relay.mjs",
+    "smoke:mesh": "npm run build && node ./scripts/smoke-mesh.mjs",
+    "smoke": "npm run smoke:core && npm run smoke:relay && npm run smoke:mesh",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "detect-libc": "^2.1.2"
+  }
+}
