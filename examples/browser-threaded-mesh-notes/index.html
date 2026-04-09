@@ -12,9 +12,10 @@
         <p class="eyebrow">Primadb wasm-threads + P2P</p>
         <h1>Threaded Mesh Notes</h1>
         <p class="lede">
-          Open two tabs on the same origin to let Primadb discover a peer through
-          <code>BroadcastChannel</code>, sync directly over WebRTC, and run note queries through
-          the threaded Rayon path.
+          By default this demo discovers peers through a relay-backed signaling path, syncs
+          directly over WebRTC, and runs note queries through the threaded Rayon path.
+          Append <code>?signal=broadcast</code> to fall back to same-browser
+          <code>BroadcastChannel</code> signaling.
         </p>
 
         <div class="status-grid">
@@ -33,6 +34,14 @@
           <div class="status-card">
             <span class="status-label">Persistence</span>
             <strong id="persistence-status">starting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Signaling</span>
+            <strong id="signaling-mode">starting</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Relay</span>
+            <strong id="relay-status">starting</strong>
           </div>
           <div class="status-card">
             <span class="status-label">Peers</span>

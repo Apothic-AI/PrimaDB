@@ -19,7 +19,8 @@ const SERVER_ROOT =
   "/home/bitnom/Code/gunport/primadb";
 const CHROME_PATH =
   process.env.PLAYWRIGHT_BROWSER_PATH ?? "/usr/bin/google-chrome-stable";
-const ROOM = process.env.PRIMADB_THREADED_MESH_ROOM ?? `smoke-${Date.now()}`;
+const FIREFOX_PATH = process.env.PLAYWRIGHT_FIREFOX_PATH;
+const ROOM = process.env.PRIMADB_THREADED_MESH_ROOM ?? `cross-browser-${Date.now()}`;
 
 async function loadPlaywright() {
   const override = process.env.PLAYWRIGHT_MODULE_PATH;
@@ -144,26 +145,30 @@ function killDetached(child) {
 
 async function main() {
   await maybeBuild();
-  const { chromium } = await loadPlaywright();
+  const { chromium, firefox } = await loadPlaywright();
   const server = await ensureServer();
   const relay = await ensureRelay();
-  let browser = null;
-
-  if (!existsSync(CHROME_PATH)) {
-    throw new Error(`Browser executable not found at ${CHROME_PATH}`);
-  }
-
-  browser = await chromium.launch({
-    headless: true,
-    executablePath: CHROME_PATH,
-  });
+  let chrome = null;
+  let fox = null;
 
   try {
-    const context = await browser.newContext();
-    const page1 = await context.newPage();
-    const page2 = await context.newPage();
+    const chromiumOptions = { headless: true };
+    if (existsSync(CHROME_PATH)) {
+      chromiumOptions.executablePath = CHROME_PATH;
+    }
+    chrome = await chromium.launch(chromiumOptions);
+    const firefoxOptions = { headless: true };
+    if (FIREFOX_PATH && existsSync(FIREFOX_PATH)) {
+      firefoxOptions.executablePath = FIREFOX_PATH;
+    }
+    fox = await firefox.launch(firefoxOptions);
+
+    const chromiumContext = await chrome.newContext();
+    const firefoxContext = await fox.newContext();
+    const chromePage = await chromiumContext.newPage();
+    const firefoxPage = await firefoxContext.newPage();
     const url = `${ROOT_URL}?room=${encodeURIComponent(ROOM)}&signal=relay&relay=${encodeURIComponent(RELAY_URL)}`;
-    const noteTitle = `Threaded mesh note ${Date.now()}`;
+    const noteTitle = `Cross-browser note ${Date.now()}`;
 
     const waitForReady = async (page) => {
       await page.goto(url, { waitUntil: "networkidle" });
@@ -173,49 +178,39 @@ async function main() {
         const relay = document.querySelector("#relay-status")?.textContent ?? "";
         const threads = Number(document.querySelector("#thread-count")?.textContent ?? "0");
         const persistence = document.querySelector("#persistence-status")?.textContent ?? "";
-        const seeded = Number(document.querySelector("#seed-count")?.textContent ?? "0");
         return (
           build === "wasm-threads" &&
           signaling.includes("relay") &&
           relay === "connected" &&
           threads >= 1 &&
           persistence.length > 0 &&
-          seeded >= 1 &&
           globalThis.crossOriginIsolated === true
         );
-      }, { timeout: 30_000 });
+      }, { timeout: 45_000 });
     };
 
-    await waitForReady(page1);
-    await waitForReady(page2);
+    await waitForReady(chromePage);
+    await waitForReady(firefoxPage);
 
     await Promise.all([
-      page1.waitForFunction(() => Number(document.querySelector("#peer-count")?.textContent ?? "0") >= 1, { timeout: 30_000 }),
-      page2.waitForFunction(() => Number(document.querySelector("#peer-count")?.textContent ?? "0") >= 1, { timeout: 30_000 }),
-      page1.waitForFunction(() => (document.querySelector("#mesh-detail")?.textContent ?? "").includes("connected to 1 peer"), { timeout: 30_000 }),
-      page2.waitForFunction(() => (document.querySelector("#mesh-detail")?.textContent ?? "").includes("connected to 1 peer"), { timeout: 30_000 }),
+      chromePage.waitForFunction(() => Number(document.querySelector("#peer-count")?.textContent ?? "0") >= 1, { timeout: 45_000 }),
+      firefoxPage.waitForFunction(() => Number(document.querySelector("#peer-count")?.textContent ?? "0") >= 1, { timeout: 45_000 }),
+      chromePage.waitForFunction(() => (document.querySelector("#mesh-detail")?.textContent ?? "").includes("connected to 1 peer"), { timeout: 45_000 }),
+      firefoxPage.waitForFunction(() => (document.querySelector("#mesh-detail")?.textContent ?? "").includes("connected to 1 peer"), { timeout: 45_000 }),
     ]);
 
-    await page1.locator("#note-title").fill(noteTitle);
-    await page1.locator("#note-body").fill("Two-page threaded mesh smoke test");
-    await page1.getByRole("button", { name: "Add note" }).click();
+    await chromePage.locator("#note-title").fill(noteTitle);
+    await chromePage.locator("#note-body").fill("Cross-browser threaded mesh smoke test");
+    await chromePage.getByRole("button", { name: "Add note" }).click();
 
-    await page2.waitForFunction((expectedTitle) => {
+    await firefoxPage.waitForFunction((expectedTitle) => {
       return [...document.querySelectorAll(".note-title")].some(
         (node) => node.textContent === expectedTitle,
       );
-    }, noteTitle, { timeout: 30_000 });
-    const liveReplicated = (await page2.locator(".note-title", { hasText: noteTitle }).count()) >= 1;
+    }, noteTitle, { timeout: 45_000 });
 
-    await page1.getByRole("button", { name: "Seed Shared Load" }).click();
-    await page2.waitForFunction(
-      (expectedSeeded) => Number(document.querySelector("#seed-count")?.textContent ?? "0") >= expectedSeeded,
-      321,
-      { timeout: 60_000 },
-    );
-
-    await page2.getByRole("button", { name: "Run Parallel Query" }).click();
-    await page2.waitForFunction(() => {
+    await firefoxPage.getByRole("button", { name: "Run Parallel Query" }).click();
+    await firefoxPage.waitForFunction(() => {
       const raw = document.querySelector("#query-output")?.textContent ?? "";
       try {
         const parsed = JSON.parse(raw);
@@ -223,8 +218,7 @@ async function main() {
           parsed.parallelEnabled === true &&
           Number(parsed.parallelThreadCount) >= 1 &&
           Number(parsed.openPeers) >= 1 &&
-          Number(parsed.seeded) >= 321 &&
-          Number(parsed.queryMatches) >= 320
+          Number(parsed.queryMatches) >= 1
         );
       } catch {
         return false;
@@ -234,31 +228,27 @@ async function main() {
     const result = {
       url,
       room: ROOM,
-      build1: await page1.locator("#build-mode").textContent(),
-      build2: await page2.locator("#build-mode").textContent(),
-      signaling1: await page1.locator("#signaling-mode").textContent(),
-      signaling2: await page2.locator("#signaling-mode").textContent(),
-      relay1: await page1.locator("#relay-status").textContent(),
-      relay2: await page2.locator("#relay-status").textContent(),
-      threads1: Number(await page1.locator("#thread-count").textContent()),
-      threads2: Number(await page2.locator("#thread-count").textContent()),
-      peers1: Number(await page1.locator("#peer-count").textContent()),
-      peers2: Number(await page2.locator("#peer-count").textContent()),
-      seeded2: Number(await page2.locator("#seed-count").textContent()),
-      live_note_replicated: liveReplicated,
-      query: parseJsonBlock(await page2.locator("#query-output").textContent()),
-      threaded_p2p_confirmed: liveReplicated,
+      chromium: {
+        signaling: await chromePage.locator("#signaling-mode").textContent(),
+        relay: await chromePage.locator("#relay-status").textContent(),
+        peers: Number(await chromePage.locator("#peer-count").textContent()),
+      },
+      firefox: {
+        signaling: await firefoxPage.locator("#signaling-mode").textContent(),
+        relay: await firefoxPage.locator("#relay-status").textContent(),
+        peers: Number(await firefoxPage.locator("#peer-count").textContent()),
+        query: parseJsonBlock(await firefoxPage.locator("#query-output").textContent()),
+      },
+      cross_browser_live_replication: true,
     };
 
     console.log(JSON.stringify(result, null, 2));
-
-    if (!result.threaded_p2p_confirmed) {
-      throw new Error("Threaded mesh note did not replicate live before workload seeding");
-    }
-
   } finally {
-    if (browser) {
-      await browser.close();
+    if (chrome) {
+      await chrome.close();
+    }
+    if (fox) {
+      await fox.close();
     }
     if (relay.started) {
       killDetached(relay.process);

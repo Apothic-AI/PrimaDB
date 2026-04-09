@@ -7,8 +7,9 @@ It demonstrates:
 
 - `wasm-bindgen-rayon` thread-pool initialization before Primadb startup
 - `SharedArrayBuffer`-based threaded WASM under COOP/COEP headers
-- peer discovery over `BroadcastChannel`
+- relay-backed peer discovery and signaling by default
 - direct browser sync over `RTCPeerConnection` data channels
+- configurable ICE servers with built-in STUN defaults
 - a threaded query workload over the same shared note graph
 
 ## Run
@@ -27,12 +28,22 @@ cd /home/bitnom/Code/gunport/primadb
 ./examples/browser-threaded-mesh-notes/serve.sh
 ```
 
-3. Open `http://127.0.0.1:4175/examples/browser-threaded-mesh-notes/` in two tabs.
+3. Start the relay:
 
-4. Use `Seed Shared Load` in one tab, then run `Run Parallel Query` in either tab.
+```bash
+cd /home/bitnom/Code/gunport/primadb
+cargo run --example ws_relay_server -- 127.0.0.1:9010
+```
 
-The tabs should discover each other automatically, sync the seeded notes over WebRTC, and report
-that the threaded query path is active.
+4. Open `http://127.0.0.1:4175/examples/browser-threaded-mesh-notes/` in two browsers or tabs.
+
+5. Use `Seed Shared Load` in one browser, then run `Run Parallel Query` in either browser.
+
+The browsers should discover each other through the relay, sync the notes over direct WebRTC data
+channels, and report that the threaded query path is active.
+
+By default the demo uses relay signaling at `ws://<current-host>:9010`. Append
+`?signal=broadcast` to force the old same-browser `BroadcastChannel` signaling path instead.
 
 ## Automated Check
 
@@ -44,6 +55,16 @@ bash examples/browser-threaded-mesh-notes/test-two-page-smoke.sh
 ```
 
 The script builds the threaded package if needed, starts the COOP/COEP server if needed, opens
-two Playwright pages in the same room, confirms the `wasm-threads` build is active, waits for a
-live WebRTC peer connection, checks that a note replicates without reload, seeds the shared load,
-and verifies the parallel query output.
+two Playwright pages in the same room, starts the relay if needed, confirms the `wasm-threads`
+build is active, waits for a live WebRTC peer connection, checks that a note replicates without
+reload, seeds the shared load, and verifies the parallel query output.
+
+Run the cross-browser smoke test:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+bash examples/browser-threaded-mesh-notes/test-cross-browser-smoke.sh
+```
+
+That script launches Chromium and Firefox against the same relay-backed room and confirms live
+cross-browser replication over WebRTC.

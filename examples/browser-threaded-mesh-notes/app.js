@@ -4,6 +4,7 @@ const DEFAULT_SNAPSHOT_DB = "primadb-browser-threaded-mesh-notes";
 const SNAPSHOT_STORE = "snapshots";
 const SNAPSHOT_KEY = "main";
 const DEFAULT_MESH_ROOM = "primadb-browser-threaded-mesh-notes";
+const DEFAULT_SIGNAL_MODE = "relay";
 const SEEDED_NOTE_TOTAL = 320;
 
 const session = createSessionConfig();
@@ -28,6 +29,8 @@ const elements = {
   buildMode: document.getElementById("build-mode"),
   threadCount: document.getElementById("thread-count"),
   persistenceStatus: document.getElementById("persistence-status"),
+  signalingMode: document.getElementById("signaling-mode"),
+  relayStatus: document.getElementById("relay-status"),
   peerCount: document.getElementById("peer-count"),
   meshQueue: document.getElementById("mesh-queue"),
   meshDetail: document.getElementById("mesh-detail"),
@@ -74,7 +77,10 @@ async function main() {
   elements.threadCount.textContent = String(primadb.parallelThreadCount());
 
   await setupPersistence();
-  state.mesh = db.connectWebRtcMesh(session.room, 1500);
+  state.mesh =
+    session.signal === "broadcast"
+      ? db.connectWebRtcMesh(session.room, 1500)
+      : db.connectWebRtcMeshViaRelay(session.relayUrl, session.room, 1500);
   bindUi();
   startStatusLoop();
 
@@ -117,8 +123,14 @@ async function main() {
 function createSessionConfig() {
   const params = new URLSearchParams(globalThis.location.search);
   const room = params.get("room")?.trim() || DEFAULT_MESH_ROOM;
+  const signal = (params.get("signal")?.trim() || DEFAULT_SIGNAL_MODE).toLowerCase();
+  const protocol = globalThis.location.protocol === "https:" ? "wss" : "ws";
+  const relayUrl =
+    params.get("relay")?.trim() || `${protocol}://${globalThis.location.hostname}:9010`;
   return {
     room,
+    signal: signal === "broadcast" ? "broadcast" : "relay",
+    relayUrl,
     snapshotDb: `${DEFAULT_SNAPSHOT_DB}-${room}`,
   };
 }
@@ -195,12 +207,30 @@ function startStatusLoop() {
     const peerCount = state.mesh ? state.mesh.peerCount() : 0;
     const openPeerCount = state.mesh ? state.mesh.openPeerCount() : 0;
     const inflight = state.mesh ? state.mesh.inflightCount() : 0;
+    const signalingMode = state.mesh?.signalingMode?.() ?? "unknown";
+    const relayReadyState = state.mesh?.signalingReadyState?.();
     elements.peerCount.textContent = String(peerCount);
     elements.meshQueue.textContent = String(inflight);
+    elements.signalingMode.textContent = signalingMode.replace("_", " ");
+    elements.relayStatus.textContent =
+      relayReadyState == null
+        ? "local"
+        : relayReadyState === WebSocket.OPEN
+          ? "connected"
+          : relayReadyState === WebSocket.CONNECTING
+            ? "connecting"
+            : relayReadyState === WebSocket.CLOSING
+              ? "closing"
+              : "closed";
     if (!state.mesh) {
       elements.meshDetail.textContent = "mesh unavailable";
+    } else if (peerCount === 0 && signalingMode === "relay") {
+      elements.meshDetail.textContent =
+        relayReadyState === WebSocket.OPEN
+          ? `waiting for another browser to join via ${session.relayUrl}`
+          : `connecting to signaling relay ${session.relayUrl}`;
     } else if (peerCount === 0) {
-      elements.meshDetail.textContent = "waiting for another tab to join the room";
+      elements.meshDetail.textContent = "waiting for another browser context to join the room";
     } else if (openPeerCount === 0) {
       elements.meshDetail.textContent = "peer discovered, waiting for the WebRTC data channel to open";
     } else {
