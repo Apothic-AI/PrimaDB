@@ -29,3 +29,14 @@ It demonstrates:
 
 Open a second tab to watch cross-tab sync happen in real time, then reload either tab to verify
 that the task list restores from the segment-backed IndexedDB store.
+
+## Automated Check
+
+Run the two-page live sync smoke test:
+
+```bash
+./examples/browser-segment-notes/test-live-sync.sh
+```
+
+The script starts the local server if needed, opens two Playwright pages, writes a unique task in
+page 1, and verifies that page 2 receives it live without a reload.

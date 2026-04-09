@@ -2,6 +2,7 @@
 
 - `browser-notes/`: Browser-only local-first task board using Primadb's WASM build, IndexedDB persistence, query filters, and cross-tab sync over `BroadcastChannel`.
 - `browser-segment-notes/`: Browser-only task board using Primadb's segment-backed IndexedDB persistence hook with canonical node/index records and cross-tab sync over `BroadcastChannel`.
+  - Includes `test-live-sync.sh`, a two-page Playwright smoke test for live cross-tab delivery.
 - `browser-relay-notes/`: Browser task board using Primadb's WASM build, automatic IndexedDB persistence, peer recommendations, and remote `get/query/lex/snapshot` over the relay.
 - `browser-mesh-notes/`: Browser-to-browser notes board using Primadb's `WebRtcMesh` helper with peer discovery over `BroadcastChannel` and direct sync over WebRTC data channels.
 - `browser-gun-notes/`: Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the relay-backed DAM path.
