@@ -1,6 +1,7 @@
 .venv/
 dist/
 build/
+target/
 *.whl
 *.tar.gz
 python/primadb/_native*.so
