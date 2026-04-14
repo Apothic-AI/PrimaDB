@@ -85,6 +85,14 @@ export interface SubscriptionMessage {
   value?: JsonValue | null;
 }
 
+export interface RemoteWatchMessage {
+  done: boolean;
+  initial?: boolean;
+  kind?: "get" | "map" | "query" | "lex" | "snapshot" | null;
+  value?: JsonValue | null;
+  error?: string | null;
+}
+
 export declare class Primadb {
   constructor(replicaId?: string | null);
   replicaId(): string;
@@ -130,6 +138,12 @@ export declare class Subscription {
   close(): void;
 }
 
+export declare class RemoteWatch {
+  next(): Promise<RemoteWatchMessage>;
+  tryNext(): RemoteWatchMessage;
+  close(): void;
+}
+
 export declare class WebSocketSync {
   isConnected(): boolean;
   pendingCount(): number;
@@ -140,6 +154,11 @@ export declare class WebSocketSync {
   remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
   remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
   remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
+  watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
+  watchRemoteMap(peerId: string, path: RemotePath): RemoteWatch;
+  watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
+  watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): RemoteWatch;
+  watchRemoteSnapshot(peerId: string, root?: string | null): RemoteWatch;
   flushPending(): Promise<number>;
   retryInflight(): Promise<number>;
   close(): void;
@@ -154,6 +173,11 @@ export declare class WebRtcMesh {
   openPeerCount(): Promise<number>;
   inflightCount(): Promise<number>;
   recommendedPeers(): Promise<JsonValue>;
+  watchRemoteGet(peerId: string, path: RemotePath): Promise<RemoteWatch>;
+  watchRemoteMap(peerId: string, path: RemotePath): Promise<RemoteWatch>;
+  watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<RemoteWatch>;
+  watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<RemoteWatch>;
+  watchRemoteSnapshot(peerId: string, root?: string | null): Promise<RemoteWatch>;
   flushPending(): Promise<number>;
   retryInflight(): Promise<number>;
   close(): Promise<void>;

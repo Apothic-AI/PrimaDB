@@ -2,15 +2,15 @@ use crate::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription,
     DurableStorageBinding, DurableStorageConfig, HybridClock, IceServerConfig, LexEntry, LexSpec,
     MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, Operation, PeerRecommendation, Primadb,
-    PullRequest, PullRequestKind,
-    PullResponse, PullResponseBody, QuerySpec, RelayClientConfig, RemotePath, RemoteResult,
-    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, Subscription,
-    SyncEnvelope, SyncFrame, build_storage_metadata, build_storage_transaction,
-    encode_component,
+    PullRequest, PullRequestKind, PullResponse, PullResponseBody, QuerySpec, RelayClientConfig,
+    RemotePath, RemoteResult, RemoteWatchMessage, RouteBatchItem,
+    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope,
+    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, build_storage_metadata,
+    build_storage_transaction, encode_component,
 };
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
-use async_channel::{Sender, bounded};
+use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
@@ -51,6 +51,16 @@ pub struct WasmChain {
 #[wasm_bindgen(js_name = Subscription)]
 pub struct WasmSubscription {
     inner: Option<Subscription>,
+}
+
+#[wasm_bindgen(js_name = RemoteWatch)]
+pub struct WasmRemoteWatch {
+    inner: Option<WasmRemoteWatchInner>,
+}
+
+struct WasmRemoteWatchInner {
+    receiver: async_channel::Receiver<std::result::Result<RemoteWatchMessage, String>>,
+    cancel: Box<dyn Fn()>,
 }
 
 #[wasm_bindgen(js_name = IndexedDbPersistence)]
@@ -100,6 +110,8 @@ struct WebSocketSyncState {
     socket: web_sys::WebSocket,
     inflight: BTreeMap<String, OutboundSync>,
     pending_requests: BTreeMap<String, PendingPullRequest>,
+    outgoing_watches: BTreeMap<String, OutgoingWatch>,
+    incoming_watches: BTreeMap<String, IncomingWatch>,
     recommendations: BTreeMap<String, PeerRecommendation>,
     next_message_seq: u64,
 }
@@ -115,6 +127,30 @@ struct OutboundSync {
 struct PendingPullRequest {
     sender: Sender<std::result::Result<RemoteResult, String>>,
     accumulator: PullAccumulator,
+}
+
+#[derive(Debug)]
+struct OutgoingWatch {
+    sender: Sender<std::result::Result<RemoteWatchMessage, String>>,
+    target_peer_id: String,
+    request_kind: PullRequestKind,
+    pending_sequence: Option<PendingWatchSequence>,
+    last_delivered_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingWatchSequence {
+    sequence: u64,
+    initial: bool,
+    accumulator: PullAccumulator,
+}
+
+#[derive(Debug, Clone)]
+struct IncomingWatch {
+    target_peer_id: String,
+    request_kind: PullRequestKind,
+    next_sequence: u64,
+    last_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +226,8 @@ struct WebRtcMeshState {
     rtc_configuration: JsValue,
     peers: BTreeMap<String, MeshPeer>,
     inflight: BTreeMap<String, MeshOutbound>,
+    outgoing_watches: BTreeMap<String, OutgoingWatch>,
+    incoming_watches: BTreeMap<String, IncomingWatch>,
     next_message_seq: u64,
 }
 
@@ -799,6 +837,8 @@ impl WasmPrimadb {
             socket: socket.clone(),
             inflight: BTreeMap::new(),
             pending_requests: BTreeMap::new(),
+            outgoing_watches: BTreeMap::new(),
+            incoming_watches: BTreeMap::new(),
             recommendations: BTreeMap::new(),
             next_message_seq: 0,
         }));
@@ -828,6 +868,11 @@ impl WasmPrimadb {
                         "pull_get".to_owned(),
                         "pull_query".to_owned(),
                         "pull_lex".to_owned(),
+                        "watch_get".to_owned(),
+                        "watch_map".to_owned(),
+                        "watch_query".to_owned(),
+                        "watch_lex".to_owned(),
+                        "watch_snapshot".to_owned(),
                         "peer_exchange".to_owned(),
                     ],
                     vec!["primadb-sync".to_owned()],
@@ -850,6 +895,8 @@ impl WasmPrimadb {
                 &onclose_state,
                 "websocket closed while requests were pending",
             );
+            fail_outgoing_watches_state(&onclose_state, "websocket closed");
+            clear_incoming_watches_state(&onclose_state);
         }) as Box<dyn FnMut(_)>);
         socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
@@ -860,6 +907,8 @@ impl WasmPrimadb {
                 &onerror_state,
                 "websocket errored while requests were pending",
             );
+            fail_outgoing_watches_state(&onerror_state, "websocket errored");
+            clear_incoming_watches_state(&onerror_state);
         }) as Box<dyn FnMut(_)>);
         socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
@@ -870,6 +919,9 @@ impl WasmPrimadb {
             while let Ok(event) = receiver.recv().await {
                 if event.pending_ops > 0 {
                     let _ = flush_pending_state(&change_state);
+                }
+                if event.data_changed {
+                    let _ = emit_incoming_watch_updates_state(&change_state);
                 }
             }
         });
@@ -939,6 +991,8 @@ impl WasmPrimadb {
             rtc_configuration,
             peers: BTreeMap::new(),
             inflight: BTreeMap::new(),
+            outgoing_watches: BTreeMap::new(),
+            incoming_watches: BTreeMap::new(),
             next_message_seq: 0,
         }));
         let (signaling_onmessage, relay_onopen, relay_onclose, relay_onerror) =
@@ -993,6 +1047,9 @@ impl WasmPrimadb {
             while let Ok(event) = receiver.recv().await {
                 if event.pending_ops > 0 {
                     let _ = flush_mesh_pending_state(&change_state);
+                }
+                if event.data_changed {
+                    let _ = emit_incoming_mesh_watch_updates_state(&change_state);
                 }
             }
         });
@@ -1291,6 +1348,90 @@ impl WasmSubscription {
     }
 }
 
+fn remote_result_kind(result: &RemoteResult) -> &'static str {
+    match result {
+        RemoteResult::Get { .. } => "get",
+        RemoteResult::Map { .. } => "map",
+        RemoteResult::Query { .. } => "query",
+        RemoteResult::Lex { .. } => "lex",
+        RemoteResult::Snapshot { .. } => "snapshot",
+    }
+}
+
+fn remote_result_to_js(result: &RemoteResult) -> std::result::Result<JsValue, JsValue> {
+    match result {
+        RemoteResult::Get { value } => match value {
+            Some(value) => json_to_supported_js(value),
+            None => Ok(JsValue::NULL),
+        },
+        RemoteResult::Map { entries } | RemoteResult::Query { entries } => map_entries_to_js(entries),
+        RemoteResult::Lex { entries } => lex_entries_to_js(entries),
+        RemoteResult::Snapshot { snapshot } => to_js(snapshot),
+    }
+}
+
+fn remote_watch_payload_to_js(
+    payload: Option<std::result::Result<RemoteWatchMessage, String>>,
+) -> std::result::Result<JsValue, JsValue> {
+    let object = js_sys::Object::new();
+    let set = |key: &str, value: JsValue| -> std::result::Result<(), JsValue> {
+        js_sys::Reflect::set(&object, &JsValue::from_str(key), &value).map(|_| ())
+    };
+
+    match payload {
+        Some(Ok(message)) => {
+            set("done", JsValue::FALSE)?;
+            set("initial", JsValue::from_bool(message.initial))?;
+            set("kind", JsValue::from_str(remote_result_kind(&message.result)))?;
+            set("value", remote_result_to_js(&message.result)?)?;
+            set("error", JsValue::NULL)?;
+        }
+        Some(Err(message)) => {
+            set("done", JsValue::FALSE)?;
+            set("initial", JsValue::FALSE)?;
+            set("kind", JsValue::NULL)?;
+            set("value", JsValue::NULL)?;
+            set("error", JsValue::from_str(&message))?;
+        }
+        None => {
+            set("done", JsValue::TRUE)?;
+            set("initial", JsValue::FALSE)?;
+            set("kind", JsValue::NULL)?;
+            set("value", JsValue::NULL)?;
+            set("error", JsValue::NULL)?;
+        }
+    }
+
+    Ok(object.into())
+}
+
+#[wasm_bindgen(js_class = RemoteWatch)]
+impl WasmRemoteWatch {
+    pub async fn next(&self) -> std::result::Result<JsValue, JsValue> {
+        let payload = if let Some(inner) = self.inner.as_ref() {
+            inner.receiver.recv().await.ok()
+        } else {
+            None
+        };
+        remote_watch_payload_to_js(payload)
+    }
+
+    #[wasm_bindgen(js_name = tryNext)]
+    pub fn try_next(&self) -> std::result::Result<JsValue, JsValue> {
+        let payload = self
+            .inner
+            .as_ref()
+            .and_then(|inner| inner.receiver.try_recv().ok());
+        remote_watch_payload_to_js(payload)
+    }
+
+    pub fn cancel(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            (inner.cancel)();
+        }
+    }
+}
+
 #[wasm_bindgen(js_class = IndexedDbPersistence)]
 impl WasmIndexedDbPersistence {
     pub async fn flush(&self) -> std::result::Result<(), JsValue> {
@@ -1415,6 +1556,65 @@ impl WasmWebSocketSync {
         to_js(&peers)
     }
 
+    #[wasm_bindgen(js_name = watchRemoteGet)]
+    pub fn watch_remote_get(
+        &self,
+        peer_id: String,
+        path: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_remote_watch_state(&self.state, peer_id, PullRequestKind::Get { path })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteMap)]
+    pub fn watch_remote_map(
+        &self,
+        peer_id: String,
+        path: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_remote_watch_state(&self.state, peer_id, PullRequestKind::Map { path })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteQuery)]
+    pub fn watch_remote_query(
+        &self,
+        peer_id: String,
+        path: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_remote_watch_state(&self.state, peer_id, PullRequestKind::Query { path, spec })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteLex)]
+    pub fn watch_remote_lex(
+        &self,
+        peer_id: String,
+        path: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_remote_watch_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteSnapshot)]
+    pub fn watch_remote_snapshot(
+        &self,
+        peer_id: String,
+        root: Option<String>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        start_remote_watch_state(&self.state, peer_id, PullRequestKind::Snapshot { root })
+    }
+
     #[wasm_bindgen(js_name = remoteGet)]
     pub async fn remote_get(
         &self,
@@ -1533,6 +1733,8 @@ impl WasmWebSocketSync {
         self.interval_callback.take();
         requeue_inflight_state(&self.state);
         fail_pending_requests_state(&self.state, "websocket connection closed");
+        fail_outgoing_watches_state(&self.state, "websocket connection closed");
+        clear_incoming_watches_state(&self.state);
     }
 }
 
@@ -1593,6 +1795,65 @@ impl WasmWebRtcMesh {
         self.state.borrow().inflight.len()
     }
 
+    #[wasm_bindgen(js_name = watchRemoteGet)]
+    pub fn watch_remote_get(
+        &self,
+        peer_id: String,
+        path: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Get { path })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteMap)]
+    pub fn watch_remote_map(
+        &self,
+        peer_id: String,
+        path: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Map { path })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteQuery)]
+    pub fn watch_remote_query(
+        &self,
+        peer_id: String,
+        path: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Query { path, spec })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteLex)]
+    pub fn watch_remote_lex(
+        &self,
+        peer_id: String,
+        path: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteSnapshot)]
+    pub fn watch_remote_snapshot(
+        &self,
+        peer_id: String,
+        root: Option<String>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Snapshot { root })
+    }
+
     #[wasm_bindgen(js_name = flushPending)]
     pub fn flush_pending(&self) -> std::result::Result<usize, JsValue> {
         flush_mesh_pending_state(&self.state)
@@ -1650,6 +1911,8 @@ impl WasmWebRtcMesh {
         self.relay_onclose.take();
         self.relay_onerror.take();
         self.retry_callback.take();
+        fail_outgoing_mesh_watches_state(&self.state, "mesh closed");
+        clear_incoming_mesh_watches_state(&self.state);
         Ok(())
     }
 }
@@ -1697,10 +1960,10 @@ fn handle_route_payload(
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                store_peer_recommendations_state(
-                    state,
-                    vec![peer_recommendation_from_presence(&peer)],
-                );
+                let recommendation = peer_recommendation_from_presence(&peer);
+                let peer_id = recommendation.peer.peer_id.clone();
+                store_peer_recommendations_state(state, vec![recommendation]);
+                let _ = replay_outgoing_watches_state(state, &peer_id);
             }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
@@ -1756,8 +2019,18 @@ fn handle_route_payload(
             RoutePayload::PullResponse { response } => {
                 accept_pull_response_state(state, response)?;
             }
+            RoutePayload::WatchRequest { request } => {
+                handle_watch_request_state(state, &from, request)?;
+            }
+            RoutePayload::WatchEvent { event } => {
+                accept_watch_event_state(state, event)?;
+            }
             RoutePayload::PeerExchange { peers } => {
-                store_peer_recommendations_state(state, peers);
+                for recommendation in peers {
+                    let peer_id = recommendation.peer.peer_id.clone();
+                    store_peer_recommendations_state(state, vec![recommendation]);
+                    let _ = replay_outgoing_watches_state(state, &peer_id);
+                }
             }
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {
@@ -1999,6 +2272,118 @@ async fn request_remote_result_state(
     result.map_err(|message| JsValue::from_str(&message))
 }
 
+fn start_remote_watch_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    target_peer_id: String,
+    request_kind: PullRequestKind,
+) -> std::result::Result<WasmRemoteWatch, JsValue> {
+    let limit = state.borrow().db.limits().max_active_remote_watches.max(1);
+    let (watch_id, receiver) = {
+        let mut borrowed = state.borrow_mut();
+        if borrowed.socket.ready_state() != web_sys::WebSocket::OPEN {
+            return Err(JsValue::from_str("websocket is not connected"));
+        }
+        if borrowed.outgoing_watches.len() >= limit {
+            return Err(JsValue::from_str(&format!(
+                "too many active remote watches (limit {limit})"
+            )));
+        }
+        borrowed.next_message_seq = borrowed.next_message_seq.saturating_add(1);
+        let watch_id = format!(
+            "{}/watch/{:x}",
+            borrowed.db.replica_id(),
+            borrowed.next_message_seq
+        );
+        let (sender, receiver) = unbounded();
+        borrowed.outgoing_watches.insert(
+            watch_id.clone(),
+            OutgoingWatch {
+                sender,
+                target_peer_id: target_peer_id.clone(),
+                request_kind: request_kind.clone(),
+                pending_sequence: None,
+                last_delivered_sequence: None,
+            },
+        );
+        (watch_id, receiver)
+    };
+
+    if let Err(error) = send_watch_request_state(
+        state,
+        &target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.clone(),
+            request: WatchRequestKind::Subscribe {
+                request: request_kind,
+            },
+        },
+    ) {
+        state.borrow_mut().outgoing_watches.remove(&watch_id);
+        return Err(error);
+    }
+
+    let cancel_state = state.clone();
+    Ok(WasmRemoteWatch {
+        inner: Some(WasmRemoteWatchInner {
+            receiver,
+            cancel: Box::new(move || {
+                cancel_remote_watch_state(&cancel_state, &watch_id);
+            }),
+        }),
+    })
+}
+
+fn cancel_remote_watch_state(state: &Rc<RefCell<WebSocketSyncState>>, watch_id: &str) {
+    let Some(watch) = state.borrow_mut().outgoing_watches.remove(watch_id) else {
+        return;
+    };
+    let _ = send_watch_request_state(
+        state,
+        &watch.target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.to_owned(),
+            request: WatchRequestKind::Cancel,
+        },
+    );
+}
+
+fn send_watch_request_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    target_peer_id: &str,
+    request: WatchRequest,
+) -> std::result::Result<(), JsValue> {
+    let route = state.borrow().router.wrap_watch_request(
+        request,
+        RouteTarget::Peer(target_peer_id.to_owned()),
+        None,
+    );
+    send_route_state(state, &route)
+}
+
+fn replay_outgoing_watches_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    peer_id: &str,
+) -> std::result::Result<usize, JsValue> {
+    let requests = {
+        let borrowed = state.borrow();
+        borrowed
+            .outgoing_watches
+            .iter()
+            .filter(|(_, watch)| watch.target_peer_id == peer_id)
+            .map(|(watch_id, watch)| WatchRequest {
+                watch_id: watch_id.clone(),
+                request: WatchRequestKind::Subscribe {
+                    request: watch.request_kind.clone(),
+                },
+            })
+            .collect::<Vec<_>>()
+    };
+    for request in &requests {
+        send_watch_request_state(state, peer_id, request.clone())?;
+    }
+    Ok(requests.len())
+}
+
 fn fail_pending_requests_state(state: &Rc<RefCell<WebSocketSyncState>>, message: &str) {
     let pending = {
         let mut borrowed = state.borrow_mut();
@@ -2007,6 +2392,20 @@ fn fail_pending_requests_state(state: &Rc<RefCell<WebSocketSyncState>>, message:
     for request in pending.into_values() {
         let _ = request.sender.try_send(Err(message.to_owned()));
     }
+}
+
+fn fail_outgoing_watches_state(state: &Rc<RefCell<WebSocketSyncState>>, message: &str) {
+    let outgoing = {
+        let mut borrowed = state.borrow_mut();
+        std::mem::take(&mut borrowed.outgoing_watches)
+    };
+    for watch in outgoing.into_values() {
+        let _ = watch.sender.try_send(Err(message.to_owned()));
+    }
+}
+
+fn clear_incoming_watches_state(state: &Rc<RefCell<WebSocketSyncState>>) {
+    state.borrow_mut().incoming_watches.clear();
 }
 
 fn accept_pull_response_state(
@@ -2018,53 +2417,13 @@ fn accept_pull_response_state(
         return Ok(());
     };
 
-    match &response.result {
-        PullResponseBody::Get { value } => {
-            request.accumulator = PullAccumulator::Get {
-                value: value.clone(),
-            };
-        }
-        PullResponseBody::Map { entries } => {
-            if let PullAccumulator::Map { entries: current } = &mut request.accumulator {
-                current.extend(entries.clone());
-            }
-        }
-        PullResponseBody::Query { entries } => {
-            if let PullAccumulator::Query { entries: current } = &mut request.accumulator {
-                current.extend(entries.clone());
-            }
-        }
-        PullResponseBody::Lex { entries } => {
-            if let PullAccumulator::Lex { entries: current } = &mut request.accumulator {
-                current.extend(entries.clone());
-            }
-        }
-        PullResponseBody::Snapshot {
-            clock,
-            nodes,
-            pending_ops,
-        } => {
-            if let PullAccumulator::Snapshot {
-                clock: current_clock,
-                nodes: current_nodes,
-                pending_ops: current_ops,
-            } = &mut request.accumulator
-            {
-                if current_clock.is_none() {
-                    *current_clock = clock.clone();
-                }
-                current_nodes.extend(nodes.clone());
-                current_ops.extend(pending_ops.clone());
-            }
-        }
-        PullResponseBody::Error { message } => {
-            let request = borrowed
-                .pending_requests
-                .remove(&response.request_id)
-                .unwrap();
-            let _ = request.sender.try_send(Err(message.clone()));
-            return Ok(());
-        }
+    if let Some(message) = apply_response_body_state(&mut request.accumulator, &response.result) {
+        let request = borrowed
+            .pending_requests
+            .remove(&response.request_id)
+            .unwrap();
+        let _ = request.sender.try_send(Err(message));
+        return Ok(());
     }
 
     if response.is_final() {
@@ -2076,6 +2435,462 @@ fn accept_pull_response_state(
         let _ = request.sender.try_send(Ok(result));
     }
     Ok(())
+}
+
+fn handle_watch_request_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    from: &str,
+    request: WatchRequest,
+) -> std::result::Result<(), JsValue> {
+    match request.request {
+        WatchRequestKind::Subscribe { request: request_kind } => {
+            let limit = state.borrow().db.limits().max_active_remote_watches.max(1);
+            {
+                let mut borrowed = state.borrow_mut();
+                if borrowed.incoming_watches.len() >= limit
+                    && !borrowed.incoming_watches.contains_key(&request.watch_id)
+                {
+                    return Err(JsValue::from_str(&format!(
+                        "too many active remote watches (limit {limit})"
+                    )));
+                }
+                borrowed.incoming_watches.insert(
+                    request.watch_id.clone(),
+                    IncomingWatch {
+                        target_peer_id: from.to_owned(),
+                        request_kind,
+                        next_sequence: 0,
+                        last_hash: None,
+                    },
+                );
+            }
+            let _ = emit_single_incoming_watch_update_state(state, &request.watch_id, true)?;
+        }
+        WatchRequestKind::Cancel => {
+            state.borrow_mut().incoming_watches.remove(&request.watch_id);
+        }
+    }
+    Ok(())
+}
+
+fn accept_watch_event_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    event: WatchEvent,
+) -> std::result::Result<(), JsValue> {
+    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
+        None;
+    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+
+    {
+        let mut borrowed = state.borrow_mut();
+        let Some(watch) = borrowed.outgoing_watches.get_mut(&event.watch_id) else {
+            return Ok(());
+        };
+
+        if watch
+            .last_delivered_sequence
+            .is_some_and(|last| event.sequence <= last)
+        {
+            return Ok(());
+        }
+
+        let pending_sequence = watch
+            .pending_sequence
+            .as_ref()
+            .map(|pending| pending.sequence);
+        if pending_sequence != Some(event.sequence) {
+            if pending_sequence.is_some_and(|pending| event.sequence < pending) {
+                return Ok(());
+            }
+            watch.pending_sequence = Some(PendingWatchSequence {
+                sequence: event.sequence,
+                initial: event.initial,
+                accumulator: PullAccumulator::new(&watch.request_kind),
+            });
+        }
+
+        let Some(pending) = watch.pending_sequence.as_mut() else {
+            return Ok(());
+        };
+        if let Some(message) = apply_response_body_state(&mut pending.accumulator, &event.result) {
+            let sender = watch.sender.clone();
+            borrowed.outgoing_watches.remove(&event.watch_id);
+            failure = Some((sender, message));
+        } else if event.done || event.chunk.index.saturating_add(1) >= event.chunk.total {
+            let sender = watch.sender.clone();
+            let pending = watch.pending_sequence.take().unwrap();
+            let result = pending.accumulator.into_result().map_err(to_js_error)?;
+            watch.last_delivered_sequence = Some(event.sequence);
+            deliver = Some((
+                sender,
+                RemoteWatchMessage {
+                    initial: pending.initial,
+                    result,
+                },
+            ));
+        }
+    }
+
+    if let Some((sender, message)) = deliver {
+        let _ = sender.try_send(Ok(message));
+    }
+    if let Some((sender, message)) = failure {
+        let _ = sender.try_send(Err(message));
+    }
+    Ok(())
+}
+
+fn emit_incoming_watch_updates_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+) -> std::result::Result<usize, JsValue> {
+    let watch_ids = {
+        let borrowed = state.borrow();
+        borrowed.incoming_watches.keys().cloned().collect::<Vec<_>>()
+    };
+    let mut emitted = 0;
+    for watch_id in watch_ids {
+        if emit_single_incoming_watch_update_state(state, &watch_id, false)? {
+            emitted += 1;
+        }
+    }
+    Ok(emitted)
+}
+
+fn emit_single_incoming_watch_update_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    watch_id: &str,
+    initial: bool,
+) -> std::result::Result<bool, JsValue> {
+    let Some(watch) = state.borrow().incoming_watches.get(watch_id).cloned() else {
+        return Ok(false);
+    };
+    let result = state
+        .borrow()
+        .db
+        .execute_pull_request_kind(&watch.request_kind)
+        .map_err(to_js_error)?;
+    let content_hash = crate::stable_content_hash(&result);
+    if !initial && content_hash == watch.last_hash {
+        return Ok(false);
+    }
+
+    let items = state
+        .borrow()
+        .db
+        .chunk_watch_result(watch_id, watch.next_sequence, initial, result)
+        .into_iter()
+        .map(|event| RouteBatchItem::WatchEvent { event })
+        .collect::<Vec<_>>();
+    let (router, batch_size) = {
+        let borrowed = state.borrow();
+        (
+            borrowed.router.clone(),
+            borrowed.db.limits().max_batch_items_per_route.max(1),
+        )
+    };
+    for route in pack_batch_routes(
+        &router,
+        RouteTarget::Peer(watch.target_peer_id.clone()),
+        None,
+        items,
+        batch_size,
+    ) {
+        send_route_state(state, &route)?;
+    }
+
+    if let Some(entry) = state.borrow_mut().incoming_watches.get_mut(watch_id) {
+        entry.last_hash = content_hash;
+        entry.next_sequence = entry.next_sequence.saturating_add(1);
+    }
+    Ok(true)
+}
+
+fn start_mesh_remote_watch_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    target_peer_id: String,
+    request_kind: PullRequestKind,
+) -> std::result::Result<WasmRemoteWatch, JsValue> {
+    let limit = state.borrow().db.limits().max_active_remote_watches.max(1);
+    let (watch_id, receiver) = {
+        let mut borrowed = state.borrow_mut();
+        if borrowed.outgoing_watches.len() >= limit {
+            return Err(JsValue::from_str(&format!(
+                "too many active remote watches (limit {limit})"
+            )));
+        }
+        borrowed.next_message_seq = borrowed.next_message_seq.saturating_add(1);
+        let watch_id = format!(
+            "{}/watch/{:x}",
+            borrowed.db.replica_id(),
+            borrowed.next_message_seq
+        );
+        let (sender, receiver) = unbounded();
+        borrowed.outgoing_watches.insert(
+            watch_id.clone(),
+            OutgoingWatch {
+                sender,
+                target_peer_id: target_peer_id.clone(),
+                request_kind: request_kind.clone(),
+                pending_sequence: None,
+                last_delivered_sequence: None,
+            },
+        );
+        (watch_id, receiver)
+    };
+
+    let _ = send_mesh_watch_request_state(
+        state,
+        &target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.clone(),
+            request: WatchRequestKind::Subscribe {
+                request: request_kind,
+            },
+        },
+    );
+
+    let cancel_state = state.clone();
+    Ok(WasmRemoteWatch {
+        inner: Some(WasmRemoteWatchInner {
+            receiver,
+            cancel: Box::new(move || {
+                cancel_mesh_remote_watch_state(&cancel_state, &watch_id);
+            }),
+        }),
+    })
+}
+
+fn cancel_mesh_remote_watch_state(state: &Rc<RefCell<WebRtcMeshState>>, watch_id: &str) {
+    let Some(watch) = state.borrow_mut().outgoing_watches.remove(watch_id) else {
+        return;
+    };
+    let _ = send_mesh_watch_request_state(
+        state,
+        &watch.target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.to_owned(),
+            request: WatchRequestKind::Cancel,
+        },
+    );
+}
+
+fn send_mesh_watch_request_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    target_peer_id: &str,
+    request: WatchRequest,
+) -> std::result::Result<(), JsValue> {
+    let route = state.borrow().router.wrap_watch_request(
+        request,
+        RouteTarget::Peer(target_peer_id.to_owned()),
+        None,
+    );
+    send_mesh_route_to_peer(state, target_peer_id, &route)
+}
+
+fn replay_outgoing_mesh_watches_for_peer(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    peer_id: &str,
+) -> std::result::Result<usize, JsValue> {
+    let requests = {
+        let borrowed = state.borrow();
+        borrowed
+            .outgoing_watches
+            .iter()
+            .filter(|(_, watch)| watch.target_peer_id == peer_id)
+            .map(|(watch_id, watch)| WatchRequest {
+                watch_id: watch_id.clone(),
+                request: WatchRequestKind::Subscribe {
+                    request: watch.request_kind.clone(),
+                },
+            })
+            .collect::<Vec<_>>()
+    };
+    for request in &requests {
+        send_mesh_watch_request_state(state, peer_id, request.clone())?;
+    }
+    Ok(requests.len())
+}
+
+fn fail_outgoing_mesh_watches_state(state: &Rc<RefCell<WebRtcMeshState>>, message: &str) {
+    let outgoing = {
+        let mut borrowed = state.borrow_mut();
+        std::mem::take(&mut borrowed.outgoing_watches)
+    };
+    for watch in outgoing.into_values() {
+        let _ = watch.sender.try_send(Err(message.to_owned()));
+    }
+}
+
+fn clear_incoming_mesh_watches_state(state: &Rc<RefCell<WebRtcMeshState>>) {
+    state.borrow_mut().incoming_watches.clear();
+}
+
+fn handle_mesh_watch_request_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+    request: WatchRequest,
+) -> std::result::Result<(), JsValue> {
+    match request.request {
+        WatchRequestKind::Subscribe { request: request_kind } => {
+            let limit = state.borrow().db.limits().max_active_remote_watches.max(1);
+            {
+                let mut borrowed = state.borrow_mut();
+                if borrowed.incoming_watches.len() >= limit
+                    && !borrowed.incoming_watches.contains_key(&request.watch_id)
+                {
+                    return Err(JsValue::from_str(&format!(
+                        "too many active remote watches (limit {limit})"
+                    )));
+                }
+                borrowed.incoming_watches.insert(
+                    request.watch_id.clone(),
+                    IncomingWatch {
+                        target_peer_id: remote_peer.to_owned(),
+                        request_kind,
+                        next_sequence: 0,
+                        last_hash: None,
+                    },
+                );
+            }
+            let _ = emit_single_incoming_mesh_watch_update_state(state, &request.watch_id, true)?;
+        }
+        WatchRequestKind::Cancel => {
+            state.borrow_mut().incoming_watches.remove(&request.watch_id);
+        }
+    }
+    Ok(())
+}
+
+fn accept_mesh_watch_event_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    event: WatchEvent,
+) -> std::result::Result<(), JsValue> {
+    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
+        None;
+    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+
+    {
+        let mut borrowed = state.borrow_mut();
+        let Some(watch) = borrowed.outgoing_watches.get_mut(&event.watch_id) else {
+            return Ok(());
+        };
+
+        if watch
+            .last_delivered_sequence
+            .is_some_and(|last| event.sequence <= last)
+        {
+            return Ok(());
+        }
+
+        let pending_sequence = watch
+            .pending_sequence
+            .as_ref()
+            .map(|pending| pending.sequence);
+        if pending_sequence != Some(event.sequence) {
+            if pending_sequence.is_some_and(|pending| event.sequence < pending) {
+                return Ok(());
+            }
+            watch.pending_sequence = Some(PendingWatchSequence {
+                sequence: event.sequence,
+                initial: event.initial,
+                accumulator: PullAccumulator::new(&watch.request_kind),
+            });
+        }
+
+        let Some(pending) = watch.pending_sequence.as_mut() else {
+            return Ok(());
+        };
+        if let Some(message) = apply_response_body_state(&mut pending.accumulator, &event.result) {
+            let sender = watch.sender.clone();
+            borrowed.outgoing_watches.remove(&event.watch_id);
+            failure = Some((sender, message));
+        } else if event.done || event.chunk.index.saturating_add(1) >= event.chunk.total {
+            let sender = watch.sender.clone();
+            let pending = watch.pending_sequence.take().unwrap();
+            let result = pending.accumulator.into_result().map_err(to_js_error)?;
+            watch.last_delivered_sequence = Some(event.sequence);
+            deliver = Some((
+                sender,
+                RemoteWatchMessage {
+                    initial: pending.initial,
+                    result,
+                },
+            ));
+        }
+    }
+
+    if let Some((sender, message)) = deliver {
+        let _ = sender.try_send(Ok(message));
+    }
+    if let Some((sender, message)) = failure {
+        let _ = sender.try_send(Err(message));
+    }
+    Ok(())
+}
+
+fn emit_incoming_mesh_watch_updates_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+) -> std::result::Result<usize, JsValue> {
+    let watch_ids = {
+        let borrowed = state.borrow();
+        borrowed.incoming_watches.keys().cloned().collect::<Vec<_>>()
+    };
+    let mut emitted = 0;
+    for watch_id in watch_ids {
+        if emit_single_incoming_mesh_watch_update_state(state, &watch_id, false)? {
+            emitted += 1;
+        }
+    }
+    Ok(emitted)
+}
+
+fn emit_single_incoming_mesh_watch_update_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    watch_id: &str,
+    initial: bool,
+) -> std::result::Result<bool, JsValue> {
+    let Some(watch) = state.borrow().incoming_watches.get(watch_id).cloned() else {
+        return Ok(false);
+    };
+    let result = state
+        .borrow()
+        .db
+        .execute_pull_request_kind(&watch.request_kind)
+        .map_err(to_js_error)?;
+    let content_hash = crate::stable_content_hash(&result);
+    if !initial && content_hash == watch.last_hash {
+        return Ok(false);
+    }
+
+    let items = state
+        .borrow()
+        .db
+        .chunk_watch_result(watch_id, watch.next_sequence, initial, result)
+        .into_iter()
+        .map(|event| RouteBatchItem::WatchEvent { event })
+        .collect::<Vec<_>>();
+    let (router, batch_size) = {
+        let borrowed = state.borrow();
+        (
+            borrowed.router.clone(),
+            borrowed.db.limits().max_batch_items_per_route.max(1),
+        )
+    };
+    for route in pack_batch_routes(
+        &router,
+        RouteTarget::Peer(watch.target_peer_id.clone()),
+        None,
+        items,
+        batch_size,
+    ) {
+        send_mesh_route_to_peer(state, &watch.target_peer_id, &route)?;
+    }
+
+    if let Some(entry) = state.borrow_mut().incoming_watches.get_mut(watch_id) {
+        entry.last_hash = content_hash;
+        entry.next_sequence = entry.next_sequence.saturating_add(1);
+    }
+    Ok(true)
 }
 
 fn store_peer_recommendations_state(
@@ -2139,6 +2954,58 @@ fn pack_batch_routes(
             }
         })
         .collect()
+}
+
+fn apply_response_body_state(
+    accumulator: &mut PullAccumulator,
+    result: &PullResponseBody,
+) -> Option<String> {
+    match result {
+        PullResponseBody::Get { value } => {
+            *accumulator = PullAccumulator::Get {
+                value: value.clone(),
+            };
+            None
+        }
+        PullResponseBody::Map { entries } => {
+            if let PullAccumulator::Map { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        PullResponseBody::Query { entries } => {
+            if let PullAccumulator::Query { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        PullResponseBody::Lex { entries } => {
+            if let PullAccumulator::Lex { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        PullResponseBody::Snapshot {
+            clock,
+            nodes,
+            pending_ops,
+        } => {
+            if let PullAccumulator::Snapshot {
+                clock: current_clock,
+                nodes: current_nodes,
+                pending_ops: current_ops,
+            } = accumulator
+            {
+                if current_clock.is_none() {
+                    *current_clock = clock.clone();
+                }
+                current_nodes.extend(nodes.clone());
+                current_ops.extend(pending_ops.clone());
+            }
+            None
+        }
+        PullResponseBody::Error { message } => Some(message.clone()),
+    }
 }
 
 impl PullAccumulator {
@@ -2314,6 +3181,11 @@ fn send_mesh_presence_state(
                 "signal".to_owned(),
                 "webrtc".to_owned(),
                 "peer_exchange".to_owned(),
+                "watch_get".to_owned(),
+                "watch_map".to_owned(),
+                "watch_query".to_owned(),
+                "watch_lex".to_owned(),
+                "watch_snapshot".to_owned(),
             ],
             vec![format!("mesh:{}", borrowed.room)],
         );
@@ -2704,8 +3576,10 @@ fn attach_mesh_channel_handlers(
     channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
     let open_state = state.clone();
+    let remote_for_open = remote_peer.to_owned();
     let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
         let _ = flush_mesh_pending_state(&open_state);
+        let _ = replay_outgoing_mesh_watches_for_peer(&open_state, &remote_for_open);
     }) as Box<dyn FnMut(_)>);
     channel.set_onopen(Some(onopen.as_ref().unchecked_ref()));
 
@@ -2753,6 +3627,9 @@ fn remove_mesh_peer_state(state: &Rc<RefCell<WebRtcMeshState>>, remote_peer: &st
                 to_requeue.push(outbound);
             }
         }
+        borrowed
+            .incoming_watches
+            .retain(|_, watch| watch.target_peer_id != remote_peer);
     }
 
     let db = state.borrow().db.clone();
@@ -2848,6 +3725,12 @@ fn handle_mesh_route_message(
                 }
             }
             RoutePayload::PullResponse { .. } => {}
+            RoutePayload::WatchRequest { request } => {
+                handle_mesh_watch_request_state(state, remote_peer, request)?;
+            }
+            RoutePayload::WatchEvent { event } => {
+                accept_mesh_watch_event_state(state, event)?;
+            }
             RoutePayload::PeerExchange { .. } => {}
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {

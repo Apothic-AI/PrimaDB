@@ -84,6 +84,7 @@ pub use storage::{RadiskFileAdapter, SnapshotFileAdapter};
 pub use engine::SegmentFileStore;
 pub use sync::{
     PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
-    RemoteResult, SyncEnvelope, SyncFrame, stable_content_hash,
+    RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, SyncEnvelope, SyncFrame,
+    WatchEvent, WatchRequest, WatchRequestKind, stable_content_hash,
 };
 pub use value::{FieldState, FieldValue, NodeId, NodeState, SetState};

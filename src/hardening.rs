@@ -11,6 +11,7 @@ pub struct PrimadbLimits {
     pub max_snapshot_nodes_per_chunk: usize,
     pub max_snapshot_ops_per_chunk: usize,
     pub max_peer_recommendations: usize,
+    pub max_active_remote_watches: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -35,6 +36,7 @@ impl Default for PrimadbLimits {
             max_snapshot_nodes_per_chunk: 64,
             max_snapshot_ops_per_chunk: 256,
             max_peer_recommendations: 64,
+            max_active_remote_watches: 128,
         }
     }
 }

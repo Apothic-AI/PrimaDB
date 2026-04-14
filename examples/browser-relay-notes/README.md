@@ -9,6 +9,7 @@ It demonstrates:
 - Primadb's shared `connectRelay(...)` client facade with `WebSocketSync` ack/retry/requeue behavior.
 - Peer recommendations delivered by the relay.
 - Remote `get`, `query`, `lex`, and `snapshot` requests over the routed wire protocol.
+- Remote live watch flows through `watchRemoteGet(...)` and `watchRemoteQuery(...)`.
 - Chunked query/snapshot reply assembly in the browser.
 - A shared note list replicated between multiple browsers.
 - Query filters and reactive UI rendering.
@@ -50,3 +51,10 @@ bash examples/browser-relay-notes/test-browser-native-smoke.sh
 ```
 
 That script proves native -> browser live relay sync against the real relay server.
+
+Run the browser relay watch smoke test:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+bash examples/browser-relay-notes/test-watch-smoke.sh
+```

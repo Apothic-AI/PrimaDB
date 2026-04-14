@@ -23,6 +23,7 @@
 - Automatic IndexedDB persistence hook in the WASM bindings.
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
 - Routed transport envelopes with presence, signaling, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
+- Remote live watches for `get` / `map` / `query` / `lex` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
 - Browser WebRTC mesh sync with both local `BroadcastChannel` signaling and relay-backed signaling for cross-browser peers.
 - Optional native WebSocket sync adapter behind the `native-websocket` feature.
 - Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.

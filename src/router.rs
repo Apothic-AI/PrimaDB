@@ -1,6 +1,6 @@
 use crate::DatabaseSnapshot;
 use crate::clock::now_millis;
-use crate::sync::{PullRequest, PullResponse, stable_content_hash};
+use crate::sync::{PullRequest, PullResponse, WatchEvent, WatchRequest, stable_content_hash};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -65,6 +65,12 @@ pub enum RouteBatchItem {
     PullResponse {
         response: PullResponse,
     },
+    WatchRequest {
+        request: WatchRequest,
+    },
+    WatchEvent {
+        event: WatchEvent,
+    },
     PeerExchange {
         peers: Vec<PeerRecommendation>,
     },
@@ -96,6 +102,12 @@ pub enum RoutePayload {
     },
     PullResponse {
         response: PullResponse,
+    },
+    WatchRequest {
+        request: WatchRequest,
+    },
+    WatchEvent {
+        event: WatchEvent,
     },
     PeerExchange {
         peers: Vec<PeerRecommendation>,
@@ -263,6 +275,30 @@ impl Router {
             target,
             reply_to.into(),
         )
+    }
+
+    pub fn wrap_watch_request(
+        &self,
+        request: WatchRequest,
+        target: RouteTarget,
+        reply_to: impl Into<Option<String>>,
+    ) -> RouteEnvelope {
+        let mut route =
+            self.wrap_payload(RoutePayload::WatchRequest { request }, target, reply_to.into());
+        route.content_hash = None;
+        route
+    }
+
+    pub fn wrap_watch_event(
+        &self,
+        event: WatchEvent,
+        target: RouteTarget,
+        reply_to: impl Into<Option<String>>,
+    ) -> RouteEnvelope {
+        let mut route =
+            self.wrap_payload(RoutePayload::WatchEvent { event }, target, reply_to.into());
+        route.content_hash = None;
+        route
     }
 
     pub fn wrap_batch(
@@ -448,6 +484,8 @@ impl RoutePayload {
             }
             RouteBatchItem::PullRequest { request } => Self::PullRequest { request },
             RouteBatchItem::PullResponse { response } => Self::PullResponse { response },
+            RouteBatchItem::WatchRequest { request } => Self::WatchRequest { request },
+            RouteBatchItem::WatchEvent { event } => Self::WatchEvent { event },
             RouteBatchItem::PeerExchange { peers } => Self::PeerExchange { peers },
         }
     }

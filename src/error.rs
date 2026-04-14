@@ -30,6 +30,8 @@ pub enum PrimadbError {
     BlobStoreUnavailable,
     #[error("blob `{blob_id}` was not found")]
     BlobNotFound { blob_id: String },
+    #[error("too many active remote watches (limit {limit})")]
+    TooManyRemoteWatches { limit: usize },
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("i/o error: {0}")]

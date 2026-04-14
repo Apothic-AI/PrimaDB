@@ -13,6 +13,7 @@ Current surface:
 - subscriptions
 - native relay sync through `connectRelay(...)`
 - native WebRTC mesh through `connectMesh(...)`
+- live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
 
 ## Package Examples
 

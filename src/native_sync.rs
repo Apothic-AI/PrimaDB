@@ -1,11 +1,12 @@
 use crate::{
     ChangeSubscription, HybridClock, LexEntry, MapEntry, Operation, PeerRecommendation, Primadb,
-    PrimadbError, RelayClientConfig, RemotePath, RemoteResult, Result, RouteBatchItem,
-    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
+    PrimadbError, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage,
+    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    Router, RouterConfig, SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
 };
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
-use async_channel::{Sender, bounded};
+use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -28,6 +29,30 @@ struct OutboundSync {
 struct PendingPullRequest {
     sender: Sender<std::result::Result<RemoteResult, String>>,
     accumulator: PullAccumulator,
+}
+
+#[derive(Debug)]
+struct OutgoingWatch {
+    sender: Sender<std::result::Result<RemoteWatchMessage, String>>,
+    target_peer_id: String,
+    request_kind: crate::PullRequestKind,
+    pending_sequence: Option<PendingWatchSequence>,
+    last_delivered_sequence: Option<u64>,
+}
+
+#[derive(Debug)]
+struct PendingWatchSequence {
+    sequence: u64,
+    initial: bool,
+    accumulator: PullAccumulator,
+}
+
+#[derive(Debug, Clone)]
+struct IncomingWatch {
+    target_peer_id: String,
+    request_kind: crate::PullRequestKind,
+    next_sequence: u64,
+    last_hash: Option<String>,
 }
 
 #[derive(Debug)]
@@ -59,6 +84,8 @@ struct NativeWebSocketSyncState {
     next_message_seq: AtomicU64,
     inflight: Mutex<BTreeMap<String, OutboundSync>>,
     pending_requests: Mutex<BTreeMap<String, PendingPullRequest>>,
+    outgoing_watches: Mutex<BTreeMap<String, OutgoingWatch>>,
+    incoming_watches: Mutex<BTreeMap<String, IncomingWatch>>,
     recommendations: Mutex<BTreeMap<String, PeerRecommendation>>,
     outbound: UnboundedSender<Message>,
 }
@@ -104,6 +131,8 @@ impl NativeWebSocketSync {
             next_message_seq: AtomicU64::new(0),
             inflight: Mutex::new(BTreeMap::new()),
             pending_requests: Mutex::new(BTreeMap::new()),
+            outgoing_watches: Mutex::new(BTreeMap::new()),
+            incoming_watches: Mutex::new(BTreeMap::new()),
             recommendations: Mutex::new(BTreeMap::new()),
             outbound,
         });
@@ -118,6 +147,8 @@ impl NativeWebSocketSync {
                         &writer_state,
                         "websocket writer closed while requests were in flight",
                     );
+                    fail_outgoing_watches(&writer_state, "websocket writer closed");
+                    clear_incoming_watches(&writer_state);
                     break;
                 }
             }
@@ -142,6 +173,8 @@ impl NativeWebSocketSync {
                 &reader_state,
                 "websocket reader closed while requests were in flight",
             );
+            fail_outgoing_watches(&reader_state, "websocket reader closed");
+            clear_incoming_watches(&reader_state);
         });
 
         let change_subscription = db.subscribe_changes();
@@ -151,6 +184,9 @@ impl NativeWebSocketSync {
             while let Ok(event) = change_receiver.recv().await {
                 if event.pending_ops > 0 {
                     let _ = flush_pending_state(&change_state).await;
+                }
+                if event.data_changed {
+                    let _ = emit_incoming_watch_updates(&change_state).await;
                 }
             }
         });
@@ -180,6 +216,11 @@ impl NativeWebSocketSync {
                 "pull_get".to_owned(),
                 "pull_query".to_owned(),
                 "pull_lex".to_owned(),
+                "watch_get".to_owned(),
+                "watch_map".to_owned(),
+                "watch_query".to_owned(),
+                "watch_lex".to_owned(),
+                "watch_snapshot".to_owned(),
                 "peer_exchange".to_owned(),
             ],
             vec!["primadb-sync".to_owned()],
@@ -223,6 +264,68 @@ impl NativeWebSocketSync {
             .values()
             .cloned()
             .collect()
+    }
+
+    pub fn watch_get(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Get { path },
+        )
+    }
+
+    pub fn watch_map(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Map { path },
+        )
+    }
+
+    pub fn watch_query(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+        spec: crate::QuerySpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Query { path, spec },
+        )
+    }
+
+    pub fn watch_lex(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+        spec: crate::LexSpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Lex { path, spec },
+        )
+    }
+
+    pub fn watch_snapshot(
+        &self,
+        peer_id: impl Into<String>,
+        root: Option<String>,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Snapshot { root },
+        )
     }
 
     pub async fn remote_get(
@@ -333,6 +436,8 @@ impl NativeWebSocketSync {
         }
         requeue_inflight_state(&self.state);
         fail_pending_requests(&self.state, "connection closed");
+        fail_outgoing_watches(&self.state, "connection closed");
+        clear_incoming_watches(&self.state);
     }
 }
 
@@ -386,6 +491,113 @@ async fn request_remote_result(
         .map_err(PrimadbError::Message)
 }
 
+fn start_remote_watch(
+    state: &Arc<NativeWebSocketSyncState>,
+    target_peer_id: String,
+    request_kind: crate::PullRequestKind,
+) -> Result<RemoteWatchSubscription> {
+    if !state.connected.load(Ordering::SeqCst) {
+        return Err(PrimadbError::Message(
+            "native websocket is not connected".to_owned(),
+        ));
+    }
+
+    let limit = state.db.limits().max_active_remote_watches.max(1);
+    let watch_id = format!(
+        "{}/watch/{:x}",
+        state.db.replica_id(),
+        state.next_message_seq.fetch_add(1, Ordering::SeqCst) + 1
+    );
+    let (sender, receiver) = unbounded();
+
+    {
+        let mut outgoing = state.outgoing_watches.lock().unwrap();
+        if outgoing.len() >= limit {
+            return Err(PrimadbError::TooManyRemoteWatches { limit });
+        }
+        outgoing.insert(
+            watch_id.clone(),
+            OutgoingWatch {
+                sender,
+                target_peer_id: target_peer_id.clone(),
+                request_kind: request_kind.clone(),
+                pending_sequence: None,
+                last_delivered_sequence: None,
+            },
+        );
+    }
+
+    if let Err(error) = send_watch_request(
+        state,
+        &target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.clone(),
+            request: WatchRequestKind::Subscribe {
+                request: request_kind,
+            },
+        },
+    ) {
+        state.outgoing_watches.lock().unwrap().remove(&watch_id);
+        return Err(error);
+    }
+
+    let cancel_state = state.clone();
+    Ok(RemoteWatchSubscription::new(receiver, move || {
+        cancel_remote_watch(&cancel_state, &watch_id);
+    }))
+}
+
+fn cancel_remote_watch(state: &Arc<NativeWebSocketSyncState>, watch_id: &str) {
+    let Some(watch) = state.outgoing_watches.lock().unwrap().remove(watch_id) else {
+        return;
+    };
+    let _ = send_watch_request(
+        state,
+        &watch.target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.to_owned(),
+            request: WatchRequestKind::Cancel,
+        },
+    );
+}
+
+fn send_watch_request(
+    state: &Arc<NativeWebSocketSyncState>,
+    target_peer_id: &str,
+    request: WatchRequest,
+) -> Result<()> {
+    let route = state.router.wrap_watch_request(
+        request,
+        RouteTarget::Peer(target_peer_id.to_owned()),
+        None,
+    );
+    send_route(state, &route)
+}
+
+fn replay_outgoing_watches_for_peer(
+    state: &Arc<NativeWebSocketSyncState>,
+    peer_id: &str,
+) -> Result<usize> {
+    let requests = {
+        let outgoing = state.outgoing_watches.lock().unwrap();
+        outgoing
+            .iter()
+            .filter(|(_, watch)| watch.target_peer_id == peer_id)
+            .map(|(watch_id, watch)| WatchRequest {
+                watch_id: watch_id.clone(),
+                request: WatchRequestKind::Subscribe {
+                    request: watch.request_kind.clone(),
+                },
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for request in &requests {
+        send_watch_request(state, peer_id, request.clone())?;
+    }
+    Ok(requests.len())
+}
+
 async fn handle_incoming_text(state: &Arc<NativeWebSocketSyncState>, payload: &str) -> Result<()> {
     if let Ok(route) = serde_json::from_str::<RouteEnvelope>(payload) {
         return handle_route_envelope(state, route).await;
@@ -417,7 +629,10 @@ async fn handle_route_payload(
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                store_peer_recommendations(state, vec![peer_recommendation_from_presence(&peer)]);
+                let recommendation = peer_recommendation_from_presence(&peer);
+                let peer_id = recommendation.peer.peer_id.clone();
+                store_peer_recommendations(state, vec![recommendation]);
+                let _ = replay_outgoing_watches_for_peer(state, &peer_id);
             }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
@@ -456,8 +671,18 @@ async fn handle_route_payload(
             RoutePayload::PullResponse { response } => {
                 accept_pull_response(state, response)?;
             }
+            RoutePayload::WatchRequest { request } => {
+                handle_watch_request(state, &from, request)?;
+            }
+            RoutePayload::WatchEvent { event } => {
+                accept_watch_event(state, event)?;
+            }
             RoutePayload::PeerExchange { peers } => {
-                store_peer_recommendations(state, peers);
+                for recommendation in peers {
+                    let peer_id = recommendation.peer.peer_id.clone();
+                    store_peer_recommendations(state, vec![recommendation]);
+                    let _ = replay_outgoing_watches_for_peer(state, &peer_id);
+                }
             }
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {
@@ -640,50 +865,10 @@ fn accept_pull_response(
         return Ok(());
     };
 
-    match &response.result {
-        crate::PullResponseBody::Get { value } => {
-            request.accumulator = PullAccumulator::Get {
-                value: value.clone(),
-            };
-        }
-        crate::PullResponseBody::Map { entries } => {
-            if let PullAccumulator::Map { entries: current } = &mut request.accumulator {
-                current.extend(entries.clone());
-            }
-        }
-        crate::PullResponseBody::Query { entries } => {
-            if let PullAccumulator::Query { entries: current } = &mut request.accumulator {
-                current.extend(entries.clone());
-            }
-        }
-        crate::PullResponseBody::Lex { entries } => {
-            if let PullAccumulator::Lex { entries: current } = &mut request.accumulator {
-                current.extend(entries.clone());
-            }
-        }
-        crate::PullResponseBody::Snapshot {
-            clock,
-            nodes,
-            pending_ops,
-        } => {
-            if let PullAccumulator::Snapshot {
-                clock: current_clock,
-                nodes: current_nodes,
-                pending_ops: current_ops,
-            } = &mut request.accumulator
-            {
-                if current_clock.is_none() {
-                    *current_clock = clock.clone();
-                }
-                current_nodes.extend(nodes.clone());
-                current_ops.extend(pending_ops.clone());
-            }
-        }
-        crate::PullResponseBody::Error { message } => {
-            let request = pending.remove(&response.request_id).unwrap();
-            let _ = request.sender.try_send(Err(message.clone()));
-            return Ok(());
-        }
+    if let Some(message) = apply_response_body(&mut request.accumulator, &response.result) {
+        let request = pending.remove(&response.request_id).unwrap();
+        let _ = request.sender.try_send(Err(message));
+        return Ok(());
     }
 
     if response.is_final() {
@@ -692,6 +877,168 @@ fn accept_pull_response(
         let _ = request.sender.try_send(Ok(result));
     }
     Ok(())
+}
+
+fn handle_watch_request(
+    state: &Arc<NativeWebSocketSyncState>,
+    from: &str,
+    request: WatchRequest,
+) -> Result<()> {
+    match request.request {
+        WatchRequestKind::Subscribe { request: request_kind } => {
+            let limit = state.db.limits().max_active_remote_watches.max(1);
+            {
+                let mut watches = state.incoming_watches.lock().unwrap();
+                if watches.len() >= limit && !watches.contains_key(&request.watch_id) {
+                    return Err(PrimadbError::TooManyRemoteWatches { limit });
+                }
+                watches.insert(
+                    request.watch_id.clone(),
+                    IncomingWatch {
+                        target_peer_id: from.to_owned(),
+                        request_kind,
+                        next_sequence: 0,
+                        last_hash: None,
+                    },
+                );
+            }
+            let _ = emit_single_incoming_watch_update(state, &request.watch_id, true)?;
+        }
+        WatchRequestKind::Cancel => {
+            state.incoming_watches.lock().unwrap().remove(&request.watch_id);
+        }
+    }
+    Ok(())
+}
+
+fn accept_watch_event(state: &Arc<NativeWebSocketSyncState>, event: WatchEvent) -> Result<()> {
+    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
+        None;
+    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+
+    {
+        let mut watches = state.outgoing_watches.lock().unwrap();
+        let Some(watch) = watches.get_mut(&event.watch_id) else {
+            return Ok(());
+        };
+
+        if watch
+            .last_delivered_sequence
+            .is_some_and(|last| event.sequence <= last)
+        {
+            return Ok(());
+        }
+
+        let pending_sequence = watch
+            .pending_sequence
+            .as_ref()
+            .map(|pending| pending.sequence);
+        if pending_sequence != Some(event.sequence) {
+            if pending_sequence.is_some_and(|pending| event.sequence < pending) {
+                return Ok(());
+            }
+            watch.pending_sequence = Some(PendingWatchSequence {
+                sequence: event.sequence,
+                initial: event.initial,
+                accumulator: PullAccumulator::new(&watch.request_kind),
+            });
+        }
+
+        let Some(pending) = watch.pending_sequence.as_mut() else {
+            return Ok(());
+        };
+        if let Some(message) = apply_response_body(&mut pending.accumulator, &event.result) {
+            let sender = watch.sender.clone();
+            watches.remove(&event.watch_id);
+            failure = Some((sender, message));
+        } else if event.done || event.chunk.index.saturating_add(1) >= event.chunk.total {
+            let sender = watch.sender.clone();
+            let pending = watch.pending_sequence.take().unwrap();
+            let result = pending.accumulator.into_result()?;
+            watch.last_delivered_sequence = Some(event.sequence);
+            deliver = Some((
+                sender,
+                RemoteWatchMessage {
+                    initial: pending.initial,
+                    result,
+                },
+            ));
+        }
+    }
+
+    if let Some((sender, message)) = deliver {
+        let _ = sender.try_send(Ok(message));
+    }
+    if let Some((sender, message)) = failure {
+        let _ = sender.try_send(Err(message));
+    }
+    Ok(())
+}
+
+async fn emit_incoming_watch_updates(state: &Arc<NativeWebSocketSyncState>) -> Result<usize> {
+    let watch_ids = {
+        let watches = state.incoming_watches.lock().unwrap();
+        watches.keys().cloned().collect::<Vec<_>>()
+    };
+    let mut emitted = 0;
+    for watch_id in watch_ids {
+        if emit_single_incoming_watch_update(state, &watch_id, false)? {
+            emitted += 1;
+        }
+    }
+    Ok(emitted)
+}
+
+fn emit_single_incoming_watch_update(
+    state: &Arc<NativeWebSocketSyncState>,
+    watch_id: &str,
+    initial: bool,
+) -> Result<bool> {
+    let Some(watch) = state.incoming_watches.lock().unwrap().get(watch_id).cloned() else {
+        return Ok(false);
+    };
+
+    let result = state.db.execute_pull_request_kind(&watch.request_kind)?;
+    let content_hash = crate::stable_content_hash(&result);
+    if !initial && content_hash == watch.last_hash {
+        return Ok(false);
+    }
+
+    let items = state
+        .db
+        .chunk_watch_result(watch_id, watch.next_sequence, initial, result)
+        .into_iter()
+        .map(|event| RouteBatchItem::WatchEvent { event })
+        .collect::<Vec<_>>();
+    for route in pack_batch_routes(
+        &state.router,
+        RouteTarget::Peer(watch.target_peer_id.clone()),
+        None,
+        items,
+        state.db.limits().max_batch_items_per_route.max(1),
+    ) {
+        send_route(state, &route)?;
+    }
+
+    if let Some(entry) = state.incoming_watches.lock().unwrap().get_mut(watch_id) {
+        entry.last_hash = content_hash;
+        entry.next_sequence = entry.next_sequence.saturating_add(1);
+    }
+    Ok(true)
+}
+
+fn fail_outgoing_watches(state: &Arc<NativeWebSocketSyncState>, message: &str) {
+    let watches = {
+        let mut watches = state.outgoing_watches.lock().unwrap();
+        std::mem::take(&mut *watches)
+    };
+    for watch in watches.into_values() {
+        let _ = watch.sender.try_send(Err(message.to_owned()));
+    }
+}
+
+fn clear_incoming_watches(state: &Arc<NativeWebSocketSyncState>) {
+    state.incoming_watches.lock().unwrap().clear();
 }
 
 fn store_peer_recommendations(
@@ -751,6 +1098,58 @@ fn pack_batch_routes(
             }
         })
         .collect()
+}
+
+fn apply_response_body(
+    accumulator: &mut PullAccumulator,
+    result: &crate::PullResponseBody,
+) -> Option<String> {
+    match result {
+        crate::PullResponseBody::Get { value } => {
+            *accumulator = PullAccumulator::Get {
+                value: value.clone(),
+            };
+            None
+        }
+        crate::PullResponseBody::Map { entries } => {
+            if let PullAccumulator::Map { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Query { entries } => {
+            if let PullAccumulator::Query { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Lex { entries } => {
+            if let PullAccumulator::Lex { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Snapshot {
+            clock,
+            nodes,
+            pending_ops,
+        } => {
+            if let PullAccumulator::Snapshot {
+                clock: current_clock,
+                nodes: current_nodes,
+                pending_ops: current_ops,
+            } = accumulator
+            {
+                if current_clock.is_none() {
+                    *current_clock = clock.clone();
+                }
+                current_nodes.extend(nodes.clone());
+                current_ops.extend(pending_ops.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Error { message } => Some(message.clone()),
+    }
 }
 
 fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> Result<(String, JsonValue)> {

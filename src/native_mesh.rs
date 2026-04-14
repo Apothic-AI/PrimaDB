@@ -1,10 +1,12 @@
 use crate::{
     ChangeSubscription, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
-    PeerRecommendation, Primadb, PrimadbError, Result, RouteEnvelope, RoutePayload, RouteTarget,
-    Router, RouterConfig, SyncEnvelope, SyncFrame,
+    PeerRecommendation, Primadb, PrimadbError, RemoteWatchMessage, RemoteWatchSubscription,
+    Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope,
+    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
 };
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
+use async_channel::{Sender, unbounded};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -34,6 +36,51 @@ struct MeshOutbound {
     awaiting: BTreeMap<String, bool>,
 }
 
+#[derive(Debug)]
+struct OutgoingWatch {
+    sender: Sender<std::result::Result<RemoteWatchMessage, String>>,
+    target_peer_id: String,
+    request_kind: crate::PullRequestKind,
+    pending_sequence: Option<PendingWatchSequence>,
+    last_delivered_sequence: Option<u64>,
+}
+
+#[derive(Debug)]
+struct PendingWatchSequence {
+    sequence: u64,
+    initial: bool,
+    accumulator: PullAccumulator,
+}
+
+#[derive(Debug, Clone)]
+struct IncomingWatch {
+    target_peer_id: String,
+    request_kind: crate::PullRequestKind,
+    next_sequence: u64,
+    last_hash: Option<String>,
+}
+
+#[derive(Debug)]
+enum PullAccumulator {
+    Get {
+        value: Option<JsonValue>,
+    },
+    Map {
+        entries: Vec<crate::MapEntry>,
+    },
+    Query {
+        entries: Vec<crate::MapEntry>,
+    },
+    Lex {
+        entries: Vec<crate::LexEntry>,
+    },
+    Snapshot {
+        clock: Option<crate::HybridClock>,
+        nodes: BTreeMap<String, crate::NodeState>,
+        pending_ops: Vec<crate::Operation>,
+    },
+}
+
 #[derive(Default)]
 struct NativeMeshPeer {
     connection: Option<Arc<RTCPeerConnection>>,
@@ -47,6 +94,7 @@ const STALE_MESH_PEER_MILLIS: u64 = 5_000;
 struct NativeWebRtcMeshState {
     db: Primadb,
     api: Arc<API>,
+    runtime: tokio::runtime::Handle,
     router: Router,
     room: String,
     peer_id: String,
@@ -57,6 +105,8 @@ struct NativeWebRtcMeshState {
     outbound: UnboundedSender<Message>,
     peers: Mutex<BTreeMap<String, NativeMeshPeer>>,
     inflight: Mutex<BTreeMap<String, MeshOutbound>>,
+    outgoing_watches: Mutex<BTreeMap<String, OutgoingWatch>>,
+    incoming_watches: Mutex<BTreeMap<String, IncomingWatch>>,
     recommendations: Mutex<BTreeMap<String, PeerRecommendation>>,
 }
 
@@ -92,6 +142,7 @@ impl NativeWebRtcMesh {
         let state = Arc::new(NativeWebRtcMeshState {
             db: db.clone(),
             api,
+            runtime: tokio::runtime::Handle::current(),
             router: Router::new(RouterConfig {
                 peer_id: peer_id.clone(),
                 default_channel: format!("mesh:{}", config.room),
@@ -107,6 +158,8 @@ impl NativeWebRtcMesh {
             outbound,
             peers: Mutex::new(BTreeMap::new()),
             inflight: Mutex::new(BTreeMap::new()),
+            outgoing_watches: Mutex::new(BTreeMap::new()),
+            incoming_watches: Mutex::new(BTreeMap::new()),
             recommendations: Mutex::new(BTreeMap::new()),
         });
 
@@ -115,6 +168,8 @@ impl NativeWebRtcMesh {
             while let Some(message) = outbound_rx.recv().await {
                 if writer.send(message).await.is_err() {
                     writer_state.relay_connected.store(false, Ordering::SeqCst);
+                    fail_outgoing_mesh_watches(&writer_state, "mesh writer closed").await;
+                    clear_incoming_mesh_watches(&writer_state).await;
                     break;
                 }
             }
@@ -134,6 +189,8 @@ impl NativeWebRtcMesh {
                 }
             }
             reader_state.relay_connected.store(false, Ordering::SeqCst);
+            fail_outgoing_mesh_watches(&reader_state, "mesh signaling closed").await;
+            clear_incoming_mesh_watches(&reader_state).await;
         });
 
         let change_subscription = db.subscribe_changes();
@@ -143,6 +200,9 @@ impl NativeWebRtcMesh {
             while let Ok(event) = change_receiver.recv().await {
                 if event.pending_ops > 0 {
                     let _ = flush_mesh_pending_state(&change_state).await;
+                }
+                if event.data_changed {
+                    let _ = emit_incoming_mesh_watch_updates(&change_state).await;
                 }
             }
         });
@@ -219,6 +279,73 @@ impl NativeWebRtcMesh {
             .collect()
     }
 
+    pub async fn watch_get(
+        &self,
+        peer_id: impl Into<String>,
+        path: crate::RemotePath,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Get { path },
+        )
+        .await
+    }
+
+    pub async fn watch_map(
+        &self,
+        peer_id: impl Into<String>,
+        path: crate::RemotePath,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Map { path },
+        )
+        .await
+    }
+
+    pub async fn watch_query(
+        &self,
+        peer_id: impl Into<String>,
+        path: crate::RemotePath,
+        spec: crate::QuerySpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Query { path, spec },
+        )
+        .await
+    }
+
+    pub async fn watch_lex(
+        &self,
+        peer_id: impl Into<String>,
+        path: crate::RemotePath,
+        spec: crate::LexSpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Lex { path, spec },
+        )
+        .await
+    }
+
+    pub async fn watch_snapshot(
+        &self,
+        peer_id: impl Into<String>,
+        root: Option<String>,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Snapshot { root },
+        )
+        .await
+    }
+
     pub async fn flush_pending(&self) -> Result<usize> {
         flush_mesh_pending_state(&self.state).await
     }
@@ -261,6 +388,8 @@ impl NativeWebRtcMesh {
                 let _ = connection.close().await;
             }
         }
+        fail_outgoing_mesh_watches(&self.state, "mesh closed").await;
+        clear_incoming_mesh_watches(&self.state).await;
     }
 }
 
@@ -669,10 +798,13 @@ async fn attach_mesh_channel_handlers(
     }));
 
     let open_state = state.clone();
+    let remote_for_open = remote_peer.to_owned();
     channel.on_open(Box::new(move || {
         let open_state = open_state.clone();
+        let remote_for_open = remote_for_open.clone();
         Box::pin(async move {
             let _ = flush_mesh_pending_state(&open_state).await;
+            let _ = replay_outgoing_mesh_watches_for_peer(&open_state, &remote_for_open).await;
         })
     }));
 
@@ -705,6 +837,11 @@ async fn remove_mesh_peer_state(state: &Arc<NativeWebRtcMeshState>, remote_peer:
             let _ = connection.close().await;
         }
     }
+    state
+        .incoming_watches
+        .lock()
+        .await
+        .retain(|_, watch| watch.target_peer_id != remote_peer);
 
     let mut to_requeue = Vec::new();
     {
@@ -780,6 +917,12 @@ async fn handle_mesh_route_message(
                     pending.push(RoutePayload::from_batch_item(item));
                 }
             }
+            RoutePayload::WatchRequest { request } => {
+                handle_mesh_watch_request(state, remote_peer, request).await?;
+            }
+            RoutePayload::WatchEvent { event } => {
+                accept_mesh_watch_event(state, event).await?;
+            }
             RoutePayload::PullRequest { .. } | RoutePayload::PullResponse { .. } => {}
         }
     }
@@ -816,6 +959,275 @@ async fn handle_mesh_sync_frame(
             Ok(())
         }
     }
+}
+
+async fn start_mesh_watch(
+    state: &Arc<NativeWebRtcMeshState>,
+    target_peer_id: String,
+    request_kind: crate::PullRequestKind,
+) -> Result<RemoteWatchSubscription> {
+    let limit = state.db.limits().max_active_remote_watches.max(1);
+    let watch_id = format!(
+        "{}/watch/{:x}",
+        state.db.replica_id(),
+        state.next_message_seq.fetch_add(1, Ordering::SeqCst) + 1
+    );
+    let (sender, receiver) = unbounded();
+    {
+        let mut outgoing = state.outgoing_watches.lock().await;
+        if outgoing.len() >= limit {
+            return Err(PrimadbError::TooManyRemoteWatches { limit });
+        }
+        outgoing.insert(
+            watch_id.clone(),
+            OutgoingWatch {
+                sender,
+                target_peer_id: target_peer_id.clone(),
+                request_kind: request_kind.clone(),
+                pending_sequence: None,
+                last_delivered_sequence: None,
+            },
+        );
+    }
+
+    let _ = send_mesh_watch_request(
+        state,
+        &target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.clone(),
+            request: WatchRequestKind::Subscribe {
+                request: request_kind,
+            },
+        },
+    )
+    .await;
+
+    let cancel_state = state.clone();
+    let runtime = state.runtime.clone();
+    Ok(RemoteWatchSubscription::new(receiver, move || {
+        runtime.spawn({
+            let cancel_state = cancel_state.clone();
+            let watch_id = watch_id.clone();
+            async move {
+                cancel_mesh_watch(&cancel_state, &watch_id).await;
+            }
+        });
+    }))
+}
+
+async fn cancel_mesh_watch(state: &Arc<NativeWebRtcMeshState>, watch_id: &str) {
+    let Some(watch) = state.outgoing_watches.lock().await.remove(watch_id) else {
+        return;
+    };
+    let _ = send_mesh_watch_request(
+        state,
+        &watch.target_peer_id,
+        WatchRequest {
+            watch_id: watch_id.to_owned(),
+            request: WatchRequestKind::Cancel,
+        },
+    )
+    .await;
+}
+
+async fn send_mesh_watch_request(
+    state: &Arc<NativeWebRtcMeshState>,
+    target_peer_id: &str,
+    request: WatchRequest,
+) -> Result<()> {
+    let route = state.router.wrap_watch_request(
+        request,
+        RouteTarget::Peer(target_peer_id.to_owned()),
+        None,
+    );
+    send_mesh_route_to_peer(state, target_peer_id, &route).await
+}
+
+async fn replay_outgoing_mesh_watches_for_peer(
+    state: &Arc<NativeWebRtcMeshState>,
+    peer_id: &str,
+) -> Result<usize> {
+    let requests = {
+        let outgoing = state.outgoing_watches.lock().await;
+        outgoing
+            .iter()
+            .filter(|(_, watch)| watch.target_peer_id == peer_id)
+            .map(|(watch_id, watch)| WatchRequest {
+                watch_id: watch_id.clone(),
+                request: WatchRequestKind::Subscribe {
+                    request: watch.request_kind.clone(),
+                },
+            })
+            .collect::<Vec<_>>()
+    };
+    for request in &requests {
+        send_mesh_watch_request(state, peer_id, request.clone()).await?;
+    }
+    Ok(requests.len())
+}
+
+async fn handle_mesh_watch_request(
+    state: &Arc<NativeWebRtcMeshState>,
+    remote_peer: &str,
+    request: WatchRequest,
+) -> Result<()> {
+    match request.request {
+        WatchRequestKind::Subscribe { request: request_kind } => {
+            let limit = state.db.limits().max_active_remote_watches.max(1);
+            {
+                let mut incoming = state.incoming_watches.lock().await;
+                if incoming.len() >= limit && !incoming.contains_key(&request.watch_id) {
+                    return Err(PrimadbError::TooManyRemoteWatches { limit });
+                }
+                incoming.insert(
+                    request.watch_id.clone(),
+                    IncomingWatch {
+                        target_peer_id: remote_peer.to_owned(),
+                        request_kind,
+                        next_sequence: 0,
+                        last_hash: None,
+                    },
+                );
+            }
+            let _ = emit_single_incoming_mesh_watch_update(state, &request.watch_id, true).await?;
+        }
+        WatchRequestKind::Cancel => {
+            state.incoming_watches.lock().await.remove(&request.watch_id);
+        }
+    }
+    Ok(())
+}
+
+async fn accept_mesh_watch_event(
+    state: &Arc<NativeWebRtcMeshState>,
+    event: WatchEvent,
+) -> Result<()> {
+    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
+        None;
+    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+
+    {
+        let mut outgoing = state.outgoing_watches.lock().await;
+        let Some(watch) = outgoing.get_mut(&event.watch_id) else {
+            return Ok(());
+        };
+
+        if watch
+            .last_delivered_sequence
+            .is_some_and(|last| event.sequence <= last)
+        {
+            return Ok(());
+        }
+
+        let pending_sequence = watch
+            .pending_sequence
+            .as_ref()
+            .map(|pending| pending.sequence);
+        if pending_sequence != Some(event.sequence) {
+            if pending_sequence.is_some_and(|pending| event.sequence < pending) {
+                return Ok(());
+            }
+            watch.pending_sequence = Some(PendingWatchSequence {
+                sequence: event.sequence,
+                initial: event.initial,
+                accumulator: PullAccumulator::new(&watch.request_kind),
+            });
+        }
+
+        let Some(pending) = watch.pending_sequence.as_mut() else {
+            return Ok(());
+        };
+        if let Some(message) = apply_response_body(&mut pending.accumulator, &event.result) {
+            let sender = watch.sender.clone();
+            outgoing.remove(&event.watch_id);
+            failure = Some((sender, message));
+        } else if event.done || event.chunk.index.saturating_add(1) >= event.chunk.total {
+            let sender = watch.sender.clone();
+            let pending = watch.pending_sequence.take().unwrap();
+            let result = pending.accumulator.into_result()?;
+            watch.last_delivered_sequence = Some(event.sequence);
+            deliver = Some((
+                sender,
+                RemoteWatchMessage {
+                    initial: pending.initial,
+                    result,
+                },
+            ));
+        }
+    }
+
+    if let Some((sender, message)) = deliver {
+        let _ = sender.try_send(Ok(message));
+    }
+    if let Some((sender, message)) = failure {
+        let _ = sender.try_send(Err(message));
+    }
+    Ok(())
+}
+
+async fn emit_incoming_mesh_watch_updates(state: &Arc<NativeWebRtcMeshState>) -> Result<usize> {
+    let watch_ids = {
+        let incoming = state.incoming_watches.lock().await;
+        incoming.keys().cloned().collect::<Vec<_>>()
+    };
+    let mut emitted = 0;
+    for watch_id in watch_ids {
+        if emit_single_incoming_mesh_watch_update(state, &watch_id, false).await? {
+            emitted += 1;
+        }
+    }
+    Ok(emitted)
+}
+
+async fn emit_single_incoming_mesh_watch_update(
+    state: &Arc<NativeWebRtcMeshState>,
+    watch_id: &str,
+    initial: bool,
+) -> Result<bool> {
+    let Some(watch) = state.incoming_watches.lock().await.get(watch_id).cloned() else {
+        return Ok(false);
+    };
+    let result = state.db.execute_pull_request_kind(&watch.request_kind)?;
+    let content_hash = crate::stable_content_hash(&result);
+    if !initial && content_hash == watch.last_hash {
+        return Ok(false);
+    }
+
+    let items = state
+        .db
+        .chunk_watch_result(watch_id, watch.next_sequence, initial, result)
+        .into_iter()
+        .map(|event| RouteBatchItem::WatchEvent { event })
+        .collect::<Vec<_>>();
+    for route in pack_batch_routes(
+        &state.router,
+        RouteTarget::Peer(watch.target_peer_id.clone()),
+        None,
+        items,
+        state.db.limits().max_batch_items_per_route.max(1),
+    ) {
+        send_mesh_route_to_peer(state, &watch.target_peer_id, &route).await?;
+    }
+
+    if let Some(entry) = state.incoming_watches.lock().await.get_mut(watch_id) {
+        entry.last_hash = content_hash;
+        entry.next_sequence = entry.next_sequence.saturating_add(1);
+    }
+    Ok(true)
+}
+
+async fn fail_outgoing_mesh_watches(state: &Arc<NativeWebRtcMeshState>, message: &str) {
+    let outgoing = {
+        let mut outgoing = state.outgoing_watches.lock().await;
+        std::mem::take(&mut *outgoing)
+    };
+    for watch in outgoing.into_values() {
+        let _ = watch.sender.try_send(Err(message.to_owned()));
+    }
+}
+
+async fn clear_incoming_mesh_watches(state: &Arc<NativeWebRtcMeshState>) {
+    state.incoming_watches.lock().await.clear();
 }
 
 async fn flush_mesh_pending_state(state: &Arc<NativeWebRtcMeshState>) -> Result<usize> {
@@ -1011,6 +1423,11 @@ async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
             "signal".to_owned(),
             "webrtc".to_owned(),
             "peer_exchange".to_owned(),
+            "watch_get".to_owned(),
+            "watch_map".to_owned(),
+            "watch_query".to_owned(),
+            "watch_lex".to_owned(),
+            "watch_snapshot".to_owned(),
         ],
         vec![format!("mesh:{}", state.room)],
     );
@@ -1037,6 +1454,80 @@ fn send_route(state: &Arc<NativeWebRtcMeshState>, route: &RouteEnvelope) -> Resu
         .outbound
         .send(Message::Text(payload.into()))
         .map_err(|error| PrimadbError::Message(error.to_string()))
+}
+
+fn pack_batch_routes(
+    router: &Router,
+    target: RouteTarget,
+    reply_to: Option<String>,
+    items: Vec<RouteBatchItem>,
+    batch_size: usize,
+) -> Vec<RouteEnvelope> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    items
+        .chunks(batch_size.max(1))
+        .map(|chunk: &[RouteBatchItem]| {
+            if chunk.len() == 1 {
+                router.wrap_batch_item(chunk[0].clone(), target.clone(), reply_to.clone())
+            } else {
+                router.wrap_batch(chunk.to_vec(), target.clone(), reply_to.clone())
+            }
+        })
+        .collect()
+}
+
+fn apply_response_body(
+    accumulator: &mut PullAccumulator,
+    result: &crate::PullResponseBody,
+) -> Option<String> {
+    match result {
+        crate::PullResponseBody::Get { value } => {
+            *accumulator = PullAccumulator::Get {
+                value: value.clone(),
+            };
+            None
+        }
+        crate::PullResponseBody::Map { entries } => {
+            if let PullAccumulator::Map { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Query { entries } => {
+            if let PullAccumulator::Query { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Lex { entries } => {
+            if let PullAccumulator::Lex { entries: current } = accumulator {
+                current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Snapshot {
+            clock,
+            nodes,
+            pending_ops,
+        } => {
+            if let PullAccumulator::Snapshot {
+                clock: current_clock,
+                nodes: current_nodes,
+                pending_ops: current_ops,
+            } = accumulator
+            {
+                if current_clock.is_none() {
+                    *current_clock = clock.clone();
+                }
+                current_nodes.extend(nodes.clone());
+                current_ops.extend(pending_ops.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Error { message } => Some(message.clone()),
+    }
 }
 
 fn build_rtc_configuration(ice_servers: &[IceServerConfig]) -> RTCConfiguration {
@@ -1103,6 +1594,52 @@ fn peer_recommendation_from_presence(peer: &crate::PeerPresence, relay_url: &str
         relay_urls: vec![relay_url.to_owned()],
         score: 100,
         discovered_at_millis: crate::clock::now_millis(),
+    }
+}
+
+impl PullAccumulator {
+    fn new(request: &crate::PullRequestKind) -> Self {
+        match request {
+            crate::PullRequestKind::Get { .. } => Self::Get { value: None },
+            crate::PullRequestKind::Map { .. } => Self::Map {
+                entries: Vec::new(),
+            },
+            crate::PullRequestKind::Query { .. } => Self::Query {
+                entries: Vec::new(),
+            },
+            crate::PullRequestKind::Lex { .. } => Self::Lex {
+                entries: Vec::new(),
+            },
+            crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
+                clock: None,
+                nodes: BTreeMap::new(),
+                pending_ops: Vec::new(),
+            },
+        }
+    }
+
+    fn into_result(self) -> Result<crate::RemoteResult> {
+        match self {
+            Self::Get { value } => Ok(crate::RemoteResult::Get { value }),
+            Self::Map { entries } => Ok(crate::RemoteResult::Map { entries }),
+            Self::Query { entries } => Ok(crate::RemoteResult::Query { entries }),
+            Self::Lex { entries } => Ok(crate::RemoteResult::Lex { entries }),
+            Self::Snapshot {
+                clock,
+                nodes,
+                pending_ops,
+            } => Ok(crate::RemoteResult::Snapshot {
+                snapshot: crate::DatabaseSnapshot {
+                    clock: clock.ok_or_else(|| {
+                        PrimadbError::Message(
+                            "snapshot watch completed without a clock".to_owned(),
+                        )
+                    })?,
+                    nodes,
+                    pending_ops,
+                },
+            }),
+        }
     }
 }
 

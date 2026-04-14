@@ -9,6 +9,14 @@ This package wraps Primadb's Rust/WASM browser runtime and exposes three entrypo
 This is a browser-first package. The Rust core remains the source of truth for database semantics,
 sync, auth, and merge behavior.
 
+The browser bindings also expose live remote watch helpers on relay and mesh transports:
+
+- `watchRemoteGet(...)`
+- `watchRemoteMap(...)`
+- `watchRemoteQuery(...)`
+- `watchRemoteLex(...)`
+- `watchRemoteSnapshot(...)`
+
 ## Build From The Repo
 
 From the repo root:

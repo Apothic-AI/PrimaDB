@@ -1,8 +1,10 @@
+use async_channel::Receiver;
 use crate::value::{NodeId, NodeState};
 use crate::{DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncEnvelope {
@@ -109,12 +111,50 @@ pub struct PullResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WatchRequestKind {
+    Subscribe { request: PullRequestKind },
+    Cancel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WatchRequest {
+    pub watch_id: String,
+    pub request: WatchRequestKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WatchEvent {
+    pub watch_id: String,
+    pub sequence: u64,
+    pub initial: bool,
+    pub chunk: PullChunk,
+    pub done: bool,
+    pub result: PullResponseBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteResult {
     Get { value: Option<JsonValue> },
     Map { entries: Vec<MapEntry> },
     Query { entries: Vec<MapEntry> },
     Lex { entries: Vec<LexEntry> },
     Snapshot { snapshot: DatabaseSnapshot },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteWatchMessage {
+    pub initial: bool,
+    pub result: RemoteResult,
+}
+
+pub struct RemoteWatchSubscription {
+    inner: Arc<RemoteWatchSubscriptionInner>,
+}
+
+struct RemoteWatchSubscriptionInner {
+    receiver: Receiver<std::result::Result<RemoteWatchMessage, String>>,
+    cancel: Box<dyn Fn() + Send + Sync>,
 }
 
 impl PullRequestKind {
@@ -132,6 +172,42 @@ impl PullRequestKind {
 impl PullResponse {
     pub fn is_final(&self) -> bool {
         self.done || self.chunk.index.saturating_add(1) >= self.chunk.total
+    }
+}
+
+impl RemoteWatchSubscription {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn new(
+        receiver: Receiver<std::result::Result<RemoteWatchMessage, String>>,
+        cancel: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RemoteWatchSubscriptionInner {
+                receiver,
+                cancel: Box::new(cancel),
+            }),
+        }
+    }
+
+    pub fn receiver(&self) -> Receiver<std::result::Result<RemoteWatchMessage, String>> {
+        self.inner.receiver.clone()
+    }
+
+    pub async fn recv(&self) -> Option<std::result::Result<RemoteWatchMessage, String>> {
+        self.inner.receiver.recv().await.ok()
+    }
+
+    pub fn try_recv(&self) -> Option<std::result::Result<RemoteWatchMessage, String>> {
+        self.inner.receiver.try_recv().ok()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn recv_blocking(&self) -> Option<std::result::Result<RemoteWatchMessage, String>> {
+        self.inner.receiver.recv_blocking().ok()
+    }
+
+    pub fn close(&self) {
+        (self.inner.cancel)();
     }
 }
 

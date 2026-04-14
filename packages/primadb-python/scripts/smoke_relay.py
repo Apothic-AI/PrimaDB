@@ -80,6 +80,31 @@ def main() -> None:
         else:
             raise RuntimeError("Timed out waiting for relay connections")
 
+        deadline = time.time() + 20
+        target_peer = None
+        while time.time() < deadline:
+            peers = waiter.recommended_peers()
+            target_peer = next(
+                (
+                    entry["peer"]["peer_id"]
+                    for entry in peers
+                    if entry.get("peer", {}).get("replica_id") == writer_db.replica_id()
+                ),
+                None,
+            )
+            if target_peer:
+                break
+            wait(100)
+        else:
+            raise RuntimeError("Timed out waiting for relay peer discovery")
+
+        watch = waiter.watch_remote_query(
+            target_peer,
+            {"anchor": "boards", "segments": ["shared", "notes"]},
+            {"filters": [{"kind": "eq", "path": "title", "value": TITLE}], "limit": 1},
+        )
+        initial_watch = watch.next()
+
         notes = writer_db.chain("boards").field("shared").field("notes")
         note_id = notes.set(
             {
@@ -90,6 +115,17 @@ def main() -> None:
             }
         )
         writer.flush_pending()
+
+        deadline = time.time() + 20
+        watch_update = None
+        while time.time() < deadline:
+            candidate = watch.try_next()
+            if candidate.get("value"):
+                watch_update = candidate
+                break
+            wait(100)
+        else:
+            raise RuntimeError(f"Timed out waiting for watch update {TITLE}")
 
         deadline = time.time() + 30
         matches = []
@@ -112,6 +148,9 @@ def main() -> None:
                     "relay": RELAY_URL,
                     "title": TITLE,
                     "noteId": note_id,
+                    "targetPeer": target_peer,
+                    "initialWatch": initial_watch,
+                    "watchUpdate": watch_update,
                     "knownPeers": {
                         "waiter": waiter.known_peer_count(),
                         "writer": writer.known_peer_count(),
@@ -123,6 +162,7 @@ def main() -> None:
             )
         )
 
+        watch.close()
         waiter.close()
         writer.close()
     finally:

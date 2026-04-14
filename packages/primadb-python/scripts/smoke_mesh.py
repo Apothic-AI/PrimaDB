@@ -80,6 +80,13 @@ def main() -> None:
         else:
             raise RuntimeError("Timed out waiting for open mesh peers")
 
+        watch = waiter.watch_remote_query(
+            writer.peer_id(),
+            {"anchor": "boards", "segments": [ROOM, "notes"]},
+            {"filters": [{"kind": "eq", "path": "title", "value": TITLE}], "limit": 1},
+        )
+        initial_watch = watch.next()
+
         notes = writer_db.chain("boards").field(ROOM).field("notes")
         note_id = notes.set(
             {
@@ -90,6 +97,17 @@ def main() -> None:
             }
         )
         writer.flush_pending()
+
+        deadline = time.time() + 30
+        watch_update = None
+        while time.time() < deadline:
+            candidate = watch.try_next()
+            if candidate.get("value"):
+                watch_update = candidate
+                break
+            wait(100)
+        else:
+            raise RuntimeError(f"Timed out waiting for mesh watch {TITLE}")
 
         deadline = time.time() + 45
         matches = []
@@ -113,6 +131,8 @@ def main() -> None:
                     "room": ROOM,
                     "title": TITLE,
                     "noteId": note_id,
+                    "initialWatch": initial_watch,
+                    "watchUpdate": watch_update,
                     "waiter": {
                         "peerId": waiter.peer_id(),
                         "signaling": waiter.signaling_mode(),
@@ -132,6 +152,7 @@ def main() -> None:
             )
         )
 
+        watch.close()
         waiter.close()
         writer.close()
     finally:

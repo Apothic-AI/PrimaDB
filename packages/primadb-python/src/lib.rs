@@ -3,7 +3,9 @@ use primadb::{
     DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig, LexSpec, MeshConfig,
     NativeWebRtcMesh as CoreWebRtcMesh,
     NativeWebSocketSync as CoreWebSocketSync, Operation, Primadb as CorePrimadb, QuerySpec,
-    RelayClientConfig, RemotePath, Subscription as CoreSubscription,
+    RelayClientConfig, RemotePath, RemoteResult as CoreRemoteResult,
+    RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
+    Subscription as CoreSubscription,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -60,6 +62,33 @@ fn blob_binding_to_json(binding: CoreBlobStorageBinding) -> JsonValue {
     })
 }
 
+fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
+    match value {
+        CoreRemoteResult::Get { value } => value.unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Map { entries }
+        | CoreRemoteResult::Query { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
+    }
+}
+
+fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
+    let kind = match &message.result {
+        CoreRemoteResult::Get { .. } => "get",
+        CoreRemoteResult::Map { .. } => "map",
+        CoreRemoteResult::Query { .. } => "query",
+        CoreRemoteResult::Lex { .. } => "lex",
+        CoreRemoteResult::Snapshot { .. } => "snapshot",
+    };
+    json!({
+        "done": false,
+        "initial": message.initial,
+        "kind": kind,
+        "value": remote_result_to_json_value(message.result),
+        "error": JsonValue::Null,
+    })
+}
+
 #[pyclass(module = "primadb._native")]
 struct Primadb {
     inner: CorePrimadb,
@@ -78,6 +107,11 @@ struct Subscription {
 #[pyclass(module = "primadb._native")]
 struct WebSocketSync {
     inner: Arc<Mutex<Option<CoreWebSocketSync>>>,
+}
+
+#[pyclass(module = "primadb._native")]
+struct RemoteWatch {
+    inner: Arc<Mutex<Option<CoreRemoteWatch>>>,
 }
 
 #[pyclass(module = "primadb._native")]
@@ -386,6 +420,80 @@ impl Subscription {
 }
 
 #[pymethods]
+impl RemoteWatch {
+    fn next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let watch = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("remote watch"))?
+        };
+
+        let message = py.detach(|| runtime().block_on(watch.recv()));
+        let response = match message {
+            Some(Ok(value)) => {
+                self.inner.lock().unwrap().replace(watch);
+                watch_message_to_json(value)
+            }
+            Some(Err(message)) => json!({
+                "done": false,
+                "initial": false,
+                "kind": JsonValue::Null,
+                "value": JsonValue::Null,
+                "error": message,
+            }),
+            None => json!({
+                "done": true,
+                "initial": false,
+                "kind": JsonValue::Null,
+                "value": JsonValue::Null,
+                "error": JsonValue::Null,
+            }),
+        };
+        to_py(py, response)
+    }
+
+    fn try_next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(watch) = guard.as_ref() else {
+            return to_py(
+                py,
+                json!({
+                    "done": true,
+                    "initial": false,
+                    "kind": JsonValue::Null,
+                    "value": JsonValue::Null,
+                    "error": JsonValue::Null,
+                }),
+            );
+        };
+
+        let message = match watch.try_recv() {
+            Some(Ok(value)) => watch_message_to_json(value),
+            Some(Err(message)) => json!({
+                "done": false,
+                "initial": false,
+                "kind": JsonValue::Null,
+                "value": JsonValue::Null,
+                "error": message,
+            }),
+            None => json!({
+                "done": false,
+                "initial": false,
+                "kind": JsonValue::Null,
+                "value": JsonValue::Null,
+                "error": JsonValue::Null,
+            }),
+        };
+        to_py(py, message)
+    }
+
+    fn close(&self) {
+        if let Some(watch) = self.inner.lock().unwrap().take() {
+            watch.close();
+        }
+    }
+}
+
+#[pymethods]
 impl WebSocketSync {
     fn is_connected(&self) -> bool {
         self.inner
@@ -501,6 +609,93 @@ impl WebSocketSync {
         to_py(py, result.map_err(to_py_err)?)
     }
 
+    fn watch_remote_get(&self, peer_id: String, path: &Bound<'_, PyAny>) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_get(peer_id, path)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    fn watch_remote_map(&self, peer_id: String, path: &Bound<'_, PyAny>) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_map(peer_id, path)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    fn watch_remote_query(
+        &self,
+        peer_id: String,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: QuerySpec = from_py(spec)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_query(peer_id, path, spec)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    fn watch_remote_lex(
+        &self,
+        peer_id: String,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: LexSpec = from_py(spec)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_lex(peer_id, path, spec)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (peer_id, root=None))]
+    fn watch_remote_snapshot(&self, peer_id: String, root: Option<String>) -> PyResult<RemoteWatch> {
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_snapshot(peer_id, root)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
     fn flush_pending(&self, py: Python<'_>) -> PyResult<u32> {
         let sync = {
             let mut guard = self.inner.lock().unwrap();
@@ -604,6 +799,100 @@ impl WebRtcMesh {
         to_py(py, peers)
     }
 
+    fn watch_remote_get(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        path: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_get(peer_id, path)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    fn watch_remote_map(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        path: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_map(peer_id, path)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    fn watch_remote_query(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: QuerySpec = from_py(spec)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_query(peer_id, path, spec)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    fn watch_remote_lex(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: LexSpec = from_py(spec)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_lex(peer_id, path, spec)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (peer_id, root=None))]
+    fn watch_remote_snapshot(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        root: Option<String>,
+    ) -> PyResult<RemoteWatch> {
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_snapshot(peer_id, root)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
     fn flush_pending(&self, py: Python<'_>) -> PyResult<u32> {
         let mesh = {
             let mut guard = self.inner.lock().unwrap();
@@ -638,6 +927,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Primadb>()?;
     module.add_class::<Chain>()?;
     module.add_class::<Subscription>()?;
+    module.add_class::<RemoteWatch>()?;
     module.add_class::<WebSocketSync>()?;
     module.add_class::<WebRtcMesh>()?;
     Ok(())

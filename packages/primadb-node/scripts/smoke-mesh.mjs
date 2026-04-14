@@ -69,12 +69,27 @@ try {
   });
 
   const title = `Node mesh ${Date.now()}`;
+  const watch = await meshB.watchRemoteQuery(
+    meshA.peerId(),
+    { anchor: "mesh-demo", segments: ["notes"] },
+    {
+      filters: [{ kind: "eq", path: "title", value: title }],
+      limit: 1,
+    },
+  );
+  const initialWatch = await watch.next();
+
   dbA.chain("mesh-demo").field("notes").set({
     title,
     body: "replicated over native node mesh",
     createdAt: new Date().toISOString(),
   });
   await meshA.flushPending();
+
+  const watchUpdate = await waitFor(async () => {
+    const message = await watch.next();
+    return Array.isArray(message.value) && message.value.length > 0 ? message : null;
+  });
 
   const replicated = await waitFor(async () => {
     const entries = dbB.chain("mesh-demo").field("notes").query({
@@ -83,6 +98,7 @@ try {
     return Array.isArray(entries) && entries.length > 0 ? entries : null;
   });
 
+  watch.close();
   await meshA.close();
   await meshB.close();
 
@@ -92,6 +108,8 @@ try {
         relayUrl,
         room,
         title,
+        initialWatch,
+        watchUpdate,
         replicatedCount: replicated.length,
         node_package_mesh_confirmed: true,
       },

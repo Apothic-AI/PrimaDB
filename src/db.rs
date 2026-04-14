@@ -522,8 +522,8 @@ impl Primadb {
         snapshot
     }
 
-    pub fn execute_pull_request(&self, request: &PullRequest) -> Result<RemoteResult> {
-        match &request.request {
+    pub fn execute_pull_request_kind(&self, request: &PullRequestKind) -> Result<RemoteResult> {
+        match request {
             PullRequestKind::Get { path } => Ok(RemoteResult::Get {
                 value: self.get_path(path)?,
             }),
@@ -542,8 +542,32 @@ impl Primadb {
         }
     }
 
+    pub fn execute_pull_request(&self, request: &PullRequest) -> Result<RemoteResult> {
+        self.execute_pull_request_kind(&request.request)
+    }
+
     pub fn chunk_remote_result(&self, request_id: &str, result: RemoteResult) -> Vec<PullResponse> {
         build_pull_responses(request_id, result, &self.limits())
+    }
+
+    pub fn chunk_watch_result(
+        &self,
+        watch_id: &str,
+        sequence: u64,
+        initial: bool,
+        result: RemoteResult,
+    ) -> Vec<crate::WatchEvent> {
+        self.chunk_remote_result(watch_id, result)
+            .into_iter()
+            .map(|response| crate::WatchEvent {
+                watch_id: watch_id.to_owned(),
+                sequence,
+                initial,
+                chunk: response.chunk,
+                done: response.done,
+                result: response.result,
+            })
+            .collect()
     }
 
     pub fn subscribe_changes(&self) -> ChangeSubscription {

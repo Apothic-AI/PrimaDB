@@ -55,12 +55,31 @@ try {
   const syncB = await dbB.connectRelay({ url: relayUrl, retryIntervalMs: 500 });
   const title = `Node relay ${Date.now()}`;
 
+  const targetPeer = await waitFor(async () => {
+    const peers = syncB.recommendedPeers();
+    return peers.find((entry) => entry?.peer?.replica_id === dbA.replicaId())?.peer?.peer_id ?? null;
+  });
+  const watch = syncB.watchRemoteQuery(
+    targetPeer,
+    { anchor: "relay-demo", segments: ["notes"] },
+    {
+      filters: [{ kind: "eq", path: "title", value: title }],
+      limit: 1,
+    },
+  );
+  const initialWatch = await watch.next();
+
   dbA.chain("relay-demo").field("notes").set({
     title,
     body: "replicated over native node relay",
     createdAt: new Date().toISOString(),
   });
   await syncA.flushPending();
+
+  const watchUpdate = await waitFor(async () => {
+    const message = await watch.next();
+    return Array.isArray(message.value) && message.value.length > 0 ? message : null;
+  });
 
   const replicated = await waitFor(async () => {
     const entries = dbB.chain("relay-demo").field("notes").query({
@@ -69,6 +88,7 @@ try {
     return Array.isArray(entries) && entries.length > 0 ? entries : null;
   });
 
+  watch.close();
   syncA.close();
   syncB.close();
 
@@ -77,6 +97,9 @@ try {
       {
         relayUrl,
         title,
+        targetPeer,
+        initialWatch,
+        watchUpdate,
         replicatedCount: replicated.length,
         node_package_relay_confirmed: true,
       },
