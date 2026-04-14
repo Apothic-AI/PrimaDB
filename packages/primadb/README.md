@@ -33,6 +33,20 @@ The threaded subpath still has the same runtime requirements as the rest of Prim
 - `SharedArrayBuffer`
 - COOP/COEP headers
 
+## Package Examples
+
+Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport/primadb/packages/primadb/examples):
+
+- [examples/default-notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/default-notes/README.md)
+- [examples/threaded-mesh/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/threaded-mesh/README.md)
+
+Serve them with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/packages/primadb
+./examples/serve.sh
+```
+
 ## Default Build
 
 ```ts

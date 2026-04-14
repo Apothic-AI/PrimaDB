@@ -7,3 +7,6 @@ target/
 python/primadb/_native*.so
 python/primadb/_native*.pyd
 python/primadb/_native*.dylib
+examples/**/.venv/
+examples/**/__pycache__/
+examples/**/.data/

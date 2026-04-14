@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Primadb Package Default Notes</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">primadb package</p>
+        <h1>Default Notes</h1>
+        <p class="lede">
+          Local-first notes powered by the browser package build, IndexedDB segments, byte fields,
+          and blob storage.
+        </p>
+      </section>
+
+      <section class="status-grid">
+        <article>
+          <h2>Replica</h2>
+          <p id="replica-id">booting</p>
+        </article>
+        <article>
+          <h2>Durable Storage</h2>
+          <p id="storage-status">booting</p>
+        </article>
+        <article>
+          <h2>Binary</h2>
+          <p id="binary-status">waiting</p>
+        </article>
+      </section>
+
+      <section class="panel">
+        <form id="note-form" class="stack">
+          <label>
+            <span>Title</span>
+            <input id="note-title" name="title" type="text" placeholder="Package note" required />
+          </label>
+          <label>
+            <span>Body</span>
+            <textarea
+              id="note-body"
+              name="body"
+              rows="4"
+              placeholder="Stored through the browser package"
+              required
+            ></textarea>
+          </label>
+          <div class="actions">
+            <button type="submit">Add Note</button>
+            <button id="binary-button" type="button">Write Binary Sample</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Stored Notes</h2>
+          <p id="note-count">0</p>
+        </div>
+        <ul id="notes-list" class="notes"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

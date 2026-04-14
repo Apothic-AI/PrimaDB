@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Primadb Package Threaded Mesh</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">primadb/threads</p>
+        <h1>Threaded Mesh</h1>
+        <p class="lede">
+          Shared room replication on the threaded browser build. Open more tabs to watch cards
+          replicate, or switch to relay mode for cross-browser peers.
+        </p>
+      </section>
+
+      <section class="status-grid">
+        <article>
+          <h2>Build</h2>
+          <p id="build-status">booting</p>
+        </article>
+        <article>
+          <h2>Room</h2>
+          <p id="room-status">booting</p>
+        </article>
+        <article>
+          <h2>Mesh</h2>
+          <p id="mesh-status">booting</p>
+        </article>
+        <article>
+          <h2>Peers</h2>
+          <p id="peer-status">booting</p>
+        </article>
+      </section>
+
+      <section class="panel">
+        <form id="card-form" class="stack">
+          <label>
+            <span>Title</span>
+            <input id="card-title" name="title" type="text" placeholder="Threaded card" required />
+          </label>
+          <label>
+            <span>Body</span>
+            <textarea
+              id="card-body"
+              name="body"
+              rows="4"
+              placeholder="Replicated through the threaded browser build"
+              required
+            ></textarea>
+          </label>
+          <button type="submit">Add Shared Card</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Shared Cards</h2>
+          <p id="card-count">0</p>
+        </div>
+        <ul id="cards-list" class="cards"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

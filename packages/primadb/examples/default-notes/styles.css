@@ -1,0 +1,173 @@
+:root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(16, 96, 140, 0.12), transparent 30%),
+    linear-gradient(180deg, #f7f5ee 0%, #ebe6d6 100%);
+  color: #172127;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.shell {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 48px 20px 64px;
+}
+
+.hero h1,
+.panel h2 {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  margin: 0;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  color: #6c584c;
+}
+
+.hero {
+  margin-bottom: 28px;
+}
+
+.lede {
+  max-width: 60ch;
+  color: #42525c;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.status-grid article,
+.panel {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(23, 33, 39, 0.08);
+  border-radius: 18px;
+  box-shadow: 0 12px 30px rgba(23, 33, 39, 0.08);
+}
+
+.status-grid article {
+  padding: 16px 18px;
+}
+
+.status-grid h2 {
+  font-size: 0.95rem;
+  margin-bottom: 8px;
+}
+
+.panel {
+  padding: 20px;
+  margin-bottom: 18px;
+}
+
+.stack {
+  display: grid;
+  gap: 16px;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+  font-size: 0.95rem;
+}
+
+input,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+textarea {
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid rgba(23, 33, 39, 0.14);
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 11px 18px;
+  background: #0b5563;
+  color: #f7f8f4;
+  cursor: pointer;
+}
+
+button[type="button"] {
+  background: #8a5a44;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.note-card {
+  padding: 16px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(11, 85, 99, 0.08), rgba(255, 255, 255, 0.9));
+  border: 1px solid rgba(11, 85, 99, 0.1);
+}
+
+.note-card h3 {
+  margin: 0 0 8px;
+}
+
+.note-card p {
+  margin: 0;
+  color: #42525c;
+}
+
+.note-meta {
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  color: #6c584c;
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 32px 16px 48px;
+  }
+
+  .actions {
+    flex-direction: column;
+  }
+}

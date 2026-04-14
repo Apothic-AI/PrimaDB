@@ -1,3 +1,5 @@
 /node_modules
 /target
 /*.node
+/examples/**/.data
+/examples/**/node_modules

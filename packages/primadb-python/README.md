@@ -14,6 +14,13 @@ Current surface:
 - native relay sync through `connect_relay(...)`
 - native WebRTC mesh through `connect_mesh(...)`
 
+## Package Examples
+
+Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples):
+
+- [examples/local_notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/local_notes/README.md)
+- [examples/mesh_peer/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/mesh_peer/README.md)
+
 ## Install
 
 ```bash

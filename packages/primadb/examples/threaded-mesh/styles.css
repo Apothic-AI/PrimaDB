@@ -1,0 +1,164 @@
+:root {
+  color-scheme: light;
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at top right, rgba(194, 104, 54, 0.14), transparent 28%),
+    linear-gradient(160deg, #f2f7f1 0%, #d7e5dc 100%);
+  color: #172127;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 46px 20px 64px;
+}
+
+.hero {
+  margin-bottom: 28px;
+}
+
+.hero h1,
+.panel h2 {
+  margin: 0;
+  font-family: "IBM Plex Serif", Georgia, serif;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  font-size: 0.74rem;
+  color: #8a5a44;
+}
+
+.lede {
+  max-width: 62ch;
+  color: #3f5158;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.status-grid article,
+.panel {
+  border-radius: 20px;
+  border: 1px solid rgba(23, 33, 39, 0.08);
+  background: rgba(255, 255, 255, 0.76);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 14px 36px rgba(23, 33, 39, 0.08);
+}
+
+.status-grid article {
+  padding: 16px 18px;
+}
+
+.status-grid h2 {
+  font-size: 0.95rem;
+  margin-bottom: 8px;
+}
+
+.panel {
+  padding: 20px;
+  margin-bottom: 18px;
+}
+
+.stack {
+  display: grid;
+  gap: 16px;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+}
+
+input,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(23, 33, 39, 0.15);
+  background: rgba(255, 255, 255, 0.88);
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  justify-self: start;
+  border: 0;
+  border-radius: 999px;
+  padding: 11px 18px;
+  background: #1a6e57;
+  color: #f7fbf7;
+  cursor: pointer;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.card {
+  border-radius: 16px;
+  padding: 16px;
+  background: linear-gradient(135deg, rgba(26, 110, 87, 0.08), rgba(255, 255, 255, 0.92));
+  border: 1px solid rgba(26, 110, 87, 0.12);
+}
+
+.card h3 {
+  margin: 0 0 8px;
+}
+
+.card p {
+  margin: 0;
+  color: #3f5158;
+}
+
+.card-meta {
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  color: #8a5a44;
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 32px 16px 48px;
+  }
+
+  button {
+    width: 100%;
+    justify-self: stretch;
+  }
+}
