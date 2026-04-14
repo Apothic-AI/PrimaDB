@@ -10,6 +10,8 @@
 - Per-field last-write-wins conflict resolution with hybrid logical revisions.
 - Set membership via `set()` / `remove()` or `{"$set": [...]}` markers.
 - Link references via `{"$link": "node-id"}` markers.
+- First-class small/medium binary fields via `put_bytes()` / `putBytes(...)` and `{"$bytes": "..."}` markers.
+- Separate content-addressed blob storage for larger binary payloads, with blob refs stored in-graph via `{"$blob": {...}}`.
 - Reactive subscriptions.
 - Database-level change subscriptions for persistence/sync hooks.
 - Explicit outbound replication log via `pending_operations()` / `drain_pending_operations()`.
@@ -126,6 +128,12 @@ const persistence = await db.enableIndexedDbPersistence(
   "main",
   true,
 );
+db.openBlobStorage({
+  kind: "indexed_db",
+  databaseName: "primadb-demo",
+  storeName: "blobs",
+  namespace: "main",
+});
 
 const user = db.chain("users").field("alice");
 user.put({
@@ -136,6 +144,13 @@ user.put({
 const sub = user.on((value) => {
   console.log("update", value);
 });
+
+db.chain("assets").field("avatar").putBytes(new Uint8Array([1, 2, 3, 4]));
+const blobRef = await db
+  .chain("assets")
+  .field("archive")
+  .putBlob(new Uint8Array([5, 6, 7, 8]), "application/octet-stream");
+console.log(blobRef);
 
 const matches = db.chain("users").query({
   filters: [{ kind: "prefix", path: "name", value: "A" }],

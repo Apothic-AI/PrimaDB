@@ -207,6 +207,43 @@ async function main() {
     }, noteTitle, { timeout: 30_000 });
     const liveReplicated = (await page2.locator(".note-title", { hasText: noteTitle }).count()) >= 1;
 
+    const binaryPayload = [5, 8, 13, 21, 34];
+    await page1.evaluate(async ({ room, payload }) => {
+      const demo = globalThis.threadedMeshDemo;
+      demo.db.chain("binary").field(room).field("bytes").putBytes(new Uint8Array(payload));
+      demo.mesh.flushPending();
+    }, { room: ROOM, payload: binaryPayload });
+    await page2.waitForFunction(
+      ({ room, payload }) => {
+        const bytes = globalThis.threadedMeshDemo.db.chain("binary").field(room).field("bytes").onceBytes();
+        return bytes != null && JSON.stringify(Array.from(bytes)) === JSON.stringify(payload);
+      },
+      { room: ROOM, payload: binaryPayload },
+      { timeout: 30_000 },
+    );
+
+    const blobPayload = [144, 1, 2, 3, 5, 8, 13];
+    const blobReference = await page1.evaluate(async ({ room, payload }) => {
+      const demo = globalThis.threadedMeshDemo;
+      demo.db.enableIndexedDbBlobStorage("primadb-threaded-mesh-binary", "blobs", room);
+      return await demo.db
+        .chain("binary")
+        .field(room)
+        .field("blob")
+        .putBlob(new Uint8Array(payload), "application/octet-stream");
+    }, { room: ROOM, payload: blobPayload });
+    await page2.waitForFunction(
+      (room) => globalThis.threadedMeshDemo.db.chain("binary").field(room).field("blob").blobRef() != null,
+      ROOM,
+      { timeout: 30_000 },
+    );
+    const restoredBlob = await page2.evaluate(async ({ room }) => {
+      const demo = globalThis.threadedMeshDemo;
+      demo.db.enableIndexedDbBlobStorage("primadb-threaded-mesh-binary", "blobs", room);
+      const bytes = await demo.db.chain("binary").field(room).field("blob").getBlob();
+      return bytes == null ? null : Array.from(bytes);
+    }, { room: ROOM });
+
     await page1.getByRole("button", { name: "Seed Shared Load" }).click();
     await page2.waitForFunction(
       (expectedSeeded) => Number(document.querySelector("#seed-count")?.textContent ?? "0") >= expectedSeeded,
@@ -246,14 +283,25 @@ async function main() {
       peers2: Number(await page2.locator("#peer-count").textContent()),
       seeded2: Number(await page2.locator("#seed-count").textContent()),
       live_note_replicated: liveReplicated,
+      bytes_replicated: JSON.stringify(
+        await page2.evaluate(
+          (room) => {
+            const bytes = globalThis.threadedMeshDemo.db.chain("binary").field(room).field("bytes").onceBytes();
+            return bytes == null ? null : Array.from(bytes);
+          },
+          ROOM,
+        ),
+      ) === JSON.stringify(binaryPayload),
+      blob_reference: blobReference,
+      blob_restored: JSON.stringify(restoredBlob) === JSON.stringify(blobPayload),
       query: parseJsonBlock(await page2.locator("#query-output").textContent()),
       threaded_p2p_confirmed: liveReplicated,
     };
 
     console.log(JSON.stringify(result, null, 2));
 
-    if (!result.threaded_p2p_confirmed) {
-      throw new Error("Threaded mesh note did not replicate live before workload seeding");
+    if (!result.threaded_p2p_confirmed || !result.bytes_replicated || !result.blob_restored) {
+      throw new Error("Threaded mesh binary smoke did not complete successfully");
     }
 
   } finally {

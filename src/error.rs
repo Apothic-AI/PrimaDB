@@ -22,6 +22,14 @@ pub enum PrimadbError {
     BrowserWindowUnavailable,
     #[error("browser storage is unavailable")]
     BrowserStorageUnavailable,
+    #[error("binary marker at `{path}` is invalid")]
+    InvalidBinaryMarker { path: String },
+    #[error("blob marker at `{path}` is invalid")]
+    InvalidBlobMarker { path: String },
+    #[error("blob storage is not configured")]
+    BlobStoreUnavailable,
+    #[error("blob `{blob_id}` was not found")]
+    BlobNotFound { blob_id: String },
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("i/o error: {0}")]

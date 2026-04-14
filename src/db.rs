@@ -1,3 +1,9 @@
+use crate::binary::BinaryBytes;
+use crate::blob::{
+    BlobRef, BlobStorageBinding, BlobStorageConfig, BlobStore, MemoryBlobStore, StoredBlob,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::blob::FileBlobStore;
 use crate::clock::{HybridClock, Revision, VersionMarker};
 use crate::engine::{
     IncrementalStore, build_storage_metadata, build_storage_transaction,
@@ -111,6 +117,7 @@ struct Inner {
     persistence: Option<PersistenceTarget>,
     storage_adapter: Option<Arc<dyn StorageAdapter>>,
     storage_engine: Option<Arc<dyn IncrementalStore>>,
+    blob_store: Option<Arc<dyn BlobStore>>,
     missing_nodes: BTreeSet<NodeId>,
     next_storage_tx_id: u64,
     limits: PrimadbLimits,
@@ -144,6 +151,8 @@ enum OperationOrigin {
 
 enum ParsedInput {
     Scalar(JsonValue),
+    Bytes(BinaryBytes),
+    Blob(BlobRef),
     Link(NodeId),
     Set(Vec<SetMember>),
     Object(Map<String, JsonValue>),
@@ -170,6 +179,7 @@ impl Primadb {
                 persistence: None,
                 storage_adapter: None,
                 storage_engine: None,
+                blob_store: None,
                 missing_nodes: BTreeSet::new(),
                 next_storage_tx_id: 1,
                 limits: PrimadbLimits::default(),
@@ -639,6 +649,34 @@ impl Primadb {
         }
     }
 
+    pub fn attach_blob_store(&self, store: Arc<dyn BlobStore>) {
+        self.inner.lock().unwrap().blob_store = Some(store);
+    }
+
+    pub fn open_blob_storage(&self, config: BlobStorageConfig) -> Result<BlobStorageBinding> {
+        match config {
+            BlobStorageConfig::Memory => {
+                self.attach_blob_store(Arc::new(MemoryBlobStore::new()));
+                Ok(BlobStorageBinding {
+                    backend: "memory".to_owned(),
+                    content_addressed: true,
+                })
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            BlobStorageConfig::Files { directory } => {
+                self.attach_blob_store(Arc::new(FileBlobStore::new(directory)));
+                Ok(BlobStorageBinding {
+                    backend: "files".to_owned(),
+                    content_addressed: true,
+                })
+            }
+            #[cfg(target_arch = "wasm32")]
+            BlobStorageConfig::IndexedDb { .. } => Err(PrimadbError::Message(
+                "browser blob storage config must be opened through the wasm bindings".to_owned(),
+            )),
+        }
+    }
+
     #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
     pub async fn connect_relay(&self, config: RelayClientConfig) -> Result<NativeWebSocketSync> {
         NativeWebSocketSync::connect_with_config(self.clone(), config).await
@@ -647,6 +685,39 @@ impl Primadb {
     #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
     pub async fn connect_mesh(&self, config: MeshConfig) -> Result<NativeWebRtcMesh> {
         NativeWebRtcMesh::connect_with_config(self.clone(), config).await
+    }
+
+    pub fn store_blob(&self, data: impl AsRef<[u8]>, media_type: Option<&str>) -> Result<BlobRef> {
+        let store = self
+            .inner
+            .lock()
+            .unwrap()
+            .blob_store
+            .clone()
+            .ok_or(PrimadbError::BlobStoreUnavailable)?;
+        store.put_blob(data.as_ref(), media_type)
+    }
+
+    pub fn get_blob(&self, blob_id: &str) -> Result<Option<StoredBlob>> {
+        let store = self
+            .inner
+            .lock()
+            .unwrap()
+            .blob_store
+            .clone()
+            .ok_or(PrimadbError::BlobStoreUnavailable)?;
+        store.get_blob(blob_id)
+    }
+
+    pub fn has_blob(&self, blob_id: &str) -> Result<bool> {
+        let store = self
+            .inner
+            .lock()
+            .unwrap()
+            .blob_store
+            .clone()
+            .ok_or(PrimadbError::BlobStoreUnavailable)?;
+        store.has_blob(blob_id)
     }
 
     pub fn attach_storage_adapter(&self, adapter: Arc<dyn StorageAdapter>) -> Result<bool> {
@@ -911,7 +982,9 @@ impl Primadb {
                             value: inner.materialize_node(&member, &member, &mut BTreeSet::new()),
                         })
                         .collect()),
-                    FieldValue::Scalar(_) => Ok(Vec::new()),
+                    FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {
+                        Ok(Vec::new())
+                    }
                 }
             }
             None => Ok(Vec::new()),
@@ -1368,6 +1441,14 @@ impl Chain {
             .put_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
     }
 
+    pub fn put_bytes(&self, bytes: impl AsRef<[u8]>) -> Result<()> {
+        self.db.put_json(
+            &self.anchor,
+            &self.segments,
+            bytes_marker_value(&BinaryBytes::from(bytes.as_ref())),
+        )
+    }
+
     #[cfg(feature = "crypto")]
     pub fn put_signed<T: Serialize>(&self, value: T, certificate: Option<String>) -> Result<()> {
         self.db.put_signed_json(
@@ -1382,6 +1463,16 @@ impl Chain {
         self.db.materialize(&self.anchor, &self.segments)
     }
 
+    pub fn once_bytes(&self) -> Result<Option<Vec<u8>>> {
+        let Some(value) = self.once_json()? else {
+            return Ok(None);
+        };
+        let ParsedInput::Bytes(bytes) = parse_input(value, &self.path())? else {
+            return Ok(None);
+        };
+        Ok(Some(bytes.into_inner()))
+    }
+
     pub fn unset(&self) -> Result<()> {
         self.db.unset(&self.anchor, &self.segments)
     }
@@ -1389,6 +1480,14 @@ impl Chain {
     pub fn set<T: Serialize>(&self, value: T) -> Result<String> {
         self.db
             .set_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
+    }
+
+    pub fn set_bytes(&self, bytes: impl AsRef<[u8]>) -> Result<String> {
+        self.db.set_json(
+            &self.anchor,
+            &self.segments,
+            bytes_marker_value(&BinaryBytes::from(bytes.as_ref())),
+        )
     }
 
     #[cfg(feature = "crypto")]
@@ -1408,6 +1507,37 @@ impl Chain {
     pub fn remove<T: Serialize>(&self, value: T) -> Result<String> {
         self.db
             .remove_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
+    }
+
+    pub fn put_blob(
+        &self,
+        data: impl AsRef<[u8]>,
+        media_type: Option<&str>,
+    ) -> Result<BlobRef> {
+        let reference = self.db.store_blob(data.as_ref(), media_type)?;
+        self.db.put_json(
+            &self.anchor,
+            &self.segments,
+            blob_marker_value(&reference),
+        )?;
+        Ok(reference)
+    }
+
+    pub fn once_blob_ref(&self) -> Result<Option<BlobRef>> {
+        let Some(value) = self.once_json()? else {
+            return Ok(None);
+        };
+        let ParsedInput::Blob(reference) = parse_input(value, &self.path())? else {
+            return Ok(None);
+        };
+        Ok(Some(reference))
+    }
+
+    pub fn get_blob(&self) -> Result<Option<StoredBlob>> {
+        let Some(reference) = self.once_blob_ref()? else {
+            return Ok(None);
+        };
+        self.db.get_blob(&reference.id)
     }
 
     pub fn map(&self) -> Result<Vec<MapEntry>> {
@@ -1732,6 +1862,14 @@ impl Inner {
                 Some(FieldState {
                     value: FieldValue::Scalar(_),
                     ..
+                })
+                | Some(FieldState {
+                    value: FieldValue::Bytes(_),
+                    ..
+                })
+                | Some(FieldState {
+                    value: FieldValue::Blob(_),
+                    ..
                 }) => {
                     return Err(PrimadbError::TraversalIntoScalar {
                         node: current,
@@ -1790,7 +1928,7 @@ impl Inner {
             };
             match &field.value {
                 FieldValue::Link(target) => current = target.clone(),
-                FieldValue::Scalar(_) => {
+                FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {
                     return Err(PrimadbError::TraversalIntoScalar {
                         node: current,
                         field: segment.clone(),
@@ -1868,6 +2006,20 @@ impl Inner {
                     OperationValue::Scalar(scalar),
                 );
             }
+            ParsedInput::Bytes(bytes) => {
+                self.set_field(
+                    node.to_owned(),
+                    field.to_owned(),
+                    OperationValue::Bytes(bytes),
+                );
+            }
+            ParsedInput::Blob(reference) => {
+                self.set_field(
+                    node.to_owned(),
+                    field.to_owned(),
+                    OperationValue::Blob(reference),
+                );
+            }
             ParsedInput::Link(target) => {
                 self.ensure_node(&target);
                 self.set_field(
@@ -1936,6 +2088,30 @@ impl Inner {
                     node.to_owned(),
                     field.to_owned(),
                     OperationValue::Scalar(scalar),
+                );
+            }
+            ParsedInput::Bytes(bytes) => {
+                let signed = self.sign_scalar_for_path(
+                    path,
+                    bytes_marker_value(&bytes),
+                    certificate,
+                )?;
+                self.set_field(
+                    node.to_owned(),
+                    field.to_owned(),
+                    OperationValue::Scalar(signed),
+                );
+            }
+            ParsedInput::Blob(reference) => {
+                let signed = self.sign_scalar_for_path(
+                    path,
+                    blob_marker_value(&reference),
+                    certificate,
+                )?;
+                self.set_field(
+                    node.to_owned(),
+                    field.to_owned(),
+                    OperationValue::Scalar(signed),
                 );
             }
             ParsedInput::Link(target) => {
@@ -2009,7 +2185,7 @@ impl Inner {
                 self.write_object_to_node(&member_id, object, path)?;
                 member_id
             }
-            ParsedInput::Scalar(_) | ParsedInput::Set(_) => {
+            ParsedInput::Scalar(_) | ParsedInput::Bytes(_) | ParsedInput::Blob(_) | ParsedInput::Set(_) => {
                 return Err(PrimadbError::InvalidSetMember {
                     path: path.to_owned(),
                 });
@@ -2040,7 +2216,7 @@ impl Inner {
                 self.write_object_to_node_secure(&member_id, object, &member_id, certificate)?;
                 member_id
             }
-            ParsedInput::Scalar(_) | ParsedInput::Set(_) => {
+            ParsedInput::Scalar(_) | ParsedInput::Bytes(_) | ParsedInput::Blob(_) | ParsedInput::Set(_) => {
                 return Err(PrimadbError::InvalidSetMember {
                     path: path.to_owned(),
                 });
@@ -2159,7 +2335,9 @@ impl Inner {
         let accepted = match &op.action {
             OperationAction::SetField { node, field, value } => {
                 let links_to_ensure: Vec<NodeId> = match value {
-                    OperationValue::Scalar(_) => Vec::new(),
+                    OperationValue::Scalar(_)
+                    | OperationValue::Bytes(_)
+                    | OperationValue::Blob(_) => Vec::new(),
                     OperationValue::Link(target) => vec![target.clone()],
                     OperationValue::Set(members) => members.clone(),
                 };
@@ -2189,6 +2367,8 @@ impl Inner {
                     state.tombstones.remove(field);
                     let value = match value {
                         OperationValue::Scalar(value) => FieldValue::Scalar(value.clone()),
+                        OperationValue::Bytes(bytes) => FieldValue::Bytes(bytes.clone()),
+                        OperationValue::Blob(reference) => FieldValue::Blob(reference.clone()),
                         OperationValue::Link(target) => FieldValue::Link(target.clone()),
                         OperationValue::Set(members) => FieldValue::Set(SetState {
                             baseline: marker.clone(),
@@ -2455,6 +2635,8 @@ impl Inner {
         let field_path = format!("{node}/{field}");
         match value {
             FieldValue::Scalar(value) => self.materialize_scalar(&field_path, value),
+            FieldValue::Bytes(bytes) => bytes_marker_value(bytes),
+            FieldValue::Blob(reference) => blob_marker_value(reference),
             FieldValue::Link(target) => self.materialize_node(target, target, visited),
             FieldValue::Set(set) => JsonValue::Object(Map::from_iter([(
                 "$set".to_owned(),
@@ -2559,7 +2741,7 @@ impl Inner {
                         );
                     }
                 }
-                FieldValue::Scalar(_) => {}
+                FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
             }
         }
     }
@@ -2611,7 +2793,7 @@ impl Inner {
                     }
                 }
             }
-            FieldValue::Scalar(_) => {}
+            FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
         }
     }
 }
@@ -2627,6 +2809,12 @@ fn display_path(anchor: &str, segments: &[String]) -> String {
 fn parse_input(value: JsonValue, path: &str) -> Result<ParsedInput> {
     match value {
         JsonValue::Object(object) => {
+            if let Some(bytes) = parse_bytes_marker(&object, path)? {
+                return Ok(ParsedInput::Bytes(bytes));
+            }
+            if let Some(reference) = parse_blob_marker(&object, path)? {
+                return Ok(ParsedInput::Blob(reference));
+            }
             if let Some(target) = parse_link_marker(&object) {
                 return Ok(ParsedInput::Link(target));
             }
@@ -2678,6 +2866,39 @@ fn parse_link_marker(object: &Map<String, JsonValue>) -> Option<String> {
         })
 }
 
+fn parse_bytes_marker(object: &Map<String, JsonValue>, path: &str) -> Result<Option<BinaryBytes>> {
+    if object.len() != 1 {
+        return Ok(None);
+    }
+    let Some(value) = object.get("$bytes") else {
+        return Ok(None);
+    };
+    match value {
+        JsonValue::String(encoded) => BinaryBytes::from_base64(encoded)
+            .map(Some)
+            .map_err(|_| PrimadbError::InvalidBinaryMarker {
+                path: path.to_owned(),
+            }),
+        _ => Err(PrimadbError::InvalidBinaryMarker {
+            path: path.to_owned(),
+        }),
+    }
+}
+
+fn parse_blob_marker(object: &Map<String, JsonValue>, path: &str) -> Result<Option<BlobRef>> {
+    if object.len() != 1 {
+        return Ok(None);
+    }
+    let Some(value) = object.get("$blob") else {
+        return Ok(None);
+    };
+    serde_json::from_value::<BlobRef>(value.clone())
+        .map(Some)
+        .map_err(|_| PrimadbError::InvalidBlobMarker {
+            path: path.to_owned(),
+        })
+}
+
 fn parse_set_marker(object: &Map<String, JsonValue>) -> Option<Vec<JsonValue>> {
     if object.len() != 1 {
         return None;
@@ -2686,6 +2907,20 @@ fn parse_set_marker(object: &Map<String, JsonValue>) -> Option<Vec<JsonValue>> {
         JsonValue::Array(items) => Some(items.clone()),
         _ => None,
     })
+}
+
+fn bytes_marker_value(bytes: &BinaryBytes) -> JsonValue {
+    JsonValue::Object(Map::from_iter([(
+        "$bytes".to_owned(),
+        JsonValue::String(bytes.to_base64()),
+    )]))
+}
+
+fn blob_marker_value(reference: &BlobRef) -> JsonValue {
+    JsonValue::Object(Map::from_iter([(
+        "$blob".to_owned(),
+        serde_json::to_value(reference).unwrap_or(JsonValue::Null),
+    )]))
 }
 
 fn parse_member_reference(value: JsonValue, path: &str) -> Result<String> {
@@ -2890,7 +3125,7 @@ fn collect_snapshot_root_closure(
         };
         for field in node.fields.values() {
             match &field.value {
-                FieldValue::Scalar(_) => {}
+                FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
                 FieldValue::Link(target) => pending.push(target.clone()),
                 FieldValue::Set(set) => pending.extend(set.members.keys().cloned()),
             }
@@ -3666,6 +3901,89 @@ mod tests {
         assert_eq!(snapshot["value"], "world");
 
         let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn bytes_fields_round_trip_and_replicate() -> Result<()> {
+        let left = Primadb::with_replica_id("bytes-left");
+        let right = Primadb::with_replica_id("bytes-right");
+        let payload = vec![0, 7, 42, 255, 128, 1];
+
+        left.root("assets").field("avatar").put_bytes(payload.clone())?;
+        assert_eq!(
+            left.root("assets").field("avatar").once_bytes()?,
+            Some(payload.clone())
+        );
+
+        right.apply_operations(left.drain_pending_operations()?)?;
+        assert_eq!(right.root("assets").field("avatar").once_bytes()?, Some(payload));
+
+        let materialized = right.root("assets").field("avatar").once_json()?.unwrap();
+        assert_eq!(
+            materialized,
+            json!({"$bytes": crate::BinaryBytes::from(vec![0, 7, 42, 255, 128, 1]).to_base64()}),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn memory_blob_storage_round_trips_blob_reference_and_bytes() -> Result<()> {
+        let db = Primadb::with_replica_id("blob-a");
+        let binding = db.open_blob_storage(crate::BlobStorageConfig::Memory)?;
+        assert_eq!(binding.backend, "memory");
+
+        let payload = b"primadb-blob-smoke".to_vec();
+        let reference = db
+            .root("assets")
+            .field("archive")
+            .put_blob(payload.clone(), Some("application/octet-stream"))?;
+
+        assert_eq!(
+            db.root("assets").field("archive").once_blob_ref()?,
+            Some(reference.clone())
+        );
+
+        let blob = db.root("assets").field("archive").get_blob()?.unwrap();
+        assert_eq!(blob.reference, reference);
+        assert_eq!(blob.data.into_inner(), payload);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn file_blob_storage_restores_stored_blob_data() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("primadb-blob-{unique}"));
+
+        let first = Primadb::with_replica_id("blob-file-a");
+        let binding = first.open_blob_storage(crate::BlobStorageConfig::Files {
+            directory: root.display().to_string(),
+        })?;
+        assert_eq!(binding.backend, "files");
+
+        let reference = first
+            .root("assets")
+            .field("backup")
+            .put_blob(b"native-file-blob".to_vec(), Some("application/octet-stream"))?;
+
+        let second = Primadb::with_replica_id("blob-file-b");
+        second.open_blob_storage(crate::BlobStorageConfig::Files {
+            directory: root.display().to_string(),
+        })?;
+        second
+            .root("assets")
+            .field("backup")
+            .put(json!({"$blob": reference.clone()}))?;
+
+        let blob = second.root("assets").field("backup").get_blob()?.unwrap();
+        assert_eq!(blob.reference, reference);
+        assert_eq!(blob.data.into_inner(), b"native-file-blob".to_vec());
+
+        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 

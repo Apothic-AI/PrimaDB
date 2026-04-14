@@ -45,6 +45,17 @@ const relay = db.connectRelay({
   url: "ws://127.0.0.1:9010",
   retryIntervalMs: 1500,
 });
+db.openBlobStorage({
+  kind: "indexed_db",
+  databaseName: "primadb-browser-demo",
+  storeName: "blobs",
+  namespace: "main",
+});
+db.chain("assets").field("avatar").putBytes(new Uint8Array([1, 2, 3, 4]));
+await db
+  .chain("assets")
+  .field("archive")
+  .putBlob(new Uint8Array([5, 6, 7, 8]), "application/octet-stream");
 ```
 
 ## Threaded Build

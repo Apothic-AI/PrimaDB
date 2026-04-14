@@ -1,3 +1,5 @@
+use crate::binary::BinaryBytes;
+use crate::blob::BlobRef;
 use crate::clock::VersionMarker;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -16,6 +18,8 @@ pub struct SetState {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum FieldValue {
     Scalar(JsonValue),
+    Bytes(BinaryBytes),
+    Blob(BlobRef),
     Link(NodeId),
     Set(SetState),
 }

@@ -1,5 +1,7 @@
 #[cfg(feature = "crypto")]
 mod auth;
+mod binary;
+mod blob;
 mod clock;
 mod compat;
 #[cfg(feature = "crypto")]
@@ -33,6 +35,13 @@ pub use auth::{
     SecureSyncFrame, SecurityState, SignedValueClaims, StoredSnapshot, UserGrant, UserRecord,
     inspect_signed_field_value, owner_public_key_for_path, InspectedSignedFieldValue,
 };
+pub use binary::BinaryBytes;
+pub use blob::{
+    BlobRef, BlobStorageBinding, BlobStorageConfig, BlobStore, MemoryBlobStore, StoredBlob,
+    blob_ref_for_data,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use blob::FileBlobStore;
 pub use clock::{HybridClock, Revision, VersionMarker};
 pub use compat::{Gun, GunChain, GunCompatOptions};
 #[cfg(feature = "crypto")]

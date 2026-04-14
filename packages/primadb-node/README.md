@@ -8,6 +8,8 @@ Current surface:
 
 - `Primadb` and `Chain` for local graph operations
 - durable native storage through `openDurableStorage(...)`
+- content-addressed native blob storage through `openBlobStorage(...)`
+- first-class binary helpers through `putBytes()`, `onceBytes()`, `putBlob()`, and `getBlob()`
 - subscriptions
 - native relay sync through `connectRelay(...)`
 - native WebRTC mesh through `connectMesh(...)`
@@ -30,12 +32,21 @@ db.openDurableStorage({
   kind: "segment_files",
   directory: "/tmp/primadb-node-demo",
 });
+db.openBlobStorage({
+  kind: "files",
+  directory: "/tmp/primadb-node-demo-blobs",
+});
 
 db.chain("notes").field("items").set({
   title: "Node note",
   body: "Stored through the native addon",
   createdAt: new Date().toISOString(),
 });
+db.chain("assets").field("avatar").putBytes(Buffer.from([1, 2, 3, 4]));
+await db
+  .chain("assets")
+  .field("archive")
+  .putBlob(Buffer.from([5, 6, 7, 8]), "application/octet-stream");
 ```
 
 ## Smoke Tests

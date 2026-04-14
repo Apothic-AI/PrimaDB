@@ -1,8 +1,9 @@
-use napi::bindgen_prelude::{Error, Result, Status};
+use napi::bindgen_prelude::{Buffer, Error, Result, Status};
 use napi_derive::napi;
 use primadb::{
-    Chain as CoreChain, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
-    LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
+    DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig, LexSpec, MeshConfig,
+    NativeWebRtcMesh as CoreWebRtcMesh,
     NativeWebSocketSync as CoreWebSocketSync, Operation, Primadb as CorePrimadb, QuerySpec,
     RelayClientConfig, RemotePath, Subscription as CoreSubscription,
 };
@@ -33,6 +34,13 @@ fn binding_to_json(binding: CoreDurableStorageBinding) -> JsonValue {
         "incremental": binding.incremental,
         "loadedExisting": binding.loaded_existing,
         "autoPersist": binding.auto_persist,
+    })
+}
+
+fn blob_binding_to_json(binding: CoreBlobStorageBinding) -> JsonValue {
+    json!({
+        "backend": binding.backend,
+        "contentAddressed": binding.content_addressed,
     })
 }
 
@@ -168,6 +176,13 @@ impl Primadb {
         Ok(binding_to_json(binding))
     }
 
+    #[napi(js_name = "openBlobStorage")]
+    pub fn open_blob_storage(&self, config: JsonValue) -> Result<JsonValue> {
+        let config: BlobStorageConfig = from_json(config)?;
+        let binding = self.inner.open_blob_storage(config).map_err(to_napi_error)?;
+        Ok(blob_binding_to_json(binding))
+    }
+
     #[napi(js_name = "connectRelay")]
     pub async fn connect_relay(&self, config: JsonValue) -> Result<WebSocketSync> {
         let config: RelayClientConfig = from_json(config)?;
@@ -206,6 +221,11 @@ impl Chain {
         self.inner.put(value).map_err(to_napi_error)
     }
 
+    #[napi(js_name = "putBytes")]
+    pub fn put_bytes(&self, bytes: Buffer) -> Result<()> {
+        self.inner.put_bytes(bytes.to_vec()).map_err(to_napi_error)
+    }
+
     #[napi(js_name = "putSigned")]
     pub fn put_signed(&self, value: JsonValue, certificate: Option<String>) -> Result<()> {
         self.inner
@@ -216,6 +236,14 @@ impl Chain {
     #[napi]
     pub fn once(&self) -> Result<JsonValue> {
         Ok(self.inner.once_json().map_err(to_napi_error)?.unwrap_or(JsonValue::Null))
+    }
+
+    #[napi(js_name = "onceBytes")]
+    pub fn once_bytes(&self) -> Result<Option<Buffer>> {
+        self.inner
+            .once_bytes()
+            .map(|value| value.map(Buffer::from))
+            .map_err(to_napi_error)
     }
 
     #[napi]
@@ -238,6 +266,28 @@ impl Chain {
     #[napi]
     pub fn remove(&self, value: JsonValue) -> Result<String> {
         self.inner.remove(value).map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "putBlob")]
+    pub fn put_blob(&self, bytes: Buffer, media_type: Option<String>) -> Result<JsonValue> {
+        to_json(
+            self.inner
+                .put_blob(bytes.to_vec(), media_type.as_deref())
+                .map_err(to_napi_error)?,
+        )
+    }
+
+    #[napi(js_name = "blobRef")]
+    pub fn blob_ref(&self) -> Result<JsonValue> {
+        to_json(self.inner.once_blob_ref().map_err(to_napi_error)?)
+    }
+
+    #[napi(js_name = "getBlob")]
+    pub fn get_blob(&self) -> Result<Option<Buffer>> {
+        self.inner
+            .get_blob()
+            .map(|value| value.map(|blob| Buffer::from(blob.data.into_inner())))
+            .map_err(to_napi_error)
     }
 
     #[napi]

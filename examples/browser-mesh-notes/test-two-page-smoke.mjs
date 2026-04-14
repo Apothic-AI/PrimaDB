@@ -180,6 +180,45 @@ async function main() {
       );
     }, noteTitle, { timeout: 30_000 });
 
+    const binaryPayload = [0, 9, 42, 255, 7];
+    await page1.evaluate(async ({ room, payload }) => {
+      const demo = globalThis.meshDemo;
+      const chain = demo.db.chain("binary").field(room).field("bytes");
+      chain.putBytes(new Uint8Array(payload));
+      demo.mesh.flushPending();
+    }, { room: ROOM, payload: binaryPayload });
+    await page2.waitForFunction(
+      ({ room, payload }) => {
+        const demo = globalThis.meshDemo;
+        const bytes = demo.db.chain("binary").field(room).field("bytes").onceBytes();
+        return bytes != null && JSON.stringify(Array.from(bytes)) === JSON.stringify(payload);
+      },
+      { room: ROOM, payload: binaryPayload },
+      { timeout: 30_000 },
+    );
+
+    const blobPayload = [13, 37, 99, 4, 77, 18];
+    const blobReference = await page1.evaluate(async ({ room, payload }) => {
+      const demo = globalThis.meshDemo;
+      demo.db.enableIndexedDbBlobStorage("primadb-browser-mesh-binary", "blobs", room);
+      return await demo.db
+        .chain("binary")
+        .field(room)
+        .field("blob")
+        .putBlob(new Uint8Array(payload), "application/octet-stream");
+    }, { room: ROOM, payload: blobPayload });
+    await page2.waitForFunction(
+      (room) => globalThis.meshDemo.db.chain("binary").field(room).field("blob").blobRef() != null,
+      ROOM,
+      { timeout: 30_000 },
+    );
+    const restoredBlob = await page2.evaluate(async ({ room }) => {
+      const demo = globalThis.meshDemo;
+      demo.db.enableIndexedDbBlobStorage("primadb-browser-mesh-binary", "blobs", room);
+      const bytes = await demo.db.chain("binary").field(room).field("blob").getBlob();
+      return bytes == null ? null : Array.from(bytes);
+    }, { room: ROOM });
+
     const after = await page2.locator(".note-title").count();
     const result = {
       url,
@@ -195,14 +234,31 @@ async function main() {
       before,
       after,
       title: noteTitle,
+      binaryPayload,
+      blobReference,
+      blobPayload,
+      blobRestored: restoredBlob,
       live_note_replicated: after >= before + 1,
+      bytes_replicated: JSON.stringify(restoredBlob == null ? [] : restoredBlob) === JSON.stringify(blobPayload),
       default_p2p_confirmed: after >= before + 1,
     };
 
+    result.bytes_replicated =
+      JSON.stringify(
+        await page2.evaluate(
+          (room) => {
+            const bytes = globalThis.meshDemo.db.chain("binary").field(room).field("bytes").onceBytes();
+            return bytes == null ? null : Array.from(bytes);
+          },
+          ROOM,
+        ),
+      ) === JSON.stringify(binaryPayload);
+    result.blob_restored = JSON.stringify(restoredBlob) === JSON.stringify(blobPayload);
+
     console.log(JSON.stringify(result, null, 2));
 
-    if (!result.default_p2p_confirmed) {
-      throw new Error("Default mesh note did not replicate live");
+    if (!result.default_p2p_confirmed || !result.bytes_replicated || !result.blob_restored) {
+      throw new Error("Default mesh binary smoke did not complete successfully");
     }
 
   } finally {

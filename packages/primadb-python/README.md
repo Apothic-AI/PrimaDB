@@ -8,6 +8,8 @@ Current surface:
 
 - `Primadb` and `Chain` for local graph operations
 - durable native storage through `open_durable_storage(...)`
+- content-addressed native blob storage through `open_blob_storage(...)`
+- first-class binary helpers through `put_bytes()`, `once_bytes()`, `put_blob()`, and `get_blob()`
 - subscriptions
 - native relay sync through `connect_relay(...)`
 - native WebRTC mesh through `connect_mesh(...)`
@@ -31,12 +33,23 @@ db.open_durable_storage(
         "directory": "/tmp/primadb-python-demo",
     }
 )
+db.open_blob_storage(
+    {
+        "kind": "files",
+        "directory": "/tmp/primadb-python-demo-blobs",
+    }
+)
 
 db.chain("notes").field("items").set(
     {
         "title": "Python note",
         "body": "Stored through the native extension",
     }
+)
+db.chain("assets").field("avatar").put_bytes(b"\x01\x02\x03\x04")
+db.chain("assets").field("archive").put_blob(
+    b"\x05\x06\x07\x08",
+    "application/octet-stream",
 )
 ```
 

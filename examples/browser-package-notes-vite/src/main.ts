@@ -116,6 +116,13 @@ notes.on(() => {
 });
 
 renderNotes();
+Object.assign(globalThis, {
+  packageDemo: {
+    db,
+    notes,
+    mesh,
+  },
+});
 
 app.form.addEventListener("submit", (event) => {
   event.preventDefault();

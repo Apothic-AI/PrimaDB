@@ -68,6 +68,8 @@ async function main() {
   await ensureSeedNote();
   await render();
 
+  globalThis.meshDemo = state;
+
   globalThis.addEventListener("beforeunload", () => {
     if (state.statusTimer) {
       clearInterval(state.statusTimer);

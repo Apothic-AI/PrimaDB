@@ -1,7 +1,8 @@
 use crate::{
-    Chain, ChangeSubscription, DurableStorageBinding, DurableStorageConfig, HybridClock,
-    IceServerConfig, LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode,
-    Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind,
+    BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription,
+    DurableStorageBinding, DurableStorageConfig, HybridClock, IceServerConfig, LexEntry, LexSpec,
+    MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, Operation, PeerRecommendation, Primadb,
+    PullRequest, PullRequestKind,
     PullResponse, PullResponseBody, QuerySpec, RelayClientConfig, RemotePath, RemoteResult,
     RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, Subscription,
     SyncEnvelope, SyncFrame, build_storage_metadata, build_storage_transaction,
@@ -38,11 +39,13 @@ pub fn parallel_thread_count_js() -> usize {
 pub struct WasmPrimadb {
     inner: Primadb,
     durable_storage_hooks: Rc<RefCell<Vec<WasmDurableStorageHook>>>,
+    blob_storage: Rc<RefCell<Option<WasmBlobStorageConfig>>>,
 }
 
 #[wasm_bindgen(js_name = Chain)]
 pub struct WasmChain {
     inner: Chain,
+    blob_storage: Rc<RefCell<Option<WasmBlobStorageConfig>>>,
 }
 
 #[wasm_bindgen(js_name = Subscription)]
@@ -68,6 +71,11 @@ pub struct WasmIndexedDbSegmentPersistence {
     subscription: Option<ChangeSubscription>,
 }
 
+#[wasm_bindgen(js_name = IndexedDbBlobStorage)]
+pub struct WasmIndexedDbBlobStorage {
+    config: WasmBlobStorageConfig,
+}
+
 #[allow(dead_code)]
 enum WasmDurableStorageHook {
     Snapshot {
@@ -76,6 +84,13 @@ enum WasmDurableStorageHook {
     Segment {
         _hook: WasmIndexedDbSegmentPersistence,
     },
+}
+
+#[derive(Clone)]
+struct WasmBlobStorageConfig {
+    database_name: String,
+    store_name: String,
+    namespace: String,
 }
 
 #[derive(Debug)]
@@ -199,6 +214,7 @@ impl WasmPrimadb {
         Self {
             inner,
             durable_storage_hooks: Rc::new(RefCell::new(Vec::new())),
+            blob_storage: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -210,6 +226,7 @@ impl WasmPrimadb {
     pub fn chain(&self, root: String) -> WasmChain {
         WasmChain {
             inner: self.inner.root(root),
+            blob_storage: self.blob_storage.clone(),
         }
     }
 
@@ -655,6 +672,59 @@ impl WasmPrimadb {
         Ok(hook)
     }
 
+    #[wasm_bindgen(js_name = openBlobStorage)]
+    pub fn open_blob_storage(&self, config: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let config: BlobStorageConfig =
+            serde_wasm_bindgen::from_value(config).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        match config {
+            BlobStorageConfig::IndexedDb {
+                database_name,
+                store_name,
+                namespace,
+            } => {
+                *self.blob_storage.borrow_mut() = Some(WasmBlobStorageConfig {
+                    database_name,
+                    store_name,
+                    namespace,
+                });
+                to_js(&BlobStorageBinding {
+                    backend: "indexed_db".to_owned(),
+                    content_addressed: true,
+                })
+            }
+            BlobStorageConfig::Memory => {
+                self.inner
+                    .open_blob_storage(BlobStorageConfig::Memory)
+                    .map_err(to_js_error)?;
+                *self.blob_storage.borrow_mut() = None;
+                to_js(&BlobStorageBinding {
+                    backend: "memory".to_owned(),
+                    content_addressed: true,
+                })
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            BlobStorageConfig::Files { .. } => Err(JsValue::from_str(
+                "file blob storage is not available on wasm targets",
+            )),
+        }
+    }
+
+    #[wasm_bindgen(js_name = enableIndexedDbBlobStorage)]
+    pub fn enable_indexed_db_blob_storage(
+        &self,
+        database_name: String,
+        store_name: String,
+        namespace: String,
+    ) -> WasmIndexedDbBlobStorage {
+        let config = WasmBlobStorageConfig {
+            database_name,
+            store_name,
+            namespace,
+        };
+        *self.blob_storage.borrow_mut() = Some(config.clone());
+        WasmIndexedDbBlobStorage { config }
+    }
+
     #[wasm_bindgen(js_name = connectWebSocket)]
     pub fn connect_web_socket(
         &self,
@@ -1039,6 +1109,7 @@ impl WasmChain {
     pub fn field(&self, key: String) -> WasmChain {
         WasmChain {
             inner: self.inner.field(key),
+            blob_storage: self.blob_storage.clone(),
         }
     }
 
@@ -1047,7 +1118,14 @@ impl WasmChain {
     }
 
     pub fn put(&self, value: JsValue) -> std::result::Result<(), JsValue> {
-        self.inner.put(js_to_json(value)?).map_err(to_js_error)
+        self.inner
+            .put(js_to_supported_json(value)?)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = putBytes)]
+    pub fn put_bytes(&self, bytes: js_sys::Uint8Array) -> std::result::Result<(), JsValue> {
+        self.inner.put_bytes(bytes.to_vec()).map_err(to_js_error)
     }
 
     #[cfg(feature = "crypto")]
@@ -1058,19 +1136,29 @@ impl WasmChain {
         certificate: Option<String>,
     ) -> std::result::Result<(), JsValue> {
         self.inner
-            .put_signed(js_to_json(value)?, certificate)
+            .put_signed(js_to_supported_json(value)?, certificate)
             .map_err(to_js_error)
     }
 
     pub fn once(&self) -> std::result::Result<JsValue, JsValue> {
         match self.inner.once_json().map_err(to_js_error)? {
-            Some(value) => to_js(&value),
+            Some(value) => json_to_supported_js(&value),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = onceBytes)]
+    pub fn once_bytes(&self) -> std::result::Result<JsValue, JsValue> {
+        match self.inner.once_bytes().map_err(to_js_error)? {
+            Some(bytes) => Ok(js_sys::Uint8Array::from(bytes.as_slice()).into()),
             None => Ok(JsValue::NULL),
         }
     }
 
     pub fn set(&self, value: JsValue) -> std::result::Result<String, JsValue> {
-        self.inner.set(js_to_json(value)?).map_err(to_js_error)
+        self.inner
+            .set(js_to_supported_json(value)?)
+            .map_err(to_js_error)
     }
 
     #[cfg(feature = "crypto")]
@@ -1081,12 +1169,14 @@ impl WasmChain {
         certificate: Option<String>,
     ) -> std::result::Result<String, JsValue> {
         self.inner
-            .set_signed(js_to_json(value)?, certificate)
+            .set_signed(js_to_supported_json(value)?, certificate)
             .map_err(to_js_error)
     }
 
     pub fn remove(&self, value: JsValue) -> std::result::Result<String, JsValue> {
-        self.inner.remove(js_to_json(value)?).map_err(to_js_error)
+        self.inner
+            .remove(js_to_supported_json(value)?)
+            .map_err(to_js_error)
     }
 
     pub fn unset(&self) -> std::result::Result<(), JsValue> {
@@ -1095,21 +1185,21 @@ impl WasmChain {
 
     pub fn map(&self) -> std::result::Result<JsValue, JsValue> {
         let entries = self.inner.map().map_err(to_js_error)?;
-        to_js(&entries)
+        map_entries_to_js(&entries)
     }
 
     pub fn query(&self, spec: JsValue) -> std::result::Result<JsValue, JsValue> {
         let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let entries = self.inner.query(spec).map_err(to_js_error)?;
-        to_js(&entries)
+        map_entries_to_js(&entries)
     }
 
     pub fn scan(&self, spec: JsValue) -> std::result::Result<JsValue, JsValue> {
         let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let entries = self.inner.scan(spec).map_err(to_js_error)?;
-        to_js(&entries)
+        lex_entries_to_js(&entries)
     }
 
     #[wasm_bindgen(js_name = firstQuery)]
@@ -1117,7 +1207,7 @@ impl WasmChain {
         let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         match self.inner.first(spec).map_err(to_js_error)? {
-            Some(value) => to_js(&value),
+            Some(value) => map_entry_to_js(&value),
             None => Ok(JsValue::NULL),
         }
     }
@@ -1130,7 +1220,7 @@ impl WasmChain {
         spawn_local(async move {
             while let Ok(snapshot) = receiver.recv().await {
                 let js_value = match snapshot {
-                    Some(value) => serde_wasm_bindgen::to_value(&value).unwrap_or(JsValue::NULL),
+                    Some(value) => json_to_supported_js(&value).unwrap_or(JsValue::NULL),
                     None => JsValue::NULL,
                 };
                 let _ = callback.call1(&JsValue::NULL, &js_value);
@@ -1140,6 +1230,57 @@ impl WasmChain {
         Ok(WasmSubscription {
             inner: Some(subscription),
         })
+    }
+
+    #[wasm_bindgen(js_name = putBlob)]
+    pub async fn put_blob(
+        &self,
+        data: js_sys::Uint8Array,
+        media_type: Option<String>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let Some(config) = self.blob_storage.borrow().clone() else {
+            return Err(JsValue::from_str("blob storage is not configured"));
+        };
+        let reference = save_blob_indexed_db(
+            &config.database_name,
+            &config.store_name,
+            &config.namespace,
+            data.to_vec(),
+            media_type,
+        )
+        .await?;
+        self.inner
+            .put(serde_json::json!({ "$blob": reference.clone() }))
+            .map_err(to_js_error)?;
+        to_js(&reference)
+    }
+
+    #[wasm_bindgen(js_name = blobRef)]
+    pub fn blob_ref(&self) -> std::result::Result<JsValue, JsValue> {
+        match self.inner.once_blob_ref().map_err(to_js_error)? {
+            Some(reference) => to_js(&reference),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = getBlob)]
+    pub async fn get_blob(&self) -> std::result::Result<JsValue, JsValue> {
+        let Some(reference) = self.inner.once_blob_ref().map_err(to_js_error)? else {
+            return Ok(JsValue::NULL);
+        };
+        let Some(config) = self.blob_storage.borrow().clone() else {
+            return Err(JsValue::from_str("blob storage is not configured"));
+        };
+        match load_blob_indexed_db(
+            &config.database_name,
+            &config.store_name,
+            &config.namespace,
+            &reference.id,
+        )
+        .await? {
+            Some(blob) => Ok(js_sys::Uint8Array::from(blob.data.as_slice()).into()),
+            None => Ok(JsValue::NULL),
+        }
     }
 }
 
@@ -1189,6 +1330,49 @@ impl WasmIndexedDbSegmentPersistence {
 
     pub fn close(&mut self) {
         self.subscription.take();
+    }
+}
+
+#[wasm_bindgen(js_class = IndexedDbBlobStorage)]
+impl WasmIndexedDbBlobStorage {
+    pub async fn put(
+        &self,
+        data: js_sys::Uint8Array,
+        media_type: Option<String>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let reference = save_blob_indexed_db(
+            &self.config.database_name,
+            &self.config.store_name,
+            &self.config.namespace,
+            data.to_vec(),
+            media_type,
+        )
+        .await?;
+        to_js(&reference)
+    }
+
+    pub async fn get(&self, blob_id: String) -> std::result::Result<JsValue, JsValue> {
+        match load_blob_indexed_db(
+            &self.config.database_name,
+            &self.config.store_name,
+            &self.config.namespace,
+            &blob_id,
+        )
+        .await? {
+            Some(blob) => Ok(js_sys::Uint8Array::from(blob.data.as_slice()).into()),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = hasBlob)]
+    pub async fn has_blob(&self, blob_id: String) -> std::result::Result<bool, JsValue> {
+        has_blob_indexed_db(
+            &self.config.database_name,
+            &self.config.store_name,
+            &self.config.namespace,
+            &blob_id,
+        )
+        .await
     }
 }
 
@@ -1243,7 +1427,7 @@ impl WasmWebSocketSync {
             .await?
         {
             RemoteResult::Get { value } => match value {
-                Some(value) => to_js(&value),
+                Some(value) => json_to_supported_js(&value),
                 None => Ok(JsValue::NULL),
             },
             other => Err(JsValue::from_str(&format!(
@@ -1270,7 +1454,7 @@ impl WasmWebSocketSync {
         )
         .await?
         {
-            RemoteResult::Query { entries } => to_js(&entries),
+            RemoteResult::Query { entries } => map_entries_to_js(&entries),
             other => Err(JsValue::from_str(&format!(
                 "expected query result, received {other:?}"
             ))),
@@ -1291,7 +1475,7 @@ impl WasmWebSocketSync {
         match request_remote_result_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
             .await?
         {
-            RemoteResult::Lex { entries } => to_js(&entries),
+            RemoteResult::Lex { entries } => lex_entries_to_js(&entries),
             other => Err(JsValue::from_str(&format!(
                 "expected lex result, received {other:?}"
             ))),
@@ -2916,6 +3100,82 @@ async fn load_snapshot_string_indexed_db(
     }
 }
 
+fn blob_namespace_prefix(namespace: &str) -> String {
+    format!("blob/{namespace}/")
+}
+
+async fn save_blob_indexed_db(
+    database_name: &str,
+    store_name: &str,
+    namespace: &str,
+    data: Vec<u8>,
+    media_type: Option<String>,
+) -> std::result::Result<BlobRef, JsValue> {
+    let reference = crate::blob_ref_for_data(&data, media_type.as_deref());
+    let db = open_indexed_db(database_name, store_name).await?;
+    let transaction =
+        db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readwrite)?;
+    let store = transaction.object_store(store_name)?;
+    let prefix = blob_namespace_prefix(namespace);
+    let meta_key = format!("{prefix}meta/{}", encode_component(&reference.id));
+    let data_key = format!("{prefix}data/{}", encode_component(&reference.id));
+    let meta_value =
+        serde_wasm_bindgen::to_value(&reference).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let meta_request = store.put_with_key(&meta_value, &JsValue::from_str(&meta_key))?;
+    let data_value = js_sys::Uint8Array::from(data.as_slice());
+    let data_request = store.put_with_key(&data_value, &JsValue::from_str(&data_key))?;
+    let _ = await_idb_request(meta_request.unchecked_ref()).await?;
+    let _ = await_idb_request(data_request.unchecked_ref()).await?;
+    await_idb_transaction(&transaction).await?;
+    Ok(reference)
+}
+
+async fn load_blob_indexed_db(
+    database_name: &str,
+    store_name: &str,
+    namespace: &str,
+    blob_id: &str,
+) -> std::result::Result<Option<crate::StoredBlob>, JsValue> {
+    let db = open_indexed_db(database_name, store_name).await?;
+    let transaction =
+        db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readonly)?;
+    let store = transaction.object_store(store_name)?;
+    let prefix = blob_namespace_prefix(namespace);
+    let meta_key = format!("{prefix}meta/{}", encode_component(blob_id));
+    let data_key = format!("{prefix}data/{}", encode_component(blob_id));
+    let meta_request = store.get(&JsValue::from_str(&meta_key))?;
+    let data_request = store.get(&JsValue::from_str(&data_key))?;
+    let meta_value = await_idb_request(meta_request.unchecked_ref()).await?;
+    if meta_value.is_undefined() || meta_value.is_null() {
+        await_idb_transaction(&transaction).await?;
+        return Ok(None);
+    }
+    let data_value = await_idb_request(data_request.unchecked_ref()).await?;
+    await_idb_transaction(&transaction).await?;
+    if data_value.is_undefined() || data_value.is_null() {
+        return Ok(None);
+    }
+    let reference: BlobRef =
+        serde_wasm_bindgen::from_value(meta_value).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    Ok(Some(crate::StoredBlob {
+        reference,
+        data: crate::BinaryBytes::from(js_sys::Uint8Array::new(&data_value).to_vec()),
+    }))
+}
+
+async fn has_blob_indexed_db(
+    database_name: &str,
+    store_name: &str,
+    namespace: &str,
+    blob_id: &str,
+) -> std::result::Result<bool, JsValue> {
+    Ok(
+        load_blob_indexed_db(database_name, store_name, namespace, blob_id)
+            .await?
+            .is_some(),
+    )
+}
+
 fn segment_namespace_prefix(namespace: &str) -> String {
     format!("segment/{namespace}/")
 }
@@ -3226,6 +3486,130 @@ fn browser_window() -> std::result::Result<web_sys::Window, JsValue> {
 
 fn js_to_json(value: JsValue) -> std::result::Result<JsonValue, JsValue> {
     serde_wasm_bindgen::from_value(value).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn js_to_supported_json(value: JsValue) -> std::result::Result<JsonValue, JsValue> {
+    if value.is_null() || value.is_undefined() {
+        return Ok(JsonValue::Null);
+    }
+    if js_sys::ArrayBuffer::instanceof(&value) {
+        let bytes = js_sys::Uint8Array::new(&value).to_vec();
+        return Ok(serde_json::json!({
+            "$bytes": crate::BinaryBytes::from(bytes).to_base64(),
+        }));
+    }
+    if js_sys::Uint8Array::instanceof(&value) {
+        let bytes = js_sys::Uint8Array::new(&value).to_vec();
+        return Ok(serde_json::json!({
+            "$bytes": crate::BinaryBytes::from(bytes).to_base64(),
+        }));
+    }
+    if js_sys::Array::is_array(&value) {
+        let array = js_sys::Array::from(&value);
+        let mut items = Vec::with_capacity(array.length() as usize);
+        for index in 0..array.length() {
+            items.push(js_to_supported_json(array.get(index))?);
+        }
+        return Ok(JsonValue::Array(items));
+    }
+    if value.is_object() {
+        let object = js_sys::Object::from(value.clone());
+        let keys = js_sys::Object::keys(&object);
+        let mut map = serde_json::Map::new();
+        for index in 0..keys.length() {
+            let key = keys.get(index).as_string().unwrap_or_default();
+            let field = js_sys::Reflect::get(&object, &JsValue::from_str(&key))?;
+            map.insert(key, js_to_supported_json(field)?);
+        }
+        return Ok(JsonValue::Object(map));
+    }
+    js_to_json(value)
+}
+
+fn json_to_supported_js(value: &JsonValue) -> std::result::Result<JsValue, JsValue> {
+    match value {
+        JsonValue::Null => Ok(JsValue::NULL),
+        JsonValue::Bool(value) => Ok(JsValue::from_bool(*value)),
+        JsonValue::Number(value) => serde_wasm_bindgen::to_value(value)
+            .map_err(|error| JsValue::from_str(&error.to_string())),
+        JsonValue::String(value) => Ok(JsValue::from_str(value)),
+        JsonValue::Array(items) => {
+            let array = js_sys::Array::new();
+            for item in items {
+                array.push(&json_to_supported_js(item)?);
+            }
+            Ok(array.into())
+        }
+        JsonValue::Object(object) => {
+            if object.len() == 1 {
+                if let Some(JsonValue::String(encoded)) = object.get("$bytes") {
+                    let bytes = crate::BinaryBytes::from_base64(encoded)
+                        .map_err(|error| JsValue::from_str(&error))?;
+                    return Ok(js_sys::Uint8Array::from(bytes.as_slice()).into());
+                }
+            }
+            let js_object = js_sys::Object::new();
+            for (key, value) in object {
+                js_sys::Reflect::set(
+                    &js_object,
+                    &JsValue::from_str(key),
+                    &json_to_supported_js(value)?,
+                )?;
+            }
+            Ok(js_object.into())
+        }
+    }
+}
+
+fn map_entry_to_js(entry: &MapEntry) -> std::result::Result<JsValue, JsValue> {
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("key"),
+        &JsValue::from_str(&entry.key),
+    )?;
+    js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("value"),
+        &json_to_supported_js(&entry.value)?,
+    )?;
+    Ok(object.into())
+}
+
+fn map_entries_to_js(entries: &[MapEntry]) -> std::result::Result<JsValue, JsValue> {
+    let array = js_sys::Array::new();
+    for entry in entries {
+        array.push(&map_entry_to_js(entry)?);
+    }
+    Ok(array.into())
+}
+
+fn lex_entry_to_js(entry: &LexEntry) -> std::result::Result<JsValue, JsValue> {
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("path"),
+        &JsValue::from_str(&entry.path),
+    )?;
+    js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("key"),
+        &JsValue::from_str(&entry.key),
+    )?;
+    js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("value"),
+        &json_to_supported_js(&entry.value)?,
+    )?;
+    Ok(object.into())
+}
+
+fn lex_entries_to_js(entries: &[LexEntry]) -> std::result::Result<JsValue, JsValue> {
+    let array = js_sys::Array::new();
+    for entry in entries {
+        array.push(&lex_entry_to_js(entry)?);
+    }
+    Ok(array.into())
 }
 
 fn to_js<T>(value: &T) -> std::result::Result<JsValue, JsValue>

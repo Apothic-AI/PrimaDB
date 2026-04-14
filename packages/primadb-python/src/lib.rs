@@ -1,12 +1,13 @@
 use primadb::{
-    Chain as CoreChain, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
-    LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
+    DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig, LexSpec, MeshConfig,
+    NativeWebRtcMesh as CoreWebRtcMesh,
     NativeWebSocketSync as CoreWebSocketSync, Operation, Primadb as CorePrimadb, QuerySpec,
     RelayClientConfig, RemotePath, Subscription as CoreSubscription,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyBytes};
 use pythonize::{depythonize, pythonize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -49,6 +50,13 @@ fn binding_to_json(binding: CoreDurableStorageBinding) -> JsonValue {
         "incremental": binding.incremental,
         "loadedExisting": binding.loaded_existing,
         "autoPersist": binding.auto_persist,
+    })
+}
+
+fn blob_binding_to_json(binding: CoreBlobStorageBinding) -> JsonValue {
+    json!({
+        "backend": binding.backend,
+        "contentAddressed": binding.content_addressed,
     })
 }
 
@@ -174,6 +182,12 @@ impl Primadb {
         to_py(py, binding_to_json(binding))
     }
 
+    fn open_blob_storage(&self, py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let config: BlobStorageConfig = from_py(config)?;
+        let binding = self.inner.open_blob_storage(config).map_err(to_py_err)?;
+        to_py(py, blob_binding_to_json(binding))
+    }
+
     fn connect_relay(&self, py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<WebSocketSync> {
         let config: RelayClientConfig = from_py(config)?;
         let sync = py.detach(|| runtime().block_on(self.inner.connect_relay(config)))
@@ -210,6 +224,13 @@ impl Chain {
         self.inner.put(value).map_err(to_py_err)
     }
 
+    fn put_bytes(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let bytes = value
+            .extract::<Vec<u8>>()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        self.inner.put_bytes(bytes).map_err(to_py_err)
+    }
+
     #[pyo3(signature = (value, certificate=None))]
     fn put_signed(&self, value: &Bound<'_, PyAny>, certificate: Option<String>) -> PyResult<()> {
         let value: JsonValue = from_py(value)?;
@@ -220,6 +241,13 @@ impl Chain {
 
     fn once(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         to_py(py, self.inner.once_json().map_err(to_py_err)?)
+    }
+
+    fn once_bytes(&self, py: Python<'_>) -> PyResult<Option<Py<PyBytes>>> {
+        self.inner
+            .once_bytes()
+            .map(|value| value.map(|bytes| PyBytes::new(py, &bytes).unbind()))
+            .map_err(to_py_err)
     }
 
     fn unset(&self) -> PyResult<()> {
@@ -242,6 +270,36 @@ impl Chain {
     fn remove(&self, value: &Bound<'_, PyAny>) -> PyResult<String> {
         let value: JsonValue = from_py(value)?;
         self.inner.remove(value).map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (value, media_type=None))]
+    fn put_blob(
+        &self,
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+        media_type: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let bytes = value
+            .extract::<Vec<u8>>()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let reference = self
+            .inner
+            .put_blob(bytes, media_type.as_deref())
+            .map_err(to_py_err)?;
+        to_py(py, reference)
+    }
+
+    fn blob_ref(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.once_blob_ref().map_err(to_py_err)?)
+    }
+
+    fn get_blob(&self, py: Python<'_>) -> PyResult<Option<Py<PyBytes>>> {
+        self.inner
+            .get_blob()
+            .map(|value| {
+                value.map(|blob| PyBytes::new(py, &blob.data.into_inner()).unbind())
+            })
+            .map_err(to_py_err)
     }
 
     fn map(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

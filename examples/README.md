@@ -6,16 +6,16 @@
 - `browser-relay-notes/`: Browser task board using Primadb's shared relay client facade, automatic IndexedDB persistence, peer recommendations, and remote `get/query/lex/snapshot` over the relay.
   - Includes `test-browser-native-smoke.sh`, a browser/native relay smoke test.
 - `browser-mesh-notes/`: Default browser mesh board using Primadb's shared `connectMesh(...)` facade, relay-backed signaling by default, optional `BroadcastChannel` fallback, and direct sync over WebRTC data channels.
-  - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for the default WebRTC mesh build.
+  - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for the default WebRTC mesh build, byte-field replication, and IndexedDB blob restore.
   - Includes `test-browser-native-smoke.sh`, a browser/native relay-signaled mesh smoke test.
 - `browser-gun-notes/`: Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, and the relay-backed DAM path.
 - `browser-package-notes-vite/`: Vite app that consumes the in-repo `primadb` npm package instead of raw generated bindings.
-  - Includes `npm run smoke`, a Chromium package-consumer smoke test that creates a note and verifies persistence after reload.
+  - Includes `npm run smoke`, a Chromium package-consumer smoke test that creates a note plus binary/blob values and verifies persistence after reload.
   - Supports optional relay-signaled mesh mode through `?room=...&relay=...`.
   - Includes `test-runtime-smoke.sh`, a browser smoke test covering relay sync plus `load`, `not`, `map`, and `back`.
 - `browser-threaded-query/`: Opt-in `wasm-threads` browser demo with COOP/COEP serving, `initThreadPool(...)`, and a Rayon-backed query workload.
 - `browser-threaded-mesh-notes/`: Opt-in `wasm-threads` browser mesh demo with COOP/COEP serving, relay-backed signaling by default, configurable ICE servers, and peer-to-peer note sync over WebRTC.
-  - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for threaded relay-signaled WebRTC sync and parallel query execution.
+  - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for threaded relay-signaled WebRTC sync, byte-field replication, IndexedDB blob restore, and parallel query execution.
   - Includes `test-browser-native-smoke.sh`, a threaded browser/native mesh smoke test.
   - Includes `test-cross-browser-smoke.sh`, a Chromium + Firefox smoke test for live cross-browser replication over the relay-backed mesh.
 - `ws_relay_server.rs`: Rust DAM relay with peer presence, peer exchange, targeted routing, batch bootstrap, and relay-friendly dedupe hints for browser examples. Run with `cargo run --example ws_relay_server`.

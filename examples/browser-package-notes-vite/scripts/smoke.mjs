@@ -71,13 +71,52 @@ try {
   await page.goto("http://127.0.0.1:4182", { waitUntil: "networkidle" });
 
   const unique = `Vite package smoke ${Date.now()}`;
+  const binaryPayload = [2, 4, 6, 8, 10];
+  const blobPayload = [3, 1, 4, 1, 5, 9];
   await page.fill("#note-title", unique);
   await page.fill("#note-body", "Installed from the local primadb package.");
   await page.click("#note-submit");
   await page.waitForSelector(`[data-note-title^="${unique}"]`);
 
+  const binaryResult = await page.evaluate(async ({ binaryPayload, blobPayload }) => {
+    const demo = globalThis.packageDemo;
+    demo.db.openBlobStorage({
+      kind: "indexed_db",
+      databaseName: "primadb-package-vite-binary",
+      storeName: "blobs",
+      namespace: "smoke",
+    });
+    demo.db.chain("binary").field("bytes").putBytes(new Uint8Array(binaryPayload));
+    const blobRef = await demo.db
+      .chain("binary")
+      .field("blob")
+      .putBlob(new Uint8Array(blobPayload), "application/octet-stream");
+    const bytes = demo.db.chain("binary").field("bytes").onceBytes();
+    const blob = await demo.db.chain("binary").field("blob").getBlob();
+    return {
+      blobRef,
+      bytes: bytes == null ? null : Array.from(bytes),
+      blob: blob == null ? null : Array.from(blob),
+    };
+  }, { binaryPayload, blobPayload });
+
   await page.reload({ waitUntil: "networkidle" });
   await page.waitForSelector(`[data-note-title^="${unique}"]`);
+
+  const restoredBinary = await page.evaluate(async () => {
+    globalThis.packageDemo.db.openBlobStorage({
+      kind: "indexed_db",
+      databaseName: "primadb-package-vite-binary",
+      storeName: "blobs",
+      namespace: "smoke",
+    });
+    const bytes = globalThis.packageDemo.db.chain("binary").field("bytes").onceBytes();
+    const blob = await globalThis.packageDemo.db.chain("binary").field("blob").getBlob();
+    return {
+      bytes: bytes == null ? null : Array.from(bytes),
+      blob: blob == null ? null : Array.from(blob),
+    };
+  });
 
   const backend = await page.textContent("#storage-backend");
   const count = await page.textContent("#note-count");
@@ -91,7 +130,13 @@ try {
         unique,
         backend,
         count,
-        package_browser_confirmed: true,
+        binaryResult,
+        restoredBinary,
+        package_browser_confirmed:
+          JSON.stringify(binaryResult.bytes) === JSON.stringify(binaryPayload) &&
+          JSON.stringify(binaryResult.blob) === JSON.stringify(blobPayload) &&
+          JSON.stringify(restoredBinary.bytes) === JSON.stringify(binaryPayload) &&
+          JSON.stringify(restoredBinary.blob) === JSON.stringify(blobPayload),
       },
       null,
       2,

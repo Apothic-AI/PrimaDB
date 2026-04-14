@@ -221,6 +221,14 @@ fn primadb_value_to_gun(value: &JsonValue) -> JsonValue {
 fn field_value_to_gun(value: &FieldValue) -> JsonValue {
     match value {
         FieldValue::Scalar(value) => primadb_value_to_gun(value),
+        FieldValue::Bytes(bytes) => JsonValue::Object(Map::from_iter([(
+            "$bytes".to_owned(),
+            JsonValue::String(bytes.to_base64()),
+        )])),
+        FieldValue::Blob(reference) => JsonValue::Object(Map::from_iter([(
+            "$blob".to_owned(),
+            serde_json::to_value(reference).unwrap_or(JsonValue::Null),
+        )])),
         FieldValue::Link(target) => JsonValue::Object(Map::from_iter([(
             "#".to_owned(),
             JsonValue::String(target.clone()),
