@@ -298,7 +298,7 @@ Install it locally with:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
-python3 -m pip install -e .
+uv sync
 ```
 
 Example usage:
@@ -326,10 +326,11 @@ Smoke it with:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
-python3 scripts/smoke_core.py
-python3 scripts/smoke_relay.py
-python3 scripts/smoke_mesh.py
-python3 scripts/pack_check.py
+uv sync
+uv run python scripts/smoke_core.py
+uv run python scripts/smoke_relay.py
+uv run python scripts/smoke_mesh.py
+uv run python scripts/pack_check.py
 ```
 
 See [packages/primadb-python/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/README.md)

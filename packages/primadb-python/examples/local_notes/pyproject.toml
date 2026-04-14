@@ -1,0 +1,9 @@
+[project]
+name = "primadb-python-local-notes-example"
+version = "0.1.0"
+description = "uv-managed local notes example for primadb-python"
+requires-python = ">=3.9"
+dependencies = ["primadb-python"]
+
+[tool.uv.sources]
+primadb-python = { path = "../..", editable = true }

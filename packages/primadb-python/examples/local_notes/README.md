@@ -7,8 +7,6 @@ a package-local data directory.
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/local_notes
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-python main.py
+uv sync
+uv run python main.py
 ```

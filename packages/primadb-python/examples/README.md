@@ -2,8 +2,13 @@
 
 These examples run directly against the local [`primadb-python` package](/home/bitnom/Code/gunport/primadb/packages/primadb-python).
 
-Each project includes a `requirements.txt` that installs the package from `../..`, so you can use
-an isolated venv per example if you want.
+Each example is a small `uv` project with a local editable dependency on `../..`, so the intended
+flow is:
+
+```bash
+uv sync
+uv run python main.py
+```
 
 Available projects:
 

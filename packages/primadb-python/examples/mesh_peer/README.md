@@ -19,10 +19,8 @@ cargo run --example ws_relay_server -- 127.0.0.1:9010
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/mesh_peer
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-python main.py --room package-mesh --name py-a --message "hello from python"
+uv sync
+uv run python main.py --room package-mesh --name py-a --message "hello from python"
 ```
 
 Run the same command in a second terminal with a different `--name` to watch replication.
