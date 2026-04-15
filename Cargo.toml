@@ -3,7 +3,7 @@ name = "primadb"
 version = "0.1.0"
 edition = "2024"
 description = "A Rust-native local-first graph database inspired by Gun."
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 rust-version = "1.85"
 
 [features]

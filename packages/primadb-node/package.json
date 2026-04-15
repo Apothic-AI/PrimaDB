@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Native Node.js package for Primadb.",
   "type": "module",
-  "license": "MIT OR Apache-2.0",
+  "license": "Apache-2.0",
   "main": "./index.js",
   "types": "./index.d.ts",
   "files": [

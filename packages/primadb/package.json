@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "TypeScript package for Primadb's browser WASM runtime.",
   "type": "module",
-  "license": "MIT OR Apache-2.0",
+  "license": "Apache-2.0",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
