@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tagged commit is on master
+        run: |
+          git fetch origin master:refs/remotes/origin/master
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+
+      - name: Derive version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify manifest versions match the release tag
+        run: node ./scripts/version-sync.mjs check --expect "${{ steps.version.outputs.version }}"
+
+      - name: Run native test suite
+        run: cargo test --features "crypto native-websocket native-webrtc"
+
+      - name: Check wasm target
+        run: cargo check --target wasm32-unknown-unknown --features crypto
+
+  release:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: primadb v${{ needs.validate.outputs.version }}
+          generate_release_notes: true

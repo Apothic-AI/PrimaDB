@@ -349,6 +349,46 @@ for the package-specific flow.
 For runnable package-local Python examples, see
 [packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md).
 
+## Versioning And Releases
+
+Primadb uses lockstep versioning across the Rust crate and the in-repo packages:
+
+- [Cargo.toml](/home/bitnom/Code/gunport/primadb/Cargo.toml)
+- [packages/primadb/package.json](/home/bitnom/Code/gunport/primadb/packages/primadb/package.json)
+- [packages/primadb-node/package.json](/home/bitnom/Code/gunport/primadb/packages/primadb-node/package.json)
+- [packages/primadb-python/pyproject.toml](/home/bitnom/Code/gunport/primadb/packages/primadb-python/pyproject.toml)
+
+`Cargo.toml` is the source of truth. Use the repo-level script in
+[scripts/version-sync.mjs](/home/bitnom/Code/gunport/primadb/scripts/version-sync.mjs):
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+
+# verify there is no manifest drift
+node ./scripts/version-sync.mjs check
+
+# rewrite package manifests to the current Cargo.toml version
+node ./scripts/version-sync.mjs sync
+
+# bump Cargo.toml and every package manifest together
+node ./scripts/version-sync.mjs set 0.1.1
+```
+
+Automation:
+
+- [version-sync.yml](/home/bitnom/Code/gunport/primadb/.github/workflows/version-sync.yml) fails CI on push/PR if versions drift.
+- [release.yml](/home/bitnom/Code/gunport/primadb/.github/workflows/release.yml) creates a GitHub release when a `v*.*.*` tag is pushed and that tagged commit is on `master`.
+
+Typical release flow:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+node ./scripts/version-sync.mjs set 0.1.1
+git commit -am "Release 0.1.1"
+git tag v0.1.1
+git push origin master --tags
+```
+
 ## Replication Contract
 
 Primadb does not hide the wire format from you.
