@@ -378,6 +378,12 @@ Automation:
 
 - [version-sync.yml](/home/bitnom/Code/gunport/primadb/.github/workflows/version-sync.yml) fails CI on push/PR if versions drift.
 - [release.yml](/home/bitnom/Code/gunport/primadb/.github/workflows/release.yml) creates a GitHub release when a `v*.*.*` tag is pushed and that tagged commit is on `master`.
+  It also attaches release artifacts for:
+  `primadb-<version>.crate`,
+  the browser npm package tarball,
+  the Linux x64 GNU `primadb-node` npm package tarball,
+  the `primadb-python` wheel and source distribution,
+  and a `SHA256SUMS.txt` checksum file.
 
 Typical release flow:
 

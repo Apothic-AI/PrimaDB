@@ -50,12 +50,168 @@ jobs:
       - name: Check wasm target
         run: cargo check --target wasm32-unknown-unknown --features crypto
 
-  release:
+  rust-crate-asset:
     needs: validate
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build crate release asset
+        run: |
+          mkdir -p release-assets
+          cargo package --locked --no-verify
+          cp "target/package/primadb-${{ needs.validate.outputs.version }}.crate" release-assets/
+
+      - name: Upload crate asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-crate-asset
+          path: release-assets/*
+
+  browser-package-asset:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Install browser package dependencies
+        working-directory: packages/primadb
+        run: npm ci
+
+      - name: Build browser package
+        working-directory: packages/primadb
+        run: npm run build
+
+      - name: Pack browser package
+        working-directory: packages/primadb
+        run: |
+          mkdir -p ../../release-assets
+          TARBALL="$(npm pack --silent)"
+          mv "$TARBALL" "../../release-assets/$TARBALL"
+
+      - name: Upload browser package asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-package-asset
+          path: release-assets/*
+
+  node-package-asset:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node package dependencies
+        working-directory: packages/primadb-node
+        run: npm ci
+
+      - name: Build Node package
+        working-directory: packages/primadb-node
+        run: npm run build
+
+      - name: Pack Node package
+        working-directory: packages/primadb-node
+        run: |
+          mkdir -p ../../release-assets
+          TARBALL="$(npm pack --silent)"
+          mv "$TARBALL" "../../release-assets/primadb-node-${{ needs.validate.outputs.version }}-linux-x64-gnu.tgz"
+
+      - name: Upload Node package asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-package-asset
+          path: release-assets/*
+
+  python-package-asset:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python build dependencies
+        run: python -m pip install --upgrade build
+
+      - name: Build Python distributions
+        working-directory: packages/primadb-python
+        run: python -m build --outdir ../../release-assets
+
+      - name: Upload Python package assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-asset
+          path: release-assets/*
+
+  release:
+    needs:
+      - validate
+      - rust-crate-asset
+      - browser-package-asset
+      - node-package-asset
+      - python-package-asset
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS.txt
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: primadb v${{ needs.validate.outputs.version }}
           generate_release_notes: true
+          files: |
+            release-assets/*
