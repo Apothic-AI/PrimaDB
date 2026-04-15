@@ -8,6 +8,10 @@ It uses relay-backed signaling, so you can run the same room from:
 - browser Primadb examples
 - the Python package examples
 
+The example is offline-first: if the relay is down, it still starts, keeps local durable state
+available, and retries the relay connection in the background. You only need the relay once you
+want peer discovery/signaling.
+
 ## Start A Relay
 
 ```bash

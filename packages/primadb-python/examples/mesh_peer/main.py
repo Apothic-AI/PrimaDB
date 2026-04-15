@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -53,13 +54,27 @@ def main() -> None:
         mesh.flush_pending()
 
     previous = ""
+    last_relay_connected: bool | None = None
     deadline = time.time() + (args.duration_ms / 1000)
     while time.time() < deadline:
+        relay_connected = mesh.relay_connected()
+        if relay_connected != last_relay_connected:
+            if relay_connected:
+                print(
+                    f"relay {mesh.relay_url()} connected; mesh signaling is active",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"relay {mesh.relay_url()} unavailable; continuing offline and retrying in background",
+                    file=sys.stderr,
+                )
+            last_relay_connected = relay_connected
         payload = {
             "peerId": mesh.peer_id(),
             "signaling": mesh.signaling_mode(),
             "relayUrl": mesh.relay_url(),
-            "relayConnected": mesh.relay_connected(),
+            "relayConnected": relay_connected,
             "openPeers": mesh.open_peer_count(),
             "peers": mesh.peer_count(),
             "inflight": mesh.inflight_count(),

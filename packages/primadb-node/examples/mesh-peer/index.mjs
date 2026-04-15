@@ -78,13 +78,25 @@ if (options.message) {
 }
 
 let previous = "";
+let lastRelayConnected = null;
 const deadline = Date.now() + options.durationMs;
 while (Date.now() < deadline) {
+  const relayConnected = mesh.relayConnected();
+  if (relayConnected !== lastRelayConnected) {
+    if (relayConnected) {
+      console.error(`relay ${mesh.relayUrl()} connected; mesh signaling is active`);
+    } else {
+      console.error(
+        `relay ${mesh.relayUrl()} unavailable; continuing offline and retrying in background`,
+      );
+    }
+    lastRelayConnected = relayConnected;
+  }
   const snapshot = {
     peerId: mesh.peerId(),
     signaling: mesh.signalingMode(),
     relayUrl: mesh.relayUrl(),
-    relayConnected: mesh.relayConnected(),
+    relayConnected,
     openPeers: await mesh.openPeerCount(),
     peers: await mesh.peerCount(),
     inflight: await mesh.inflightCount(),

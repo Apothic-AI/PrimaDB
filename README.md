@@ -25,6 +25,7 @@
 - Routed transport envelopes with presence, signaling, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
 - Remote live watches for `get` / `map` / `query` / `lex` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
 - Browser WebRTC mesh sync with both local `BroadcastChannel` signaling and relay-backed signaling for cross-browser peers.
+- Native WebRTC mesh starts offline, keeps local reads/writes/durable state available, and retries relay signaling in the background until a relay peer appears.
 - Optional native WebSocket sync adapter behind the `native-websocket` feature.
 - Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.
 - Data-level auth in the core database for signed user-owned fields, certificate-authorized delegated writes, and read-time signature verification/unwrapping.

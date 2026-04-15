@@ -12,7 +12,7 @@ Current surface:
 - first-class binary helpers through `put_bytes()`, `once_bytes()`, `put_blob()`, and `get_blob()`
 - subscriptions
 - native relay sync through `connect_relay(...)`
-- native WebRTC mesh through `connect_mesh(...)`
+- native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
 
 ## Package Examples

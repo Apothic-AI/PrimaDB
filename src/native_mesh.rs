@@ -1,23 +1,25 @@
-use crate::{
-    ChangeSubscription, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
-    PeerRecommendation, Primadb, PrimadbError, RemoteWatchMessage, RemoteWatchSubscription,
-    Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope,
-    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
-};
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
+use crate::{
+    ChangeSubscription, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
+    PeerRecommendation, Primadb, PrimadbError, RemoteWatchMessage, RemoteWatchSubscription, Result,
+    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope,
+    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
+};
 use async_channel::{Sender, unbounded};
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use webrtc::api::API;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
@@ -91,6 +93,15 @@ struct NativeMeshPeer {
 
 const STALE_MESH_PEER_MILLIS: u64 = 5_000;
 
+type MeshRelaySocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type MeshRelayWriter = SplitSink<MeshRelaySocket, Message>;
+
+#[derive(Default)]
+struct MeshRelayState {
+    writer: Option<MeshRelayWriter>,
+    reader_task: Option<JoinHandle<()>>,
+}
+
 struct NativeWebRtcMeshState {
     db: Primadb,
     api: Arc<API>,
@@ -100,9 +111,10 @@ struct NativeWebRtcMeshState {
     peer_id: String,
     relay_url: String,
     rtc_configuration: RTCConfiguration,
+    closed: AtomicBool,
     relay_connected: AtomicBool,
     next_message_seq: AtomicU64,
-    outbound: UnboundedSender<Message>,
+    relay: Mutex<MeshRelayState>,
     peers: Mutex<BTreeMap<String, NativeMeshPeer>>,
     inflight: Mutex<BTreeMap<String, MeshOutbound>>,
     outgoing_watches: Mutex<BTreeMap<String, OutgoingWatch>>,
@@ -113,8 +125,6 @@ struct NativeWebRtcMeshState {
 pub struct NativeWebRtcMesh {
     state: Arc<NativeWebRtcMeshState>,
     change_subscription: Option<ChangeSubscription>,
-    writer_task: Option<JoinHandle<()>>,
-    reader_task: Option<JoinHandle<()>>,
     change_task: Option<JoinHandle<()>>,
     retry_task: Option<JoinHandle<()>>,
 }
@@ -126,17 +136,13 @@ impl NativeWebRtcMesh {
                 "native mesh currently requires relay signaling".to_owned(),
             ));
         }
-        let relay_url = config.relay_url.clone().ok_or_else(|| {
-            PrimadbError::Message("native mesh requires a relay_url".to_owned())
-        })?;
+        let relay_url = config
+            .relay_url
+            .clone()
+            .ok_or_else(|| PrimadbError::Message("native mesh requires a relay_url".to_owned()))?;
 
         let rtc_configuration = build_rtc_configuration(&config.effective_ice_servers());
         let api = Arc::new(APIBuilder::new().build());
-        let (socket, _) = connect_async(&relay_url)
-            .await
-            .map_err(|error| PrimadbError::Message(error.to_string()))?;
-        let (mut writer, mut reader) = socket.split();
-        let (outbound, mut outbound_rx) = unbounded_channel::<Message>();
 
         let peer_id = format!("mesh:{}:{}", db.replica_id(), crate::clock::now_millis());
         let state = Arc::new(NativeWebRtcMeshState {
@@ -153,44 +159,15 @@ impl NativeWebRtcMesh {
             peer_id,
             relay_url: relay_url.clone(),
             rtc_configuration,
-            relay_connected: AtomicBool::new(true),
+            closed: AtomicBool::new(false),
+            relay_connected: AtomicBool::new(false),
             next_message_seq: AtomicU64::new(0),
-            outbound,
+            relay: Mutex::new(MeshRelayState::default()),
             peers: Mutex::new(BTreeMap::new()),
             inflight: Mutex::new(BTreeMap::new()),
             outgoing_watches: Mutex::new(BTreeMap::new()),
             incoming_watches: Mutex::new(BTreeMap::new()),
             recommendations: Mutex::new(BTreeMap::new()),
-        });
-
-        let writer_state = state.clone();
-        let writer_task = tokio::spawn(async move {
-            while let Some(message) = outbound_rx.recv().await {
-                if writer.send(message).await.is_err() {
-                    writer_state.relay_connected.store(false, Ordering::SeqCst);
-                    fail_outgoing_mesh_watches(&writer_state, "mesh writer closed").await;
-                    clear_incoming_mesh_watches(&writer_state).await;
-                    break;
-                }
-            }
-        });
-
-        let reader_state = state.clone();
-        let reader_task = tokio::spawn(async move {
-            while let Some(message) = reader.next().await {
-                match message {
-                    Ok(Message::Text(payload)) => {
-                        let payload = payload.to_string();
-                        let _ = handle_mesh_signaling_message(&reader_state, &payload).await;
-                    }
-                    Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    Ok(Message::Frame(_)) => {}
-                }
-            }
-            reader_state.relay_connected.store(false, Ordering::SeqCst);
-            fail_outgoing_mesh_watches(&reader_state, "mesh signaling closed").await;
-            clear_incoming_mesh_watches(&reader_state).await;
         });
 
         let change_subscription = db.subscribe_changes();
@@ -213,7 +190,11 @@ impl NativeWebRtcMesh {
             let mut interval = tokio::time::interval(retry_interval);
             loop {
                 interval.tick().await;
+                if retry_state.closed.load(Ordering::SeqCst) {
+                    break;
+                }
                 if !retry_state.relay_connected.load(Ordering::SeqCst) {
+                    let _ = connect_mesh_relay_state(&retry_state).await;
                     continue;
                 }
                 let _ = announce_mesh_join_state(&retry_state).await;
@@ -222,14 +203,11 @@ impl NativeWebRtcMesh {
             }
         });
 
-        send_mesh_presence_state(&state).await?;
-        announce_mesh_join_state(&state).await?;
+        let _ = connect_mesh_relay_state(&state).await;
 
         Ok(Self {
             state,
             change_subscription: Some(change_subscription),
-            writer_task: Some(writer_task),
-            reader_task: Some(reader_task),
             change_task: Some(change_task),
             retry_task: Some(retry_task),
         })
@@ -359,16 +337,10 @@ impl NativeWebRtcMesh {
     }
 
     async fn teardown(&mut self) {
+        self.state.closed.store(true, Ordering::SeqCst);
         let _ = post_mesh_leave_signal_state(&self.state).await;
-        self.state.relay_connected.store(false, Ordering::SeqCst);
-        let _ = self.state.outbound.send(Message::Close(None));
+        disconnect_mesh_relay_state(&self.state, true).await;
         self.change_subscription.take();
-        if let Some(task) = self.writer_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.reader_task.take() {
-            task.abort();
-        }
         if let Some(task) = self.change_task.take() {
             task.abort();
         }
@@ -395,14 +367,14 @@ impl NativeWebRtcMesh {
 
 impl Drop for NativeWebRtcMesh {
     fn drop(&mut self) {
+        self.state.closed.store(true, Ordering::SeqCst);
         self.state.relay_connected.store(false, Ordering::SeqCst);
-        let _ = self.state.outbound.send(Message::Close(None));
-        if let Some(task) = self.writer_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.reader_task.take() {
-            task.abort();
-        }
+        self.state.runtime.spawn({
+            let state = self.state.clone();
+            async move {
+                disconnect_mesh_relay_state(&state, true).await;
+            }
+        });
         if let Some(task) = self.change_task.take() {
             task.abort();
         }
@@ -509,10 +481,7 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
                     .and_then(|peer| peer.channel.as_ref())
                     .is_some_and(mesh_channel_is_open);
                 let is_stale = peer.is_some_and(|peer| {
-                    !peer
-                        .channel
-                        .as_ref()
-                        .is_some_and(mesh_channel_is_open)
+                    !peer.channel.as_ref().is_some_and(mesh_channel_is_open)
                         && crate::clock::now_millis().saturating_sub(peer.created_at_millis)
                             >= STALE_MESH_PEER_MILLIS
                 });
@@ -588,7 +557,10 @@ async fn create_mesh_offer(state: &Arc<NativeWebRtcMeshState>, remote_peer: Stri
             .is_none()
     };
     if needs_channel {
-        let channel = connection.create_data_channel("primadb", None).await.map_err(to_error)?;
+        let channel = connection
+            .create_data_channel("primadb", None)
+            .await
+            .map_err(to_error)?;
         attach_mesh_channel_handlers(state, &remote_peer, channel).await;
     }
 
@@ -674,7 +646,10 @@ async fn add_mesh_ice_candidate(
         }
         return Ok(());
     }
-    connection.add_ice_candidate(candidate).await.map_err(to_error)
+    connection
+        .add_ice_candidate(candidate)
+        .await
+        .map_err(to_error)
 }
 
 async fn flush_pending_ice_candidates(
@@ -1072,7 +1047,9 @@ async fn handle_mesh_watch_request(
     request: WatchRequest,
 ) -> Result<()> {
     match request.request {
-        WatchRequestKind::Subscribe { request: request_kind } => {
+        WatchRequestKind::Subscribe {
+            request: request_kind,
+        } => {
             let limit = state.db.limits().max_active_remote_watches.max(1);
             {
                 let mut incoming = state.incoming_watches.lock().await;
@@ -1092,7 +1069,11 @@ async fn handle_mesh_watch_request(
             let _ = emit_single_incoming_mesh_watch_update(state, &request.watch_id, true).await?;
         }
         WatchRequestKind::Cancel => {
-            state.incoming_watches.lock().await.remove(&request.watch_id);
+            state
+                .incoming_watches
+                .lock()
+                .await
+                .remove(&request.watch_id);
         }
     }
     Ok(())
@@ -1102,9 +1083,14 @@ async fn accept_mesh_watch_event(
     state: &Arc<NativeWebRtcMeshState>,
     event: WatchEvent,
 ) -> Result<()> {
-    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
-        None;
-    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+    let mut deliver: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        RemoteWatchMessage,
+    )> = None;
+    let mut failure: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        String,
+    )> = None;
 
     {
         let mut outgoing = state.outgoing_watches.lock().await;
@@ -1275,7 +1261,10 @@ async fn flush_mesh_pending_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
 
     let mut awaiting = BTreeMap::new();
     for peer_id in &peer_ids {
-        if send_mesh_route_to_peer(state, peer_id, &route).await.is_ok() {
+        if send_mesh_route_to_peer(state, peer_id, &route)
+            .await
+            .is_ok()
+        {
             awaiting.insert(peer_id.clone(), false);
         }
     }
@@ -1363,6 +1352,78 @@ async fn send_mesh_route_to_peer(
     Ok(())
 }
 
+async fn connect_mesh_relay_state(state: &Arc<NativeWebRtcMeshState>) -> Result<bool> {
+    if state.closed.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    if state.relay_connected.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+
+    let (socket, _) = connect_async(&state.relay_url)
+        .await
+        .map_err(|error| PrimadbError::Message(error.to_string()))?;
+    let (writer, mut reader) = socket.split();
+
+    {
+        let mut relay = state.relay.lock().await;
+        if state.closed.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        if relay.writer.is_some() {
+            return Ok(false);
+        }
+        relay.writer = Some(writer);
+    }
+
+    state.relay_connected.store(true, Ordering::SeqCst);
+
+    let reader_state = state.clone();
+    let reader_task = tokio::spawn(async move {
+        while let Some(message) = reader.next().await {
+            match message {
+                Ok(Message::Text(payload)) => {
+                    let payload = payload.to_string();
+                    let _ = handle_mesh_signaling_message(&reader_state, &payload).await;
+                }
+                Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Frame(_)) => {}
+            }
+        }
+        disconnect_mesh_relay_state(&reader_state, false).await;
+    });
+
+    {
+        let mut relay = state.relay.lock().await;
+        if let Some(task) = relay.reader_task.take() {
+            task.abort();
+        }
+        relay.reader_task = Some(reader_task);
+    }
+
+    send_mesh_presence_state(state).await?;
+    announce_mesh_join_state(state).await?;
+    Ok(true)
+}
+
+async fn disconnect_mesh_relay_state(state: &Arc<NativeWebRtcMeshState>, abort_reader: bool) {
+    state.relay_connected.store(false, Ordering::SeqCst);
+    let reader_task = {
+        let mut relay = state.relay.lock().await;
+        relay.writer.take();
+        if abort_reader {
+            relay.reader_task.take()
+        } else {
+            relay.reader_task = None;
+            None
+        }
+    };
+    if let Some(task) = reader_task {
+        task.abort();
+    }
+}
+
 fn mesh_channel_is_open(channel: &Arc<RTCDataChannel>) -> bool {
     channel.ready_state() == RTCDataChannelState::Open
 }
@@ -1381,7 +1442,7 @@ async fn post_mesh_signal_state(
         serde_json::to_value(signal)?,
         mesh_signal_target(signal),
     );
-    send_route(state, &route)
+    send_route(state, &route).await
 }
 
 async fn announce_mesh_join_state(state: &Arc<NativeWebRtcMeshState>) -> Result<()> {
@@ -1439,10 +1500,10 @@ async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
         peer.metadata
             .insert("signaling".to_owned(), "relay".to_owned());
     }
-    send_route(state, &route)
+    send_route(state, &route).await
 }
 
-fn send_route(state: &Arc<NativeWebRtcMeshState>, route: &RouteEnvelope) -> Result<()> {
+async fn send_route(state: &Arc<NativeWebRtcMeshState>, route: &RouteEnvelope) -> Result<()> {
     let payload = serde_json::to_string(route)?;
     let max_bytes = state.db.limits().max_route_payload_bytes;
     if payload.len() > max_bytes {
@@ -1450,10 +1511,22 @@ fn send_route(state: &Arc<NativeWebRtcMeshState>, route: &RouteEnvelope) -> Resu
             "route payload exceeds {max_bytes} bytes"
         )));
     }
-    state
-        .outbound
-        .send(Message::Text(payload.into()))
-        .map_err(|error| PrimadbError::Message(error.to_string()))
+    let send_result = {
+        let mut relay = state.relay.lock().await;
+        let Some(writer) = relay.writer.as_mut() else {
+            return Err(PrimadbError::Message(
+                "mesh relay websocket is not connected".to_owned(),
+            ));
+        };
+        writer.send(Message::Text(payload.into())).await
+    };
+    match send_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            disconnect_mesh_relay_state(state, true).await;
+            Err(PrimadbError::Message(error.to_string()))
+        }
+    }
 }
 
 fn pack_batch_routes(
@@ -1553,7 +1626,10 @@ fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> Result<(String, JsonV
             SecureSyncFrame::Plain(frame) => {
                 Ok(("sync_frame".to_owned(), serde_json::to_value(frame)?))
             }
-            secure => Ok(("secure_sync_frame".to_owned(), serde_json::to_value(secure)?)),
+            secure => Ok((
+                "secure_sync_frame".to_owned(),
+                serde_json::to_value(secure)?,
+            )),
         };
     }
 
@@ -1588,7 +1664,10 @@ async fn store_peer_recommendations(
     }
 }
 
-fn peer_recommendation_from_presence(peer: &crate::PeerPresence, relay_url: &str) -> PeerRecommendation {
+fn peer_recommendation_from_presence(
+    peer: &crate::PeerPresence,
+    relay_url: &str,
+) -> PeerRecommendation {
     PeerRecommendation {
         peer: peer.clone(),
         relay_urls: vec![relay_url.to_owned()],
@@ -1631,9 +1710,7 @@ impl PullAccumulator {
             } => Ok(crate::RemoteResult::Snapshot {
                 snapshot: crate::DatabaseSnapshot {
                     clock: clock.ok_or_else(|| {
-                        PrimadbError::Message(
-                            "snapshot watch completed without a clock".to_owned(),
-                        )
+                        PrimadbError::Message("snapshot watch completed without a clock".to_owned())
                     })?,
                     nodes,
                     pending_ops,
