@@ -11,7 +11,7 @@ Current surface:
 - content-addressed native blob storage through `openBlobStorage(...)`
 - first-class binary helpers through `putBytes()`, `onceBytes()`, `putBlob()`, and `getBlob()`
 - subscriptions
-- native relay sync through `connectRelay(...)`
+- native relay sync through `connectRelay(...)`, including disconnected startup with background relay retry
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
 

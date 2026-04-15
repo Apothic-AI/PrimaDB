@@ -11,7 +11,7 @@ Current surface:
 - content-addressed native blob storage through `open_blob_storage(...)`
 - first-class binary helpers through `put_bytes()`, `once_bytes()`, `put_blob()`, and `get_blob()`
 - subscriptions
-- native relay sync through `connect_relay(...)`
+- native relay sync through `connect_relay(...)`, including disconnected startup with background relay retry
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
 
@@ -74,6 +74,7 @@ cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
 uv sync
 uv run python scripts/smoke_core.py
 uv run python scripts/smoke_relay.py
+uv run python scripts/smoke_relay_offline.py
 uv run python scripts/smoke_mesh.py
 uv run python scripts/pack_check.py
 ```

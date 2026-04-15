@@ -1,11 +1,11 @@
+#[cfg(feature = "crypto")]
+use crate::SecureSyncFrame;
 use crate::{
     ChangeSubscription, HybridClock, LexEntry, MapEntry, Operation, PeerRecommendation, Primadb,
     PrimadbError, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage,
     RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
     Router, RouterConfig, SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
 };
-#[cfg(feature = "crypto")]
-use crate::SecureSyncFrame;
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
@@ -80,6 +80,7 @@ enum PullAccumulator {
 struct NativeWebSocketSyncState {
     db: Primadb,
     router: Router,
+    closed: AtomicBool,
     connected: AtomicBool,
     next_message_seq: AtomicU64,
     inflight: Mutex<BTreeMap<String, OutboundSync>>,
@@ -93,8 +94,7 @@ struct NativeWebSocketSyncState {
 pub struct NativeWebSocketSync {
     state: Arc<NativeWebSocketSyncState>,
     change_subscription: Option<ChangeSubscription>,
-    writer_task: Option<JoinHandle<()>>,
-    reader_task: Option<JoinHandle<()>>,
+    connection_task: Option<JoinHandle<()>>,
     change_task: Option<JoinHandle<()>>,
     retry_task: Option<JoinHandle<()>>,
 }
@@ -111,10 +111,6 @@ impl NativeWebSocketSync {
         retry_interval: Duration,
     ) -> Result<Self> {
         let url = url.as_ref().to_owned();
-        let (socket, _) = connect_async(&url)
-            .await
-            .map_err(|error| PrimadbError::Message(error.to_string()))?;
-        let (mut writer, mut reader) = socket.split();
         let (outbound, mut outbound_rx) = unbounded_channel::<Message>();
 
         let router = Router::new(RouterConfig {
@@ -127,7 +123,8 @@ impl NativeWebSocketSync {
         let state = Arc::new(NativeWebSocketSyncState {
             db: db.clone(),
             router,
-            connected: AtomicBool::new(true),
+            closed: AtomicBool::new(false),
+            connected: AtomicBool::new(false),
             next_message_seq: AtomicU64::new(0),
             inflight: Mutex::new(BTreeMap::new()),
             pending_requests: Mutex::new(BTreeMap::new()),
@@ -137,44 +134,91 @@ impl NativeWebSocketSync {
             outbound,
         });
 
-        let writer_state = state.clone();
-        let writer_task = tokio::spawn(async move {
-            while let Some(message) = outbound_rx.recv().await {
-                if writer.send(message).await.is_err() {
-                    writer_state.connected.store(false, Ordering::SeqCst);
-                    requeue_inflight_state(&writer_state);
-                    fail_pending_requests(
-                        &writer_state,
-                        "websocket writer closed while requests were in flight",
-                    );
-                    fail_outgoing_watches(&writer_state, "websocket writer closed");
-                    clear_incoming_watches(&writer_state);
+        let connection_state = state.clone();
+        let connection_url = url.clone();
+        let connection_task = tokio::spawn(async move {
+            let presence = build_relay_presence_route(&connection_state, &connection_url);
+            let presence_payload = serde_json::to_string(&presence).ok();
+
+            loop {
+                if connection_state.closed.load(Ordering::SeqCst) {
                     break;
                 }
-            }
-        });
 
-        let reader_state = state.clone();
-        let reader_task = tokio::spawn(async move {
-            while let Some(message) = reader.next().await {
-                match message {
-                    Ok(Message::Text(payload)) => {
-                        let payload = payload.to_string();
-                        let _ = handle_incoming_text(&reader_state, &payload).await;
+                let socket = match connect_async(&connection_url).await {
+                    Ok((socket, _)) => socket,
+                    Err(_) => {
+                        tokio::time::sleep(retry_interval).await;
+                        continue;
                     }
-                    Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    Ok(Message::Frame(_)) => {}
+                };
+                let (mut writer, mut reader) = socket.split();
+                connection_state.connected.store(true, Ordering::SeqCst);
+
+                if let Some(payload) = &presence_payload {
+                    if writer
+                        .send(Message::Text(payload.clone().into()))
+                        .await
+                        .is_err()
+                    {
+                        connection_state.connected.store(false, Ordering::SeqCst);
+                        requeue_inflight_state(&connection_state);
+                        fail_pending_requests(
+                            &connection_state,
+                            "websocket closed while requests were in flight",
+                        );
+                        clear_incoming_watches(&connection_state);
+                        tokio::time::sleep(retry_interval).await;
+                        continue;
+                    }
                 }
+
+                let _ = retry_inflight_state(&connection_state).await;
+                let _ = flush_pending_state(&connection_state).await;
+
+                loop {
+                    if connection_state.closed.load(Ordering::SeqCst) {
+                        let _ = writer.send(Message::Close(None)).await;
+                        break;
+                    }
+                    tokio::select! {
+                        maybe_message = outbound_rx.recv() => {
+                            match maybe_message {
+                                Some(message) => {
+                                    if writer.send(message).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        maybe_incoming = reader.next() => {
+                            match maybe_incoming {
+                                Some(Ok(Message::Text(payload))) => {
+                                    let payload = payload.to_string();
+                                    let _ = handle_incoming_text(&connection_state, &payload).await;
+                                }
+                                Some(Ok(Message::Binary(_))) | Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                                Some(Ok(Message::Frame(_))) => {}
+                            }
+                        }
+                    }
+                }
+
+                connection_state.connected.store(false, Ordering::SeqCst);
+                requeue_inflight_state(&connection_state);
+                fail_pending_requests(
+                    &connection_state,
+                    "websocket closed while requests were in flight",
+                );
+                clear_incoming_watches(&connection_state);
+
+                if connection_state.closed.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(retry_interval).await;
             }
-            reader_state.connected.store(false, Ordering::SeqCst);
-            requeue_inflight_state(&reader_state);
-            fail_pending_requests(
-                &reader_state,
-                "websocket reader closed while requests were in flight",
-            );
-            fail_outgoing_watches(&reader_state, "websocket reader closed");
-            clear_incoming_watches(&reader_state);
         });
 
         let change_subscription = db.subscribe_changes();
@@ -196,6 +240,9 @@ impl NativeWebSocketSync {
             let mut interval = tokio::time::interval(retry_interval);
             loop {
                 interval.tick().await;
+                if retry_state.closed.load(Ordering::SeqCst) {
+                    break;
+                }
                 if !retry_state.connected.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -204,37 +251,10 @@ impl NativeWebSocketSync {
             }
         });
 
-        let mut presence = state.router.presence(
-            db.replica_id(),
-            "websocket",
-            vec![
-                "sync".to_owned(),
-                "ack".to_owned(),
-                "routing".to_owned(),
-                "snapshot".to_owned(),
-                "batch".to_owned(),
-                "pull_get".to_owned(),
-                "pull_query".to_owned(),
-                "pull_lex".to_owned(),
-                "watch_get".to_owned(),
-                "watch_map".to_owned(),
-                "watch_query".to_owned(),
-                "watch_lex".to_owned(),
-                "watch_snapshot".to_owned(),
-                "peer_exchange".to_owned(),
-            ],
-            vec!["primadb-sync".to_owned()],
-        );
-        if let RoutePayload::Presence { peer } = &mut presence.payload {
-            peer.metadata.insert("relay_url".to_owned(), url);
-        }
-        send_route(&state, &presence)?;
-
         Ok(Self {
             state,
             change_subscription: Some(change_subscription),
-            writer_task: Some(writer_task),
-            reader_task: Some(reader_task),
+            connection_task: Some(connection_task),
             change_task: Some(change_task),
             retry_task: Some(retry_task),
         })
@@ -419,13 +439,11 @@ impl NativeWebSocketSync {
     }
 
     fn teardown(&mut self) {
+        self.state.closed.store(true, Ordering::SeqCst);
         self.state.connected.store(false, Ordering::SeqCst);
         let _ = self.state.outbound.send(Message::Close(None));
         self.change_subscription.take();
-        if let Some(task) = self.writer_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.reader_task.take() {
+        if let Some(task) = self.connection_task.take() {
             task.abort();
         }
         if let Some(task) = self.change_task.take() {
@@ -496,12 +514,6 @@ fn start_remote_watch(
     target_peer_id: String,
     request_kind: crate::PullRequestKind,
 ) -> Result<RemoteWatchSubscription> {
-    if !state.connected.load(Ordering::SeqCst) {
-        return Err(PrimadbError::Message(
-            "native websocket is not connected".to_owned(),
-        ));
-    }
-
     let limit = state.db.limits().max_active_remote_watches.max(1);
     let watch_id = format!(
         "{}/watch/{:x}",
@@ -527,7 +539,7 @@ fn start_remote_watch(
         );
     }
 
-    if let Err(error) = send_watch_request(
+    let _ = send_watch_request(
         state,
         &target_peer_id,
         WatchRequest {
@@ -536,10 +548,7 @@ fn start_remote_watch(
                 request: request_kind,
             },
         },
-    ) {
-        state.outgoing_watches.lock().unwrap().remove(&watch_id);
-        return Err(error);
-    }
+    );
 
     let cancel_state = state.clone();
     Ok(RemoteWatchSubscription::new(receiver, move || {
@@ -803,6 +812,34 @@ async fn retry_inflight_state(state: &Arc<NativeWebSocketSyncState>) -> Result<u
     Ok(outbound.len())
 }
 
+fn build_relay_presence_route(state: &Arc<NativeWebSocketSyncState>, url: &str) -> RouteEnvelope {
+    let mut presence = state.router.presence(
+        state.db.replica_id(),
+        "websocket",
+        vec![
+            "sync".to_owned(),
+            "ack".to_owned(),
+            "routing".to_owned(),
+            "snapshot".to_owned(),
+            "batch".to_owned(),
+            "pull_get".to_owned(),
+            "pull_query".to_owned(),
+            "pull_lex".to_owned(),
+            "watch_get".to_owned(),
+            "watch_map".to_owned(),
+            "watch_query".to_owned(),
+            "watch_lex".to_owned(),
+            "watch_snapshot".to_owned(),
+            "peer_exchange".to_owned(),
+        ],
+        vec!["primadb-sync".to_owned()],
+    );
+    if let RoutePayload::Presence { peer } = &mut presence.payload {
+        peer.metadata.insert("relay_url".to_owned(), url.to_owned());
+    }
+    presence
+}
+
 fn send_sync_frame(
     state: &Arc<NativeWebSocketSyncState>,
     frame: SyncFrame,
@@ -814,17 +851,17 @@ fn send_sync_frame(
 }
 
 fn send_route(state: &Arc<NativeWebSocketSyncState>, route: &RouteEnvelope) -> Result<()> {
-    if !state.connected.load(Ordering::SeqCst) {
-        return Err(PrimadbError::Message(
-            "native websocket is not connected".to_owned(),
-        ));
-    }
     let payload = serde_json::to_string(route)?;
     if payload.len() > state.db.limits().max_route_payload_bytes {
         return Err(PrimadbError::Message(format!(
             "route payload exceeds {} bytes",
             state.db.limits().max_route_payload_bytes
         )));
+    }
+    if !state.connected.load(Ordering::SeqCst) {
+        return Err(PrimadbError::Message(
+            "native websocket is not connected".to_owned(),
+        ));
     }
     state
         .outbound
@@ -885,7 +922,9 @@ fn handle_watch_request(
     request: WatchRequest,
 ) -> Result<()> {
     match request.request {
-        WatchRequestKind::Subscribe { request: request_kind } => {
+        WatchRequestKind::Subscribe {
+            request: request_kind,
+        } => {
             let limit = state.db.limits().max_active_remote_watches.max(1);
             {
                 let mut watches = state.incoming_watches.lock().unwrap();
@@ -905,16 +944,25 @@ fn handle_watch_request(
             let _ = emit_single_incoming_watch_update(state, &request.watch_id, true)?;
         }
         WatchRequestKind::Cancel => {
-            state.incoming_watches.lock().unwrap().remove(&request.watch_id);
+            state
+                .incoming_watches
+                .lock()
+                .unwrap()
+                .remove(&request.watch_id);
         }
     }
     Ok(())
 }
 
 fn accept_watch_event(state: &Arc<NativeWebSocketSyncState>, event: WatchEvent) -> Result<()> {
-    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
-        None;
-    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+    let mut deliver: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        RemoteWatchMessage,
+    )> = None;
+    let mut failure: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        String,
+    )> = None;
 
     {
         let mut watches = state.outgoing_watches.lock().unwrap();
@@ -994,7 +1042,13 @@ fn emit_single_incoming_watch_update(
     watch_id: &str,
     initial: bool,
 ) -> Result<bool> {
-    let Some(watch) = state.incoming_watches.lock().unwrap().get(watch_id).cloned() else {
+    let Some(watch) = state
+        .incoming_watches
+        .lock()
+        .unwrap()
+        .get(watch_id)
+        .cloned()
+    else {
         return Ok(false);
     };
 
@@ -1160,7 +1214,10 @@ fn encode_sync_payload(_db: &Primadb, frame: SyncFrame) -> Result<(String, JsonV
             SecureSyncFrame::Plain(frame) => {
                 Ok(("sync_frame".to_owned(), serde_json::to_value(frame)?))
             }
-            secure => Ok(("secure_sync_frame".to_owned(), serde_json::to_value(secure)?)),
+            secure => Ok((
+                "secure_sync_frame".to_owned(),
+                serde_json::to_value(secure)?,
+            )),
         };
     }
 

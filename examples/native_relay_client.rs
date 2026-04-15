@@ -54,7 +54,13 @@ async fn main() -> anyhow::Result<()> {
     }))?;
     sync.flush_pending().await?;
 
-    eprintln!("connected to {url} as {replica}. Press Ctrl+C to exit.");
+    if sync.is_connected() {
+        eprintln!("connected to {url} as {replica}. Press Ctrl+C to exit.");
+    } else {
+        eprintln!(
+            "relay {url} is unavailable; running locally as {replica} and retrying in background. Press Ctrl+C to exit."
+        );
+    }
     tokio::signal::ctrl_c().await?;
     sync.close();
     Ok(())
