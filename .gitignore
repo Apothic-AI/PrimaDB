@@ -1,3 +1,17 @@
 /target
+/pkg
 /examples/*/pkg
+/examples/*/dist
+**/node_modules/
+**/.venv/
 **/__pycache__/
+**/.data/
+**/dist/
+**/vendor/
+**/target/
+*.node
+*.whl
+*.tar.gz
+*.so
+*.pyd
+*.dylib
