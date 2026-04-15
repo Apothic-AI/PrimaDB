@@ -32,6 +32,8 @@ const app = {
   body: document.querySelector<HTMLTextAreaElement>("#note-body")!,
 };
 
+const DEFAULT_EXAMPLE_ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
+
 const session = createSession();
 
 const replicaId =
@@ -59,6 +61,7 @@ const mesh = session.meshEnabled
       signaling: session.signal === "broadcast" ? "broadcast_channel" : "relay",
       relayUrl: session.signal === "broadcast" ? undefined : session.relayUrl,
       retryIntervalMs: 1500,
+      iceServers: session.iceServers,
     })
   : null;
 
@@ -161,14 +164,27 @@ function createSession() {
   const protocol = globalThis.location.protocol === "https:" ? "wss" : "ws";
   const relayUrl =
     params.get("relay")?.trim() || `${protocol}://${globalThis.location.hostname}:9010`;
+  const iceServers = params.getAll("ice").map(parseIceServerSpec);
   const meshEnabled = params.has("room") || params.has("relay") || params.has("signal");
   return {
     room,
     signal: signal === "broadcast" ? "broadcast" : "relay",
     relayUrl,
+    iceServers: iceServers.length > 0 ? iceServers : DEFAULT_EXAMPLE_ICE_SERVERS,
     meshEnabled,
     exactTitle: params.get("exactTitle") === "1",
   };
+}
+
+function parseIceServerSpec(spec: string) {
+  const trimmed = String(spec).trim();
+  if (trimmed.startsWith("{")) {
+    return JSON.parse(trimmed) as { urls: string | string[]; username?: string; credential?: string };
+  }
+  if (trimmed.startsWith("stun:") || trimmed.startsWith("turn:") || trimmed.startsWith("turns:")) {
+    return { urls: trimmed };
+  }
+  throw new Error(`invalid ice query parameter \`${trimmed}\`; use a STUN/TURN URL or JSON object`);
 }
 
 function formatCreatedAt(value: NoteRecord) {

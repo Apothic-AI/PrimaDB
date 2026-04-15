@@ -240,6 +240,14 @@ const db = new Primadb("browser-a");
 const mesh = db.connectMesh({
   room: "demo-room",
   relayUrl: "ws://127.0.0.1:9010",
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: ["turn:turn.example.com:3478?transport=udp"],
+      username: "user",
+      credential: "pass",
+    },
+  ],
 });
 ```
 
@@ -655,8 +663,8 @@ The browser build includes three network convenience entrypoints:
 - `connectMesh(...)` for the shared mesh facade, including relay signaling and configurable ICE servers
 - `connectWebRtcMesh(...)` / `connectWebRtcMeshViaRelay(...)` as narrower browser aliases over the same mesh surface
 
-Both paths support configurable ICE servers, and default to a small STUN set when you do not
-provide one explicitly.
+Both paths support configurable ICE servers. Primadb core does not hard-code a STUN default;
+the runnable examples pass `stun:stun.cloudflare.com:3478` explicitly.
 
 The included relay example upgrades that into a networked DAM-style path:
 
@@ -673,6 +681,17 @@ cargo run --features native-websocket --example native_relay_client -- ws://127.
 
 ```bash
 cargo run --features native-webrtc --example native_mesh_probe -- --relay ws://127.0.0.1:9010 --room demo --action status
+```
+
+You can repeat `--ice-server` on the native mesh tools with either a STUN/TURN URL or a JSON
+object:
+
+```bash
+cargo run --features native-webrtc --example native_mesh_probe -- \
+  --relay ws://127.0.0.1:9010 \
+  --room demo \
+  --ice-server stun:stun1.l.google.com:19302 \
+  --ice-server '{"urls":"turn:turn.example.com:3478","username":"user","credential":"pass"}'
 ```
 
 ## Storage Adapters

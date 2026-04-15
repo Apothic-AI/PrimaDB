@@ -7,6 +7,7 @@ import { Primadb } from "../index.js";
 const relayAddress = "127.0.0.1:9022";
 const relayUrl = `ws://${relayAddress}`;
 const room = `node-mesh-${Date.now()}`;
+const iceServers = [{ urls: "stun:stun.cloudflare.com:3478" }];
 const relay = spawn("cargo", ["run", "--example", "ws_relay_server", "--", relayAddress], {
   cwd: "/home/bitnom/Code/gunport/primadb",
   stdio: "pipe",
@@ -56,11 +57,13 @@ try {
     room,
     relayUrl,
     retryIntervalMs: 500,
+    iceServers,
   });
   const meshB = await dbB.connectMesh({
     room,
     relayUrl,
     retryIntervalMs: 500,
+    iceServers,
   });
 
   await waitFor(async () => {

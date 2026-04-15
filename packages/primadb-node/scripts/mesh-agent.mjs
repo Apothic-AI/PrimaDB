@@ -7,6 +7,7 @@ function parseArgs(argv) {
   const options = {
     action: "live",
     relay: "ws://127.0.0.1:9010",
+    iceServers: [],
     room: "primadb-mesh-agent",
     replica: `node-agent-${process.pid}`,
     storageDir: undefined,
@@ -28,6 +29,9 @@ function parseArgs(argv) {
         break;
       case "--relay":
         options.relay = next();
+        break;
+      case "--ice-server":
+        options.iceServers.push(parseIceServerSpec(next()));
         break;
       case "--room":
         options.room = next();
@@ -68,6 +72,25 @@ function parseArgs(argv) {
   }
 
   return options;
+}
+
+function parseIceServerSpec(spec) {
+  const trimmed = String(spec).trim();
+  if (trimmed.startsWith("{")) {
+    const value = JSON.parse(trimmed);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("--ice-server JSON must decode to an object");
+    }
+    return value;
+  }
+  if (trimmed.startsWith("stun:") || trimmed.startsWith("turn:") || trimmed.startsWith("turns:")) {
+    return { urls: trimmed };
+  }
+  throw new Error(`invalid --ice-server value \`${trimmed}\`; use a STUN/TURN URL or JSON object`);
+}
+
+function testIceServers() {
+  return [{ urls: "stun:stun.cloudflare.com:3478" }];
 }
 
 function wait(ms) {
@@ -136,6 +159,7 @@ async function main() {
       room: options.room,
       relayUrl: options.relay,
       retryIntervalMs: 500,
+      iceServers: options.iceServers.length > 0 ? options.iceServers : testIceServers(),
     });
 
     await waitFor(

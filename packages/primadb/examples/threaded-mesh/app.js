@@ -17,11 +17,35 @@ const dom = {
 };
 
 const params = new URLSearchParams(globalThis.location.search);
+
+function parseIceServerSpec(spec) {
+  const trimmed = String(spec).trim();
+  if (trimmed.startsWith("{")) {
+    const value = JSON.parse(trimmed);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("ice query parameter JSON must decode to an object");
+    }
+    return value;
+  }
+  if (trimmed.startsWith("stun:") || trimmed.startsWith("turn:") || trimmed.startsWith("turns:")) {
+    return { urls: trimmed };
+  }
+  throw new Error(`invalid ice query parameter \`${trimmed}\`; use a STUN/TURN URL or JSON object`);
+}
+
+function defaultExampleIceServers() {
+  return [{ urls: "stun:stun.cloudflare.com:3478" }];
+}
+
 const session = {
   room: params.get("room") || "package-threaded-mesh",
   relayUrl: params.get("relay") || "ws://127.0.0.1:9010",
   signal: params.get("signal") === "relay" ? "relay" : "broadcast_channel",
   threads: Math.max(2, Number.parseInt(params.get("threads") || "", 10) || 4),
+  iceServers: (() => {
+    const parsed = params.getAll("ice").map(parseIceServerSpec);
+    return parsed.length > 0 ? parsed : defaultExampleIceServers();
+  })(),
   replicaId: globalThis.crypto?.randomUUID
     ? `pkg-threaded-${globalThis.crypto.randomUUID().slice(0, 8)}`
     : `pkg-threaded-${Date.now().toString(36)}`,
@@ -43,6 +67,7 @@ const mesh = db.connectMesh({
   signaling: session.signal,
   relayUrl: session.signal === "relay" ? session.relayUrl : undefined,
   retryIntervalMs: 1500,
+  iceServers: session.iceServers,
 });
 
 dom.buildStatus.textContent = `${parallelEnabled() ? "wasm-threads" : "single-thread"} / ${parallelThreadCount()} workers`;

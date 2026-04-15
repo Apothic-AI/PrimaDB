@@ -14,10 +14,31 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--room", default="package-mesh")
     parser.add_argument("--relay", default="ws://127.0.0.1:9010")
+    parser.add_argument("--ice-server", action="append", default=[])
     parser.add_argument("--name", default=f"py-{int(time.time())}")
     parser.add_argument("--message", default="")
     parser.add_argument("--duration-ms", type=int, default=15_000)
     return parser.parse_args()
+
+
+def parse_ice_server_specs(specs: list[str]) -> list[dict[str, object]]:
+    if not specs:
+        return [{"urls": "stun:stun.cloudflare.com:3478"}]
+    servers: list[dict[str, object]] = []
+    for spec in specs:
+        trimmed = spec.strip()
+        if trimmed.startswith("{"):
+            value = json.loads(trimmed)
+            if not isinstance(value, dict):
+                raise ValueError("--ice-server JSON must decode to an object")
+            servers.append(value)
+        else:
+            if not trimmed.startswith(("stun:", "turn:", "turns:")):
+                raise ValueError(
+                    f"invalid --ice-server value `{trimmed}`; use a STUN/TURN URL or JSON object"
+                )
+            servers.append({"urls": trimmed})
+    return servers
 
 
 def main() -> None:
@@ -38,6 +59,7 @@ def main() -> None:
             "room": args.room,
             "relayUrl": args.relay,
             "retryIntervalMs": 750,
+            "iceServers": parse_ice_server_specs(args.ice_server),
         }
     )
     notes = db.chain("package_examples").field("mesh").field(args.room).field("notes")

@@ -93,6 +93,18 @@ import {
 await bootstrapPrimadbThreads({ threads: 4 });
 
 const db = new Primadb("threaded-browser");
+const mesh = db.connectMesh({
+  room: "demo-room",
+  relayUrl: "ws://127.0.0.1:9010",
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: ["turn:turn.example.com:3478?transport=udp"],
+      username: "user",
+      credential: "pass",
+    },
+  ],
+});
 console.log(parallelEnabled(), parallelThreadCount());
 ```
 

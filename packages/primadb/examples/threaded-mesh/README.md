@@ -39,3 +39,10 @@ Cross-browser relay mode:
 ```text
 http://127.0.0.1:4181/examples/threaded-mesh/?signal=relay&relay=ws://127.0.0.1:9010
 ```
+
+This example uses `stun:stun.cloudflare.com:3478` by default. To override it from the URL, repeat
+`ice=` with either a bare STUN/TURN URL or an encoded JSON object:
+
+```text
+http://127.0.0.1:4181/examples/threaded-mesh/?signal=relay&relay=ws://127.0.0.1:9010&ice=stun:stun.l.google.com:19302
+```

@@ -13,6 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--action", default="live", choices=["live", "verify-stored"])
     parser.add_argument("--relay", default="ws://127.0.0.1:9010")
+    parser.add_argument("--ice-server", action="append", default=[])
     parser.add_argument("--room", default="primadb-mesh-agent")
     parser.add_argument("--replica", default=f"python-agent-{os.getpid()}")
     parser.add_argument("--storage-dir")
@@ -24,6 +25,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hold-ms", type=int, default=2_000)
     parser.add_argument("--write-delay-ms", type=int, default=0)
     return parser.parse_args()
+
+
+def parse_ice_server_specs(specs: list[str]) -> list[dict[str, object]]:
+    servers: list[dict[str, object]] = []
+    for spec in specs:
+        trimmed = spec.strip()
+        if trimmed.startswith("{"):
+            value = json.loads(trimmed)
+            if not isinstance(value, dict):
+                raise ValueError("--ice-server JSON must decode to an object")
+            servers.append(value)
+        else:
+            if not trimmed.startswith(("stun:", "turn:", "turns:")):
+                raise ValueError(
+                    f"invalid --ice-server value `{trimmed}`; use a STUN/TURN URL or JSON object"
+                )
+            servers.append({"urls": trimmed})
+    return servers
+
+
+def test_ice_servers() -> list[dict[str, object]]:
+    return [{"urls": "stun:stun.cloudflare.com:3478"}]
 
 
 def wait(ms: int) -> None:
@@ -91,6 +114,11 @@ def main() -> None:
             "room": options.room,
             "relayUrl": options.relay,
             "retryIntervalMs": 500,
+            "iceServers": (
+                parse_ice_server_specs(options.ice_server)
+                if options.ice_server
+                else test_ice_servers()
+            ),
         }
     )
 

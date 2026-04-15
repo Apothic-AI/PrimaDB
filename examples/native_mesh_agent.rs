@@ -56,9 +56,13 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut mesh = db
-        .connect_mesh(MeshConfig::relay(&options.room, &options.relay))
-        .await?;
+    let mut mesh_config = MeshConfig::relay(&options.room, &options.relay);
+    mesh_config.ice_servers = if options.ice_servers.is_empty() {
+        default_example_ice_servers()
+    } else {
+        options.ice_servers.clone()
+    };
+    let mut mesh = db.connect_mesh(mesh_config).await?;
 
     wait_for_open_peers(&mesh, options.min_peers, options.timeout_ms).await?;
 
@@ -70,18 +74,27 @@ async fn main() -> anyhow::Result<()> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        db.root("boards").field(&options.room).field("notes").set(json!({
-            "title": title,
-            "body": options.write_body,
-            "done": false,
-            "archived": false,
-            "created_at": now,
-            "updated_at": now,
-        }))?;
+        db.root("boards")
+            .field(&options.room)
+            .field("notes")
+            .set(json!({
+                "title": title,
+                "body": options.write_body,
+                "done": false,
+                "archived": false,
+                "created_at": now,
+                "updated_at": now,
+            }))?;
         mesh.flush_pending().await?;
     }
 
-    let titles = wait_for_titles(&db, &options.room, &options.expected_titles, options.timeout_ms).await?;
+    let titles = wait_for_titles(
+        &db,
+        &options.room,
+        &options.expected_titles,
+        options.timeout_ms,
+    )
+    .await?;
 
     println!(
         "{}",
@@ -113,6 +126,7 @@ struct Options {
     relay: String,
     room: String,
     replica: String,
+    ice_servers: Vec<primadb::IceServerConfig>,
     storage_dir: Option<String>,
     write_title: Option<String>,
     write_body: String,
@@ -130,6 +144,7 @@ impl Options {
         let mut relay = "ws://127.0.0.1:9010".to_owned();
         let mut room = "primadb-mesh-agent".to_owned();
         let mut replica = format!("rust-mesh-agent-{}", std::process::id());
+        let mut ice_servers = Vec::new();
         let mut storage_dir = None;
         let mut write_title = None;
         let mut write_body = "rust mesh agent".to_owned();
@@ -142,13 +157,48 @@ impl Options {
         let mut iter = args.into_iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
-                "--action" => action = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --action"))?,
-                "--relay" => relay = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --relay"))?,
-                "--room" => room = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --room"))?,
-                "--replica" => replica = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --replica"))?,
-                "--storage-dir" => storage_dir = Some(iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --storage-dir"))?),
-                "--write-title" => write_title = Some(iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --write-title"))?),
-                "--write-body" => write_body = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --write-body"))?,
+                "--action" => {
+                    action = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --action"))?
+                }
+                "--relay" => {
+                    relay = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --relay"))?
+                }
+                "--room" => {
+                    room = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --room"))?
+                }
+                "--replica" => {
+                    replica = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --replica"))?
+                }
+                "--ice-server" => ice_servers.push(parse_ice_server_spec(
+                    &iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --ice-server"))?,
+                )?),
+                "--storage-dir" => {
+                    storage_dir = Some(
+                        iter.next()
+                            .ok_or_else(|| anyhow::anyhow!("missing value for --storage-dir"))?,
+                    )
+                }
+                "--write-title" => {
+                    write_title = Some(
+                        iter.next()
+                            .ok_or_else(|| anyhow::anyhow!("missing value for --write-title"))?,
+                    )
+                }
+                "--write-body" => {
+                    write_body = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --write-body"))?
+                }
                 "--expect-titles" => {
                     expected_titles = iter
                         .next()
@@ -158,10 +208,30 @@ impl Options {
                         .map(|value| value.trim().to_owned())
                         .collect();
                 }
-                "--min-peers" => min_peers = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --min-peers"))?.parse()?,
-                "--timeout-ms" => timeout_ms = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --timeout-ms"))?.parse()?,
-                "--hold-ms" => hold_ms = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --hold-ms"))?.parse()?,
-                "--write-delay-ms" => write_delay_ms = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --write-delay-ms"))?.parse()?,
+                "--min-peers" => {
+                    min_peers = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --min-peers"))?
+                        .parse()?
+                }
+                "--timeout-ms" => {
+                    timeout_ms = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --timeout-ms"))?
+                        .parse()?
+                }
+                "--hold-ms" => {
+                    hold_ms = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --hold-ms"))?
+                        .parse()?
+                }
+                "--write-delay-ms" => {
+                    write_delay_ms = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --write-delay-ms"))?
+                        .parse()?
+                }
                 other => return Err(anyhow::anyhow!("unknown argument `{other}`")),
             }
         }
@@ -171,6 +241,7 @@ impl Options {
             relay,
             room,
             replica,
+            ice_servers,
             storage_dir,
             write_title,
             write_body,
@@ -181,6 +252,34 @@ impl Options {
             write_delay_ms,
         })
     }
+}
+
+#[cfg(feature = "native-webrtc")]
+fn parse_ice_server_spec(spec: &str) -> anyhow::Result<primadb::IceServerConfig> {
+    let trimmed = spec.trim();
+    if trimmed.starts_with('{') {
+        return Ok(serde_json::from_str(trimmed)?);
+    }
+    if trimmed.starts_with("stun:") || trimmed.starts_with("turn:") || trimmed.starts_with("turns:")
+    {
+        return Ok(primadb::IceServerConfig {
+            urls: primadb::IceServerUrls::One(trimmed.to_owned()),
+            username: None,
+            credential: None,
+        });
+    }
+    Err(anyhow::anyhow!(
+        "invalid --ice-server value `{trimmed}`; use a STUN/TURN URL or JSON object"
+    ))
+}
+
+#[cfg(feature = "native-webrtc")]
+fn default_example_ice_servers() -> Vec<primadb::IceServerConfig> {
+    vec![primadb::IceServerConfig {
+        urls: primadb::IceServerUrls::One("stun:stun.cloudflare.com:3478".to_owned()),
+        username: None,
+        credential: None,
+    }]
 }
 
 #[cfg(feature = "native-webrtc")]
@@ -199,7 +298,13 @@ fn collect_titles(db: &primadb::Primadb, room: &str) -> anyhow::Result<Vec<Strin
         })?;
     Ok(entries
         .into_iter()
-        .filter_map(|entry| entry.value.get("title").and_then(|value| value.as_str()).map(str::to_owned))
+        .filter_map(|entry| {
+            entry
+                .value
+                .get("title")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
         .collect())
 }
 

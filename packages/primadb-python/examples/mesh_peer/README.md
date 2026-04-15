@@ -29,6 +29,17 @@ uv run python main.py --room package-mesh --name py-a --message "hello from pyth
 
 Run the same command in a second terminal with a different `--name` to watch replication.
 
+This example uses `stun:stun.cloudflare.com:3478` by default. To override it, repeat `--ice-server`.
+Each value can be either a bare
+STUN/TURN URL or a JSON object with `urls`, `username`, and `credential`:
+
+```bash
+uv run python main.py \
+  --room package-mesh \
+  --ice-server stun:stun.l.google.com:19302 \
+  --ice-server '{"urls":"turn:turn.example.com:3478","username":"user","credential":"pass"}'
+```
+
 Offline retry smoke:
 
 ```bash

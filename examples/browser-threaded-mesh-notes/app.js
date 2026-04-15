@@ -6,6 +6,7 @@ const SNAPSHOT_KEY = "main";
 const DEFAULT_MESH_ROOM = "primadb-browser-threaded-mesh-notes";
 const DEFAULT_SIGNAL_MODE = "relay";
 const SEEDED_NOTE_TOTAL = 320;
+const DEFAULT_EXAMPLE_ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
 
 const session = createSessionConfig();
 
@@ -82,6 +83,7 @@ async function main() {
     signaling: session.signal === "broadcast" ? "broadcast_channel" : "relay",
     relayUrl: session.signal === "broadcast" ? undefined : session.relayUrl,
     retryIntervalMs: 1500,
+    iceServers: session.iceServers,
   });
   bindUi();
   startStatusLoop();
@@ -129,12 +131,25 @@ function createSessionConfig() {
   const protocol = globalThis.location.protocol === "https:" ? "wss" : "ws";
   const relayUrl =
     params.get("relay")?.trim() || `${protocol}://${globalThis.location.hostname}:9010`;
+  const iceServers = params.getAll("ice").map(parseIceServerSpec);
   return {
     room,
     signal: signal === "broadcast" ? "broadcast" : "relay",
     relayUrl,
+    iceServers: iceServers.length > 0 ? iceServers : DEFAULT_EXAMPLE_ICE_SERVERS,
     snapshotDb: `${DEFAULT_SNAPSHOT_DB}-${room}`,
   };
+}
+
+function parseIceServerSpec(spec) {
+  const trimmed = String(spec).trim();
+  if (trimmed.startsWith("{")) {
+    return JSON.parse(trimmed);
+  }
+  if (trimmed.startsWith("stun:") || trimmed.startsWith("turn:") || trimmed.startsWith("turns:")) {
+    return { urls: trimmed };
+  }
+  throw new Error(`invalid ice query parameter \`${trimmed}\`; use a STUN/TURN URL or JSON object`);
 }
 
 async function setupPersistence() {

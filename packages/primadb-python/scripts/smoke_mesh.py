@@ -17,6 +17,7 @@ RELAY_URL = os.environ.get("PRIMADB_PYTHON_MESH_RELAY_URL", f"ws://{RELAY_ADDR}"
 ROOM = os.environ.get("PRIMADB_PYTHON_MESH_ROOM", f"python-mesh-{int(time.time() * 1000)}")
 TITLE = os.environ.get("PRIMADB_PYTHON_MESH_TITLE", f"Python mesh smoke {int(time.time() * 1000)}")
 PORT = int(RELAY_ADDR.rsplit(":", 1)[-1])
+ICE_SERVERS = [{"urls": "stun:stun.cloudflare.com:3478"}]
 
 
 def wait(ms: int) -> None:
@@ -69,8 +70,8 @@ def main() -> None:
         waiter_db = Primadb("python-mesh-waiter")
         writer_db = Primadb("python-mesh-writer")
 
-        waiter = waiter_db.connect_mesh({"room": ROOM, "relayUrl": RELAY_URL})
-        writer = writer_db.connect_mesh({"room": ROOM, "relayUrl": RELAY_URL})
+        waiter = waiter_db.connect_mesh({"room": ROOM, "relayUrl": RELAY_URL, "iceServers": ICE_SERVERS})
+        writer = writer_db.connect_mesh({"room": ROOM, "relayUrl": RELAY_URL, "iceServers": ICE_SERVERS})
 
         deadline = time.time() + 45
         while time.time() < deadline:

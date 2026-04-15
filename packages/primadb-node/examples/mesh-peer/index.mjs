@@ -9,6 +9,7 @@ function parseArgs(argv) {
   const values = {
     room: "package-mesh",
     relay: "ws://127.0.0.1:9010",
+    iceServers: [],
     name: `node-${process.pid}`,
     message: "",
     durationMs: 15_000,
@@ -23,6 +24,9 @@ function parseArgs(argv) {
     } else if (arg === "--relay" && next) {
       values.relay = next;
       index += 1;
+    } else if (arg === "--ice-server" && next) {
+      values.iceServers.push(parseIceServerSpec(next));
+      index += 1;
     } else if (arg === "--name" && next) {
       values.name = next;
       index += 1;
@@ -36,6 +40,25 @@ function parseArgs(argv) {
   }
 
   return values;
+}
+
+function parseIceServerSpec(spec) {
+  const trimmed = String(spec).trim();
+  if (trimmed.startsWith("{")) {
+    const value = JSON.parse(trimmed);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("--ice-server JSON must decode to an object");
+    }
+    return value;
+  }
+  if (trimmed.startsWith("stun:") || trimmed.startsWith("turn:") || trimmed.startsWith("turns:")) {
+    return { urls: trimmed };
+  }
+  throw new Error(`invalid --ice-server value \`${trimmed}\`; use a STUN/TURN URL or JSON object`);
+}
+
+function defaultExampleIceServers() {
+  return [{ urls: "stun:stun.cloudflare.com:3478" }];
 }
 
 function sleep(ms) {
@@ -64,6 +87,7 @@ const mesh = await db.connectMesh({
   room: options.room,
   relayUrl: options.relay,
   retryIntervalMs: 750,
+  iceServers: options.iceServers.length > 0 ? options.iceServers : defaultExampleIceServers(),
 });
 const notes = db.chain("package_examples").field("mesh").field(options.room).field("notes");
 

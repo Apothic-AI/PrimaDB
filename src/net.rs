@@ -52,14 +52,7 @@ pub struct IceServerConfig {
 
 impl IceServerConfig {
     pub fn default_stun_servers() -> Vec<Self> {
-        vec![Self {
-            urls: IceServerUrls::Many(vec![
-                "stun:stun.l.google.com:19302".to_owned(),
-                "stun:stun.cloudflare.com:3478".to_owned(),
-            ]),
-            username: None,
-            credential: None,
-        }]
+        Vec::new()
     }
 }
 
@@ -116,11 +109,7 @@ impl MeshConfig {
     }
 
     pub fn effective_ice_servers(&self) -> Vec<IceServerConfig> {
-        if self.ice_servers.is_empty() {
-            IceServerConfig::default_stun_servers()
-        } else {
-            self.ice_servers.clone()
-        }
+        self.ice_servers.clone()
     }
 }
 

@@ -29,3 +29,14 @@ node ./examples/mesh-peer/index.mjs --room package-mesh --name node-a --message 
 ```
 
 Run the same command in a second terminal with a different `--name` to watch replication.
+
+This example uses `stun:stun.cloudflare.com:3478` by default. To override it, repeat `--ice-server`.
+Each value can be either a bare
+STUN/TURN URL or a JSON object with `urls`, `username`, and `credential`:
+
+```bash
+node ./examples/mesh-peer/index.mjs \
+  --room package-mesh \
+  --ice-server stun:stun.l.google.com:19302 \
+  --ice-server '{"urls":"turn:turn.example.com:3478","username":"user","credential":"pass"}'
+```

@@ -15,7 +15,13 @@ async fn main() -> anyhow::Result<()> {
 
     let options = Options::parse(env::args().skip(1).collect())?;
     let db = Primadb::with_replica_id(options.replica.clone());
-    let mut mesh = db.connect_mesh(MeshConfig::relay(&options.room, &options.relay)).await?;
+    let mut mesh_config = MeshConfig::relay(&options.room, &options.relay);
+    mesh_config.ice_servers = if options.ice_servers.is_empty() {
+        default_example_ice_servers()
+    } else {
+        options.ice_servers.clone()
+    };
+    let mut mesh = db.connect_mesh(mesh_config).await?;
     let notes = db.root("boards").field(&options.room).field("notes");
 
     wait_for_open_peers(&mesh, options.expected_peers, options.timeout_ms).await?;
@@ -75,6 +81,7 @@ struct Options {
     relay: String,
     room: String,
     replica: String,
+    ice_servers: Vec<primadb::IceServerConfig>,
     action: String,
     title: Option<String>,
     body: Option<String>,
@@ -89,6 +96,7 @@ impl Options {
         let mut relay = "ws://127.0.0.1:9010".to_owned();
         let mut room = "primadb-native-mesh".to_owned();
         let mut replica = format!("native-mesh-{}", std::process::id());
+        let mut ice_servers = Vec::new();
         let mut action = "status".to_owned();
         let mut title = None;
         let mut body = None;
@@ -99,15 +107,61 @@ impl Options {
         let mut iter = args.into_iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
-                "--relay" => relay = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --relay"))?,
-                "--room" => room = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --room"))?,
-                "--replica" => replica = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --replica"))?,
-                "--action" => action = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --action"))?,
-                "--title" => title = Some(iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --title"))?),
-                "--body" => body = Some(iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --body"))?),
-                "--timeout-ms" => timeout_ms = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --timeout-ms"))?.parse()?,
-                "--hold-ms" => hold_ms = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --hold-ms"))?.parse()?,
-                "--expected-peers" => expected_peers = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --expected-peers"))?.parse()?,
+                "--relay" => {
+                    relay = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --relay"))?
+                }
+                "--room" => {
+                    room = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --room"))?
+                }
+                "--replica" => {
+                    replica = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --replica"))?
+                }
+                "--ice-server" => ice_servers.push(parse_ice_server_spec(
+                    &iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --ice-server"))?,
+                )?),
+                "--action" => {
+                    action = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --action"))?
+                }
+                "--title" => {
+                    title = Some(
+                        iter.next()
+                            .ok_or_else(|| anyhow::anyhow!("missing value for --title"))?,
+                    )
+                }
+                "--body" => {
+                    body = Some(
+                        iter.next()
+                            .ok_or_else(|| anyhow::anyhow!("missing value for --body"))?,
+                    )
+                }
+                "--timeout-ms" => {
+                    timeout_ms = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --timeout-ms"))?
+                        .parse()?
+                }
+                "--hold-ms" => {
+                    hold_ms = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --hold-ms"))?
+                        .parse()?
+                }
+                "--expected-peers" => {
+                    expected_peers = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --expected-peers"))?
+                        .parse()?
+                }
                 other => return Err(anyhow::anyhow!("unknown argument `{other}`")),
             }
         }
@@ -116,6 +170,7 @@ impl Options {
             relay,
             room,
             replica,
+            ice_servers,
             action,
             title,
             body,
@@ -124,6 +179,34 @@ impl Options {
             expected_peers,
         })
     }
+}
+
+#[cfg(feature = "native-webrtc")]
+fn parse_ice_server_spec(spec: &str) -> anyhow::Result<primadb::IceServerConfig> {
+    let trimmed = spec.trim();
+    if trimmed.starts_with('{') {
+        return Ok(serde_json::from_str(trimmed)?);
+    }
+    if trimmed.starts_with("stun:") || trimmed.starts_with("turn:") || trimmed.starts_with("turns:")
+    {
+        return Ok(primadb::IceServerConfig {
+            urls: primadb::IceServerUrls::One(trimmed.to_owned()),
+            username: None,
+            credential: None,
+        });
+    }
+    Err(anyhow::anyhow!(
+        "invalid --ice-server value `{trimmed}`; use a STUN/TURN URL or JSON object"
+    ))
+}
+
+#[cfg(feature = "native-webrtc")]
+fn default_example_ice_servers() -> Vec<primadb::IceServerConfig> {
+    vec![primadb::IceServerConfig {
+        urls: primadb::IceServerUrls::One("stun:stun.cloudflare.com:3478".to_owned()),
+        username: None,
+        credential: None,
+    }]
 }
 
 #[cfg(feature = "native-webrtc")]
@@ -151,11 +234,7 @@ async fn wait_for_open_peers(
 }
 
 #[cfg(feature = "native-webrtc")]
-async fn wait_for_note(
-    notes: &primadb::Chain,
-    title: &str,
-    timeout_ms: u64,
-) -> anyhow::Result<()> {
+async fn wait_for_note(notes: &primadb::Chain, title: &str, timeout_ms: u64) -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
