@@ -150,7 +150,9 @@ impl SegmentFileStore {
     }
 
     fn journal_final_path(&self, tx_id: u64) -> std::path::PathBuf {
-        self.root.join("journal").join(format!("tx-{tx_id:020}.json"))
+        self.root
+            .join("journal")
+            .join(format!("tx-{tx_id:020}.json"))
     }
 
     fn load_node_index_manifest(&self, node_id: &str) -> Result<NodeIndexManifest> {
@@ -324,7 +326,8 @@ impl IncrementalStore for SegmentFileStore {
         collect_files(&root, &mut files)?;
         let mut entries = Vec::with_capacity(files.len());
         for file in files {
-            let entry: DirectScalarIndexEntry = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+            let entry: DirectScalarIndexEntry =
+                serde_json::from_str(&std::fs::read_to_string(file)?)?;
             entries.push(entry);
         }
         entries.sort_by(|left, right| {
@@ -455,9 +458,7 @@ pub fn decode_component(input: &str) -> Result<String> {
         .step_by(2)
         .map(|index| {
             u8::from_str_radix(&input[index..index + 2], 16).map_err(|error| {
-                PrimadbError::Message(format!(
-                    "invalid storage key component `{input}`: {error}"
-                ))
+                PrimadbError::Message(format!("invalid storage key component `{input}`: {error}"))
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -477,7 +478,9 @@ pub fn operation_matches_root(op: &Operation, root: &str) -> bool {
         crate::operation::OperationAction::SetField { node, .. }
         | crate::operation::OperationAction::AddSetMember { node, .. }
         | crate::operation::OperationAction::RemoveSetMember { node, .. }
-        | crate::operation::OperationAction::DeleteField { node, .. } => node_matches_root(node, root),
+        | crate::operation::OperationAction::DeleteField { node, .. } => {
+            node_matches_root(node, root)
+        }
     }
 }
 
@@ -527,7 +530,8 @@ fn auth_node_meta(node_id: &str, node_state: &NodeState) -> AuthNodeMeta {
 fn storage_materialized_scalar(node_id: &str, field: &str, value: &JsonValue) -> Option<JsonValue> {
     #[cfg(feature = "crypto")]
     {
-        let inspected = crate::inspect_signed_field_value(&format!("{node_id}/{field}"), value).ok()?;
+        let inspected =
+            crate::inspect_signed_field_value(&format!("{node_id}/{field}"), value).ok()?;
         if let Some(inspected) = inspected {
             return inspected.unwrapped_value;
         }

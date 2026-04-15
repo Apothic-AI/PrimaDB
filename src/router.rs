@@ -283,8 +283,11 @@ impl Router {
         target: RouteTarget,
         reply_to: impl Into<Option<String>>,
     ) -> RouteEnvelope {
-        let mut route =
-            self.wrap_payload(RoutePayload::WatchRequest { request }, target, reply_to.into());
+        let mut route = self.wrap_payload(
+            RoutePayload::WatchRequest { request },
+            target,
+            reply_to.into(),
+        );
         route.content_hash = None;
         route
     }

@@ -1,7 +1,7 @@
 use crate::binary::BinaryBytes;
-use crate::error::Result;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::PrimadbError;
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Debug;
@@ -33,7 +33,11 @@ pub trait BlobStore: Debug + Send + Sync {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum BlobStorageConfig {
     Memory,
     #[cfg(not(target_arch = "wasm32"))]

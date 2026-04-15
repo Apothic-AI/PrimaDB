@@ -1,6 +1,6 @@
-use async_channel::Receiver;
 use crate::value::{NodeId, NodeState};
 use crate::{DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec};
+use async_channel::Receiver;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;

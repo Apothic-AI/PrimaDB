@@ -108,15 +108,56 @@ impl Options {
         let mut iter = args.into_iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
-                "--relay" => relay = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --relay"))?,
-                "--board" => board = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --board"))?,
-                "--replica" => replica = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --replica"))?,
-                "--action" => action = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --action"))?,
-                "--title" => title = Some(iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --title"))?),
-                "--body" => body = Some(iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --body"))?),
-                "--timeout-ms" => timeout_ms = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --timeout-ms"))?.parse()?,
-                "--hold-ms" => hold_ms = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --hold-ms"))?.parse()?,
-                "--expected-peers" => expected_peers = iter.next().ok_or_else(|| anyhow::anyhow!("missing value for --expected-peers"))?.parse()?,
+                "--relay" => {
+                    relay = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --relay"))?
+                }
+                "--board" => {
+                    board = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --board"))?
+                }
+                "--replica" => {
+                    replica = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --replica"))?
+                }
+                "--action" => {
+                    action = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --action"))?
+                }
+                "--title" => {
+                    title = Some(
+                        iter.next()
+                            .ok_or_else(|| anyhow::anyhow!("missing value for --title"))?,
+                    )
+                }
+                "--body" => {
+                    body = Some(
+                        iter.next()
+                            .ok_or_else(|| anyhow::anyhow!("missing value for --body"))?,
+                    )
+                }
+                "--timeout-ms" => {
+                    timeout_ms = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --timeout-ms"))?
+                        .parse()?
+                }
+                "--hold-ms" => {
+                    hold_ms = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --hold-ms"))?
+                        .parse()?
+                }
+                "--expected-peers" => {
+                    expected_peers = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("missing value for --expected-peers"))?
+                        .parse()?
+                }
                 other => return Err(anyhow::anyhow!("unknown argument `{other}`")),
             }
         }
@@ -160,11 +201,7 @@ async fn wait_for_known_peers(
 }
 
 #[cfg(feature = "native-websocket")]
-async fn wait_for_note(
-    notes: &primadb::Chain,
-    title: &str,
-    timeout_ms: u64,
-) -> anyhow::Result<()> {
+async fn wait_for_note(notes: &primadb::Chain, title: &str, timeout_ms: u64) -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -201,7 +238,11 @@ async fn wait_for_remote_note(
     loop {
         for recommendation in relay.recommended_peers() {
             if let Ok(entries) = relay
-                .remote_query(recommendation.peer.peer_id.clone(), path.clone(), spec.clone())
+                .remote_query(
+                    recommendation.peer.peer_id.clone(),
+                    path.clone(),
+                    spec.clone(),
+                )
                 .await
             {
                 if !entries.is_empty() {
@@ -210,7 +251,9 @@ async fn wait_for_remote_note(
             }
         }
         if Instant::now() >= deadline {
-            return Err(anyhow::anyhow!("timed out waiting for remote note `{title}`"));
+            return Err(anyhow::anyhow!(
+                "timed out waiting for remote note `{title}`"
+            ));
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }

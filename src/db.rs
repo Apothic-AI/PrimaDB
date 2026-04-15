@@ -1,10 +1,12 @@
 use crate::binary::BinaryBytes;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::blob::FileBlobStore;
 use crate::blob::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, BlobStore, MemoryBlobStore, StoredBlob,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::blob::FileBlobStore;
 use crate::clock::{HybridClock, Revision, VersionMarker};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::durable::{DurableStorageBinding, DurableStorageConfig};
 use crate::engine::{
     IncrementalStore, build_storage_metadata, build_storage_transaction,
     build_storage_transaction_from_ops,
@@ -26,8 +28,6 @@ use crate::{
     Identity, PublicIdentity, SecretBoxKey, SecureSyncFrame, SecurityState, StoredSnapshot,
     UserGrant, owner_public_key_for_path,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::durable::{DurableStorageBinding, DurableStorageConfig};
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
 use crate::{MeshConfig, NativeWebRtcMesh};
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
@@ -510,7 +510,9 @@ impl Primadb {
 
         if let Some(root) = root {
             let reachable = collect_snapshot_root_closure(&snapshot.nodes, root);
-            snapshot.nodes.retain(|node_id, _| reachable.contains(node_id));
+            snapshot
+                .nodes
+                .retain(|node_id, _| reachable.contains(node_id));
             snapshot.pending_ops = pending_ops
                 .into_iter()
                 .filter(|op| operation_matches_snapshot_nodes(op, &reachable))
@@ -642,7 +644,10 @@ impl Primadb {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_durable_storage(&self, config: DurableStorageConfig) -> Result<DurableStorageBinding> {
+    pub fn open_durable_storage(
+        &self,
+        config: DurableStorageConfig,
+    ) -> Result<DurableStorageBinding> {
         match config {
             DurableStorageConfig::SnapshotFile { path } => {
                 let loaded = self.use_file_persistence(path)?;
@@ -929,7 +934,12 @@ impl Primadb {
             let transaction = if unflushed_ops.is_empty() {
                 build_storage_transaction(next_storage_tx_id, metadata, nodes)
             } else {
-                build_storage_transaction_from_ops(next_storage_tx_id, metadata, &nodes, &unflushed_ops)
+                build_storage_transaction_from_ops(
+                    next_storage_tx_id,
+                    metadata,
+                    &nodes,
+                    &unflushed_ops,
+                )
             };
             engine.apply_transaction(&transaction)?;
             self.inner.lock().unwrap().next_storage_tx_id = next_storage_tx_id + 1;
@@ -974,7 +984,12 @@ impl Primadb {
                     Some(value) => value,
                     None => return Ok(None),
                 };
-                Ok(Some(inner.materialize_field(&node, &field, &value, &mut BTreeSet::new())))
+                Ok(Some(inner.materialize_field(
+                    &node,
+                    &field,
+                    &value,
+                    &mut BTreeSet::new(),
+                )))
             }
             None => Ok(None),
         }
@@ -1533,17 +1548,10 @@ impl Chain {
             .remove_json(&self.anchor, &self.segments, serde_json::to_value(value)?)
     }
 
-    pub fn put_blob(
-        &self,
-        data: impl AsRef<[u8]>,
-        media_type: Option<&str>,
-    ) -> Result<BlobRef> {
+    pub fn put_blob(&self, data: impl AsRef<[u8]>, media_type: Option<&str>) -> Result<BlobRef> {
         let reference = self.db.store_blob(data.as_ref(), media_type)?;
-        self.db.put_json(
-            &self.anchor,
-            &self.segments,
-            blob_marker_value(&reference),
-        )?;
+        self.db
+            .put_json(&self.anchor, &self.segments, blob_marker_value(&reference))?;
         Ok(reference)
     }
 
@@ -2115,11 +2123,8 @@ impl Inner {
                 );
             }
             ParsedInput::Bytes(bytes) => {
-                let signed = self.sign_scalar_for_path(
-                    path,
-                    bytes_marker_value(&bytes),
-                    certificate,
-                )?;
+                let signed =
+                    self.sign_scalar_for_path(path, bytes_marker_value(&bytes), certificate)?;
                 self.set_field(
                     node.to_owned(),
                     field.to_owned(),
@@ -2127,11 +2132,8 @@ impl Inner {
                 );
             }
             ParsedInput::Blob(reference) => {
-                let signed = self.sign_scalar_for_path(
-                    path,
-                    blob_marker_value(&reference),
-                    certificate,
-                )?;
+                let signed =
+                    self.sign_scalar_for_path(path, blob_marker_value(&reference), certificate)?;
                 self.set_field(
                     node.to_owned(),
                     field.to_owned(),
@@ -2209,7 +2211,10 @@ impl Inner {
                 self.write_object_to_node(&member_id, object, path)?;
                 member_id
             }
-            ParsedInput::Scalar(_) | ParsedInput::Bytes(_) | ParsedInput::Blob(_) | ParsedInput::Set(_) => {
+            ParsedInput::Scalar(_)
+            | ParsedInput::Bytes(_)
+            | ParsedInput::Blob(_)
+            | ParsedInput::Set(_) => {
                 return Err(PrimadbError::InvalidSetMember {
                     path: path.to_owned(),
                 });
@@ -2240,7 +2245,10 @@ impl Inner {
                 self.write_object_to_node_secure(&member_id, object, &member_id, certificate)?;
                 member_id
             }
-            ParsedInput::Scalar(_) | ParsedInput::Bytes(_) | ParsedInput::Blob(_) | ParsedInput::Set(_) => {
+            ParsedInput::Scalar(_)
+            | ParsedInput::Bytes(_)
+            | ParsedInput::Blob(_)
+            | ParsedInput::Set(_) => {
                 return Err(PrimadbError::InvalidSetMember {
                     path: path.to_owned(),
                 });
@@ -2898,11 +2906,11 @@ fn parse_bytes_marker(object: &Map<String, JsonValue>, path: &str) -> Result<Opt
         return Ok(None);
     };
     match value {
-        JsonValue::String(encoded) => BinaryBytes::from_base64(encoded)
-            .map(Some)
-            .map_err(|_| PrimadbError::InvalidBinaryMarker {
+        JsonValue::String(encoded) => BinaryBytes::from_base64(encoded).map(Some).map_err(|_| {
+            PrimadbError::InvalidBinaryMarker {
                 path: path.to_owned(),
-            }),
+            }
+        }),
         _ => Err(PrimadbError::InvalidBinaryMarker {
             path: path.to_owned(),
         }),
@@ -3544,27 +3552,39 @@ fn is_direct_index_path(path: &str) -> bool {
 
 fn filter_matches_index_entry(filter: &QueryFilter, value: &JsonValue) -> bool {
     match filter {
-        QueryFilter::Eq { value: expected, .. } => value == expected,
-        QueryFilter::Ne { value: expected, .. } => value != expected,
-        QueryFilter::Gt { value: expected, .. } => {
-            compare_json_values(value, expected) == Some(Ordering::Greater)
-        }
-        QueryFilter::Gte { value: expected, .. } => matches!(
+        QueryFilter::Eq {
+            value: expected, ..
+        } => value == expected,
+        QueryFilter::Ne {
+            value: expected, ..
+        } => value != expected,
+        QueryFilter::Gt {
+            value: expected, ..
+        } => compare_json_values(value, expected) == Some(Ordering::Greater),
+        QueryFilter::Gte {
+            value: expected, ..
+        } => matches!(
             compare_json_values(value, expected),
             Some(Ordering::Greater | Ordering::Equal)
         ),
-        QueryFilter::Lt { value: expected, .. } => {
-            compare_json_values(value, expected) == Some(Ordering::Less)
-        }
-        QueryFilter::Lte { value: expected, .. } => matches!(
+        QueryFilter::Lt {
+            value: expected, ..
+        } => compare_json_values(value, expected) == Some(Ordering::Less),
+        QueryFilter::Lte {
+            value: expected, ..
+        } => matches!(
             compare_json_values(value, expected),
             Some(Ordering::Less | Ordering::Equal)
         ),
-        QueryFilter::Prefix { value: expected, .. } => value
+        QueryFilter::Prefix {
+            value: expected, ..
+        } => value
             .as_str()
             .map(|candidate| candidate.starts_with(expected))
             .unwrap_or(false),
-        QueryFilter::Contains { value: expected, .. } => value
+        QueryFilter::Contains {
+            value: expected, ..
+        } => value
             .as_str()
             .map(|candidate| candidate.contains(expected))
             .unwrap_or(false),
@@ -3934,14 +3954,19 @@ mod tests {
         let right = Primadb::with_replica_id("bytes-right");
         let payload = vec![0, 7, 42, 255, 128, 1];
 
-        left.root("assets").field("avatar").put_bytes(payload.clone())?;
+        left.root("assets")
+            .field("avatar")
+            .put_bytes(payload.clone())?;
         assert_eq!(
             left.root("assets").field("avatar").once_bytes()?,
             Some(payload.clone())
         );
 
         right.apply_operations(left.drain_pending_operations()?)?;
-        assert_eq!(right.root("assets").field("avatar").once_bytes()?, Some(payload));
+        assert_eq!(
+            right.root("assets").field("avatar").once_bytes()?,
+            Some(payload)
+        );
 
         let materialized = right.root("assets").field("avatar").once_json()?.unwrap();
         assert_eq!(
@@ -3989,10 +4014,10 @@ mod tests {
         })?;
         assert_eq!(binding.backend, "files");
 
-        let reference = first
-            .root("assets")
-            .field("backup")
-            .put_blob(b"native-file-blob".to_vec(), Some("application/octet-stream"))?;
+        let reference = first.root("assets").field("backup").put_blob(
+            b"native-file-blob".to_vec(),
+            Some("application/octet-stream"),
+        )?;
 
         let second = Primadb::with_replica_id("blob-file-b");
         second.open_blob_storage(crate::BlobStorageConfig::Files {
@@ -4099,24 +4124,28 @@ mod tests {
         assert!(reader.use_radisk_storage(path.clone(), 8)?);
         assert_eq!(reader.stats().nodes, 0);
 
-        let open_tasks = reader.root("lists").field("main").field("items").query(QuerySpec {
-            filters: vec![
-                QueryFilter::Eq {
-                    path: "done".to_owned(),
-                    value: json!(false),
-                },
-                QueryFilter::Eq {
-                    path: "archived".to_owned(),
-                    value: json!(false),
-                },
-            ],
-            order: Some(crate::query::QueryOrder {
-                path: "created_at".to_owned(),
-                direction: QueryDirection::Asc,
-            }),
-            limit: Some(50),
-            offset: 0,
-        })?;
+        let open_tasks = reader
+            .root("lists")
+            .field("main")
+            .field("items")
+            .query(QuerySpec {
+                filters: vec![
+                    QueryFilter::Eq {
+                        path: "done".to_owned(),
+                        value: json!(false),
+                    },
+                    QueryFilter::Eq {
+                        path: "archived".to_owned(),
+                        value: json!(false),
+                    },
+                ],
+                order: Some(crate::query::QueryOrder {
+                    path: "created_at".to_owned(),
+                    direction: QueryDirection::Asc,
+                }),
+                limit: Some(50),
+                offset: 0,
+            })?;
 
         assert_eq!(open_tasks.len(), 12);
         assert_eq!(open_tasks[0].value["title"], "Task 1");
@@ -4157,7 +4186,10 @@ mod tests {
         let snapshot = source.snapshot_for_root(Some("rooms"));
 
         let local = Primadb::with_replica_id("local");
-        local.root("status").field("message").put(json!("keep-local"))?;
+        local
+            .root("status")
+            .field("message")
+            .put(json!("keep-local"))?;
         local.merge_snapshot(snapshot)?;
 
         assert_eq!(local.replica_id(), "local");
@@ -4166,12 +4198,16 @@ mod tests {
             json!("keep-local")
         );
 
-        let merged_notes = local.root("rooms").field("lobby").field("notes").query(QuerySpec {
-            filters: Vec::new(),
-            order: None,
-            limit: Some(10),
-            offset: 0,
-        })?;
+        let merged_notes = local
+            .root("rooms")
+            .field("lobby")
+            .field("notes")
+            .query(QuerySpec {
+                filters: Vec::new(),
+                order: None,
+                limit: Some(10),
+                offset: 0,
+            })?;
         assert_eq!(merged_notes.len(), 1);
         assert_eq!(merged_notes[0].value["title"], "Remote note");
         assert_eq!(local.pending_operations().len(), 1);

@@ -1,15 +1,15 @@
+#[cfg(feature = "crypto")]
+use crate::SecureSyncFrame;
 use crate::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription,
     DurableStorageBinding, DurableStorageConfig, HybridClock, IceServerConfig, LexEntry, LexSpec,
     MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, Operation, PeerRecommendation, Primadb,
     PullRequest, PullRequestKind, PullResponse, PullResponseBody, QuerySpec, RelayClientConfig,
-    RemotePath, RemoteResult, RemoteWatchMessage, RouteBatchItem,
-    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope,
-    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, build_storage_metadata,
-    build_storage_transaction, encode_component,
+    RemotePath, RemoteResult, RemoteWatchMessage, RouteBatchItem, RouteEnvelope, RoutePayload,
+    RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope, SyncFrame, WatchEvent,
+    WatchRequest, WatchRequestKind, build_storage_metadata, build_storage_transaction,
+    encode_component,
 };
-#[cfg(feature = "crypto")]
-use crate::SecureSyncFrame;
 use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -292,9 +292,7 @@ impl WasmPrimadb {
 
     #[wasm_bindgen(js_name = mergeSnapshotJson)]
     pub fn merge_snapshot_json(&self, payload: &str) -> std::result::Result<(), JsValue> {
-        self.inner
-            .merge_snapshot_json(payload)
-            .map_err(to_js_error)
+        self.inner.merge_snapshot_json(payload).map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = pendingOperations)]
@@ -441,7 +439,8 @@ impl WasmPrimadb {
                     auto_persist,
                 }
             }
-            DurableStorageConfig::SnapshotFile { .. } | DurableStorageConfig::SegmentFiles { .. } => {
+            DurableStorageConfig::SnapshotFile { .. }
+            | DurableStorageConfig::SegmentFiles { .. } => {
                 return Err(JsValue::from_str(
                     "native durable storage config is not available in the browser",
                 ));
@@ -712,8 +711,8 @@ impl WasmPrimadb {
 
     #[wasm_bindgen(js_name = openBlobStorage)]
     pub fn open_blob_storage(&self, config: JsValue) -> std::result::Result<JsValue, JsValue> {
-        let config: BlobStorageConfig =
-            serde_wasm_bindgen::from_value(config).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let config: BlobStorageConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         match config {
             BlobStorageConfig::IndexedDb {
                 database_name,
@@ -776,7 +775,10 @@ impl WasmPrimadb {
     }
 
     #[wasm_bindgen(js_name = connectRelay)]
-    pub fn connect_relay(&self, config: JsValue) -> std::result::Result<WasmWebSocketSync, JsValue> {
+    pub fn connect_relay(
+        &self,
+        config: JsValue,
+    ) -> std::result::Result<WasmWebSocketSync, JsValue> {
         let config: RelayClientConfig = serde_wasm_bindgen::from_value(config)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         self.connect_relay_config(config)
@@ -950,7 +952,10 @@ impl WasmPrimadb {
         })
     }
 
-    fn connect_mesh_config(&self, config: MeshConfig) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+    fn connect_mesh_config(
+        &self,
+        config: MeshConfig,
+    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
         let room = config.room.clone();
         let rtc_configuration = build_web_rtc_configuration(&config.effective_ice_servers())?;
         let peer_id = format!(
@@ -959,11 +964,9 @@ impl WasmPrimadb {
             js_sys::Date::now() as u64
         );
         let signaling = match config.signaling {
-            MeshSignalingMode::BroadcastChannel => {
-                MeshSignalingTransport::BroadcastChannel(web_sys::BroadcastChannel::new(
-                    &format!("primadb-mesh-{room}"),
-                )?)
-            }
+            MeshSignalingMode::BroadcastChannel => MeshSignalingTransport::BroadcastChannel(
+                web_sys::BroadcastChannel::new(&format!("primadb-mesh-{room}"))?,
+            ),
             MeshSignalingMode::Relay => {
                 let url = config
                     .relay_url
@@ -997,48 +1000,49 @@ impl WasmPrimadb {
         }));
         let (signaling_onmessage, relay_onopen, relay_onclose, relay_onerror) =
             match state.borrow().signaling.clone() {
-            MeshSignalingTransport::BroadcastChannel(signaling) => {
-                let signal_state = state.clone();
-                let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
-                    let Ok(signal) = serde_wasm_bindgen::from_value::<MeshSignal>(event.data())
-                    else {
-                        return;
-                    };
-                    let _ = handle_mesh_signal_state(&signal_state, signal);
-                }) as Box<dyn FnMut(_)>);
-                signaling.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-                (Some(onmessage), None, None, None)
-            }
-            MeshSignalingTransport::Relay { socket, relay_url } => {
-                let onmessage_state = state.clone();
-                let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
-                    if let Some(payload) = event.data().as_string() {
-                        let _ = handle_mesh_signaling_websocket_message(&onmessage_state, &payload);
-                    }
-                }) as Box<dyn FnMut(_)>);
-                socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+                MeshSignalingTransport::BroadcastChannel(signaling) => {
+                    let signal_state = state.clone();
+                    let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+                        let Ok(signal) = serde_wasm_bindgen::from_value::<MeshSignal>(event.data())
+                        else {
+                            return;
+                        };
+                        let _ = handle_mesh_signal_state(&signal_state, signal);
+                    }) as Box<dyn FnMut(_)>);
+                    signaling.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+                    (Some(onmessage), None, None, None)
+                }
+                MeshSignalingTransport::Relay { socket, relay_url } => {
+                    let onmessage_state = state.clone();
+                    let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+                        if let Some(payload) = event.data().as_string() {
+                            let _ =
+                                handle_mesh_signaling_websocket_message(&onmessage_state, &payload);
+                        }
+                    }) as Box<dyn FnMut(_)>);
+                    socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
-                let onopen_state = state.clone();
-                let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                    let _ = send_mesh_presence_state(&onopen_state, &relay_url);
-                    let _ = announce_mesh_join_state(&onopen_state);
-                    let _ = retry_mesh_inflight_state(&onopen_state);
-                    let _ = flush_mesh_pending_state(&onopen_state);
-                }) as Box<dyn FnMut(_)>);
-                socket.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+                    let onopen_state = state.clone();
+                    let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                        let _ = send_mesh_presence_state(&onopen_state, &relay_url);
+                        let _ = announce_mesh_join_state(&onopen_state);
+                        let _ = retry_mesh_inflight_state(&onopen_state);
+                        let _ = flush_mesh_pending_state(&onopen_state);
+                    }) as Box<dyn FnMut(_)>);
+                    socket.set_onopen(Some(onopen.as_ref().unchecked_ref()));
 
-                let onclose = Closure::wrap(Box::new(move |_event: web_sys::CloseEvent| {
-                    // Existing peer data channels may remain alive after signaling disconnects.
-                }) as Box<dyn FnMut(_)>);
-                socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+                    let onclose = Closure::wrap(Box::new(move |_event: web_sys::CloseEvent| {
+                        // Existing peer data channels may remain alive after signaling disconnects.
+                    }) as Box<dyn FnMut(_)>);
+                    socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
-                let onerror = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                    // Keep the current mesh alive for already-open data channels.
-                }) as Box<dyn FnMut(_)>);
-                socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-                (Some(onmessage), Some(onopen), Some(onclose), Some(onerror))
-            }
-        };
+                    let onerror = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                        // Keep the current mesh alive for already-open data channels.
+                    }) as Box<dyn FnMut(_)>);
+                    socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+                    (Some(onmessage), Some(onopen), Some(onclose), Some(onerror))
+                }
+            };
 
         let change_subscription = self.inner.subscribe_changes();
         let receiver = change_subscription.receiver();
@@ -1334,7 +1338,8 @@ impl WasmChain {
             &config.namespace,
             &reference.id,
         )
-        .await? {
+        .await?
+        {
             Some(blob) => Ok(js_sys::Uint8Array::from(blob.data.as_slice()).into()),
             None => Ok(JsValue::NULL),
         }
@@ -1364,7 +1369,9 @@ fn remote_result_to_js(result: &RemoteResult) -> std::result::Result<JsValue, Js
             Some(value) => json_to_supported_js(value),
             None => Ok(JsValue::NULL),
         },
-        RemoteResult::Map { entries } | RemoteResult::Query { entries } => map_entries_to_js(entries),
+        RemoteResult::Map { entries } | RemoteResult::Query { entries } => {
+            map_entries_to_js(entries)
+        }
         RemoteResult::Lex { entries } => lex_entries_to_js(entries),
         RemoteResult::Snapshot { snapshot } => to_js(snapshot),
     }
@@ -1382,7 +1389,10 @@ fn remote_watch_payload_to_js(
         Some(Ok(message)) => {
             set("done", JsValue::FALSE)?;
             set("initial", JsValue::from_bool(message.initial))?;
-            set("kind", JsValue::from_str(remote_result_kind(&message.result)))?;
+            set(
+                "kind",
+                JsValue::from_str(remote_result_kind(&message.result)),
+            )?;
             set("value", remote_result_to_js(&message.result)?)?;
             set("error", JsValue::NULL)?;
         }
@@ -1499,7 +1509,8 @@ impl WasmIndexedDbBlobStorage {
             &self.config.namespace,
             &blob_id,
         )
-        .await? {
+        .await?
+        {
             Some(blob) => Ok(js_sys::Uint8Array::from(blob.data.as_slice()).into()),
             None => Ok(JsValue::NULL),
         }
@@ -2443,7 +2454,9 @@ fn handle_watch_request_state(
     request: WatchRequest,
 ) -> std::result::Result<(), JsValue> {
     match request.request {
-        WatchRequestKind::Subscribe { request: request_kind } => {
+        WatchRequestKind::Subscribe {
+            request: request_kind,
+        } => {
             let limit = state.borrow().db.limits().max_active_remote_watches.max(1);
             {
                 let mut borrowed = state.borrow_mut();
@@ -2467,7 +2480,10 @@ fn handle_watch_request_state(
             let _ = emit_single_incoming_watch_update_state(state, &request.watch_id, true)?;
         }
         WatchRequestKind::Cancel => {
-            state.borrow_mut().incoming_watches.remove(&request.watch_id);
+            state
+                .borrow_mut()
+                .incoming_watches
+                .remove(&request.watch_id);
         }
     }
     Ok(())
@@ -2477,9 +2493,14 @@ fn accept_watch_event_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
     event: WatchEvent,
 ) -> std::result::Result<(), JsValue> {
-    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
-        None;
-    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+    let mut deliver: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        RemoteWatchMessage,
+    )> = None;
+    let mut failure: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        String,
+    )> = None;
 
     {
         let mut borrowed = state.borrow_mut();
@@ -2545,7 +2566,11 @@ fn emit_incoming_watch_updates_state(
 ) -> std::result::Result<usize, JsValue> {
     let watch_ids = {
         let borrowed = state.borrow();
-        borrowed.incoming_watches.keys().cloned().collect::<Vec<_>>()
+        borrowed
+            .incoming_watches
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
     };
     let mut emitted = 0;
     for watch_id in watch_ids {
@@ -2731,7 +2756,9 @@ fn handle_mesh_watch_request_state(
     request: WatchRequest,
 ) -> std::result::Result<(), JsValue> {
     match request.request {
-        WatchRequestKind::Subscribe { request: request_kind } => {
+        WatchRequestKind::Subscribe {
+            request: request_kind,
+        } => {
             let limit = state.borrow().db.limits().max_active_remote_watches.max(1);
             {
                 let mut borrowed = state.borrow_mut();
@@ -2755,7 +2782,10 @@ fn handle_mesh_watch_request_state(
             let _ = emit_single_incoming_mesh_watch_update_state(state, &request.watch_id, true)?;
         }
         WatchRequestKind::Cancel => {
-            state.borrow_mut().incoming_watches.remove(&request.watch_id);
+            state
+                .borrow_mut()
+                .incoming_watches
+                .remove(&request.watch_id);
         }
     }
     Ok(())
@@ -2765,9 +2795,14 @@ fn accept_mesh_watch_event_state(
     state: &Rc<RefCell<WebRtcMeshState>>,
     event: WatchEvent,
 ) -> std::result::Result<(), JsValue> {
-    let mut deliver: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, RemoteWatchMessage)> =
-        None;
-    let mut failure: Option<(Sender<std::result::Result<RemoteWatchMessage, String>>, String)> = None;
+    let mut deliver: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        RemoteWatchMessage,
+    )> = None;
+    let mut failure: Option<(
+        Sender<std::result::Result<RemoteWatchMessage, String>>,
+        String,
+    )> = None;
 
     {
         let mut borrowed = state.borrow_mut();
@@ -2833,7 +2868,11 @@ fn emit_incoming_mesh_watch_updates_state(
 ) -> std::result::Result<usize, JsValue> {
     let watch_ids = {
         let borrowed = state.borrow();
-        borrowed.incoming_watches.keys().cloned().collect::<Vec<_>>()
+        borrowed
+            .incoming_watches
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
     };
     let mut emitted = 0;
     for watch_id in watch_ids {
@@ -3229,10 +3268,7 @@ fn handle_mesh_signaling_websocket_message(
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                let in_room = peer
-                    .topics
-                    .iter()
-                    .any(|topic| topic == &channel)
+                let in_room = peer.topics.iter().any(|topic| topic == &channel)
                     || peer
                         .metadata
                         .get("mesh_room")
@@ -3247,7 +3283,10 @@ fn handle_mesh_signaling_websocket_message(
                     )?;
                 }
             }
-            RoutePayload::Signal { room: signal_room, payload } => {
+            RoutePayload::Signal {
+                room: signal_room,
+                payload,
+            } => {
                 if signal_room != room {
                     continue;
                 }
@@ -3257,10 +3296,7 @@ fn handle_mesh_signaling_websocket_message(
             RoutePayload::PeerExchange { peers } => {
                 for recommendation in peers {
                     let peer = recommendation.peer;
-                    let in_room = peer
-                        .topics
-                        .iter()
-                        .any(|topic| topic == &channel)
+                    let in_room = peer.topics.iter().any(|topic| topic == &channel)
                         || peer
                             .metadata
                             .get("mesh_room")
@@ -3312,10 +3348,7 @@ fn handle_mesh_signal_state(
                     .and_then(|peer| peer.channel.as_ref())
                     .is_some_and(mesh_channel_is_open);
                 let is_stale = peer.is_some_and(|peer| {
-                    !peer
-                        .channel
-                        .as_ref()
-                        .is_some_and(mesh_channel_is_open)
+                    !peer.channel.as_ref().is_some_and(mesh_channel_is_open)
                         && (js_sys::Date::now() as u64).saturating_sub(peer.created_at_millis)
                             >= STALE_MESH_PEER_MILLIS
                 });
@@ -4002,8 +4035,8 @@ async fn save_blob_indexed_db(
     let prefix = blob_namespace_prefix(namespace);
     let meta_key = format!("{prefix}meta/{}", encode_component(&reference.id));
     let data_key = format!("{prefix}data/{}", encode_component(&reference.id));
-    let meta_value =
-        serde_wasm_bindgen::to_value(&reference).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let meta_value = serde_wasm_bindgen::to_value(&reference)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let meta_request = store.put_with_key(&meta_value, &JsValue::from_str(&meta_key))?;
     let data_value = js_sys::Uint8Array::from(data.as_slice());
     let data_request = store.put_with_key(&data_value, &JsValue::from_str(&data_key))?;
@@ -4038,8 +4071,8 @@ async fn load_blob_indexed_db(
     if data_value.is_undefined() || data_value.is_null() {
         return Ok(None);
     }
-    let reference: BlobRef =
-        serde_wasm_bindgen::from_value(meta_value).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let reference: BlobRef = serde_wasm_bindgen::from_value(meta_value)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     Ok(Some(crate::StoredBlob {
         reference,
         data: crate::BinaryBytes::from(js_sys::Uint8Array::new(&data_value).to_vec()),
@@ -4070,14 +4103,15 @@ async fn save_segment_transaction_indexed_db(
     transaction: &crate::StorageTransaction,
 ) -> std::result::Result<(), JsValue> {
     let db = open_indexed_db(database_name, store_name).await?;
-    let tx = db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readwrite)?;
+    let tx =
+        db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readwrite)?;
     let store = tx.object_store(store_name)?;
     let _ = await_idb_request(store.clear()?.unchecked_ref()).await?;
 
     let prefix = segment_namespace_prefix(namespace);
     let metadata_key = format!("{prefix}meta");
-    let metadata_value =
-        serde_wasm_bindgen::to_value(&transaction.metadata).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let metadata_value = serde_wasm_bindgen::to_value(&transaction.metadata)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let _ = await_idb_request(
         store
             .put_with_key(&metadata_value, &JsValue::from_str(&metadata_key))?
@@ -4087,8 +4121,8 @@ async fn save_segment_transaction_indexed_db(
 
     for (node_id, node_state) in &transaction.nodes {
         let key = format!("{prefix}node/{}", encode_component(node_id));
-        let value =
-            serde_wasm_bindgen::to_value(node_state).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let value = serde_wasm_bindgen::to_value(node_state)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let _ = await_idb_request(
             store
                 .put_with_key(&value, &JsValue::from_str(&key))?
@@ -4099,8 +4133,8 @@ async fn save_segment_transaction_indexed_db(
 
     for (node_id, auth_meta) in &transaction.auth_meta {
         let key = format!("{prefix}auth/{}", encode_component(node_id));
-        let value =
-            serde_wasm_bindgen::to_value(auth_meta).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let value = serde_wasm_bindgen::to_value(auth_meta)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let _ = await_idb_request(
             store
                 .put_with_key(&value, &JsValue::from_str(&key))?
@@ -4111,8 +4145,8 @@ async fn save_segment_transaction_indexed_db(
 
     for (node_id, manifest) in &transaction.node_indexes {
         let key = format!("{prefix}node_index/{}", encode_component(node_id));
-        let value =
-            serde_wasm_bindgen::to_value(manifest).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let value = serde_wasm_bindgen::to_value(manifest)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let _ = await_idb_request(
             store
                 .put_with_key(&value, &JsValue::from_str(&key))?
@@ -4123,8 +4157,8 @@ async fn save_segment_transaction_indexed_db(
 
     for (key, entry) in &transaction.direct_indexes {
         let full_key = format!("{prefix}index/{key}");
-        let value =
-            serde_wasm_bindgen::to_value(entry).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let value = serde_wasm_bindgen::to_value(entry)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let _ = await_idb_request(
             store
                 .put_with_key(&value, &JsValue::from_str(&full_key))?
