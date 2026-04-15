@@ -12,7 +12,7 @@ function parseArgs(argv) {
     iceServers: [],
     name: `node-${process.pid}`,
     message: "",
-    durationMs: 15_000,
+    durationMs: null,
   };
 
   for (let index = 2; index < argv.length; index += 1) {
@@ -34,7 +34,10 @@ function parseArgs(argv) {
       values.message = next;
       index += 1;
     } else if (arg === "--duration-ms" && next) {
-      values.durationMs = Number.parseInt(next, 10) || values.durationMs;
+      const parsed = Number.parseInt(next, 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        values.durationMs = parsed;
+      }
       index += 1;
     }
   }
@@ -103,7 +106,7 @@ if (options.message) {
 
 let previous = "";
 let lastRelayConnected = null;
-const deadline = Date.now() + options.durationMs;
+const deadline = options.durationMs == null ? Number.POSITIVE_INFINITY : Date.now() + options.durationMs;
 while (Date.now() < deadline) {
   const relayConnected = mesh.relayConnected();
   if (relayConnected !== lastRelayConnected) {

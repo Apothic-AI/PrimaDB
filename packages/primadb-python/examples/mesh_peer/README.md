@@ -28,6 +28,13 @@ uv run python main.py --room package-mesh --name py-a --message "hello from pyth
 ```
 
 Run the same command in a second terminal with a different `--name` to watch replication.
+By default, the example keeps running until you stop it with `Ctrl+C`.
+
+For a bounded run, add `--duration-ms`:
+
+```bash
+uv run python main.py --room package-mesh --name py-a --duration-ms 15000
+```
 
 This example uses `stun:stun.cloudflare.com:3478` by default. To override it, repeat `--ice-server`.
 Each value can be either a bare

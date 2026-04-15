@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ice-server", action="append", default=[])
     parser.add_argument("--name", default=f"py-{int(time.time())}")
     parser.add_argument("--message", default="")
-    parser.add_argument("--duration-ms", type=int, default=15_000)
+    parser.add_argument("--duration-ms", type=int, default=None)
     return parser.parse_args()
 
 
@@ -77,8 +77,11 @@ def main() -> None:
 
     previous = ""
     last_relay_connected: bool | None = None
-    deadline = time.time() + (args.duration_ms / 1000)
-    while time.time() < deadline:
+    deadline = None
+    if args.duration_ms is not None and args.duration_ms > 0:
+        deadline = time.time() + (args.duration_ms / 1000)
+
+    while deadline is None or time.time() < deadline:
         relay_connected = mesh.relay_connected()
         if relay_connected != last_relay_connected:
             if relay_connected:

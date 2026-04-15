@@ -29,6 +29,13 @@ node ./examples/mesh-peer/index.mjs --room package-mesh --name node-a --message 
 ```
 
 Run the same command in a second terminal with a different `--name` to watch replication.
+By default, the example keeps running until you stop it with `Ctrl+C`.
+
+For a bounded run, add `--duration-ms`:
+
+```bash
+node ./examples/mesh-peer/index.mjs --room package-mesh --name node-a --duration-ms 15000
+```
 
 This example uses `stun:stun.cloudflare.com:3478` by default. To override it, repeat `--ice-server`.
 Each value can be either a bare
