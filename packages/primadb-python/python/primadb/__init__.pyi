@@ -1,4 +1,45 @@
-from typing import Any, Optional
+from typing import Any, Optional, Protocol, TypedDict
+
+class PeerHookContext(TypedDict, total=False):
+    peerId: str
+    replicaId: str
+    transport: str
+    capabilities: list[str]
+    topics: list[str]
+    metadata: dict[str, str]
+
+class ConnectHookContext(TypedDict, total=False):
+    peer: PeerHookContext
+    transport: str
+    relayUrl: Optional[str]
+
+class RoomHookContext(TypedDict, total=False):
+    peerId: str
+    room: str
+    transport: str
+    peer: Optional[PeerHookContext]
+
+class ServeRequestContext(TypedDict, total=False):
+    peerId: str
+    transport: str
+    requestId: Optional[str]
+    watchId: Optional[str]
+    request: Any
+
+class ServeResultContext(TypedDict, total=False):
+    peerId: str
+    transport: str
+    requestId: Optional[str]
+    watchId: Optional[str]
+    request: Any
+    initial: bool
+
+class NetworkHooks(Protocol):
+    def on_connect(self, context: ConnectHookContext, /) -> Any: ...
+    def on_join_room(self, context: RoomHookContext, /) -> Any: ...
+    def on_pull(self, context: ServeRequestContext, /) -> Any: ...
+    def on_watch(self, context: ServeRequestContext, /) -> Any: ...
+    def on_serve_result(self, context: ServeResultContext, result: Any, /) -> Any: ...
 
 class Primadb:
     def __init__(self, replica_id: Optional[str] = ...) -> None: ...
@@ -21,6 +62,8 @@ class Primadb:
     def open_blob_storage(self, config: Any) -> Any: ...
     def connect_relay(self, config: Any) -> WebSocketSync: ...
     def connect_mesh(self, config: Any) -> WebRtcMesh: ...
+    def set_network_hooks(self, hooks: NetworkHooks | dict[str, Any] | object | None) -> None: ...
+    def clear_network_hooks(self) -> None: ...
 
 class Chain:
     def field(self, key: str) -> Chain: ...

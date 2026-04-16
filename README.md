@@ -306,8 +306,18 @@ db.chain("notes").field("items").set({
 See [packages/primadb-node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/README.md)
 for the full package-specific flow.
 
-The browser package exposes typed JS callback hooks directly. The native Node package does not yet
-expose callback registration for network hooks, even though the Rust core supports them.
+The Node package now also exposes network-boundary callback hooks directly on the `Primadb`
+instance:
+
+```js
+db.setNetworkHooks({
+  onPull(context) {
+    if (context.request.kind === "get" && context.request.path.anchor === "private") {
+      return "private root denied";
+    }
+  },
+});
+```
 
 For runnable package-local Node examples, see
 [packages/primadb-node/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/README.md).
@@ -360,8 +370,19 @@ uv run python scripts/pack_check.py
 See [packages/primadb-python/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/README.md)
 for the package-specific flow.
 
-Like the Node package, the Python package does not yet expose callback registration for network
-hooks, even though the Rust core supports them.
+Like the browser and Node packages, the Python package now exposes network-boundary callback hooks
+directly on the `Primadb` instance:
+
+```python
+db.set_network_hooks(
+    {
+        "on_pull": lambda context: "private root denied"
+        if context["request"]["kind"] == "get"
+        and context["request"]["path"]["anchor"] == "private"
+        else None
+    }
+)
+```
 
 For runnable package-local Python examples, see
 [packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md).

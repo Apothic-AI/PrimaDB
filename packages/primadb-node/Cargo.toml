@@ -9,6 +9,7 @@ name = "primadb_node"
 crate-type = ["cdylib"]
 
 [dependencies]
+futures = "0.3"
 napi = { version = "2.16", default-features = false, features = ["napi8", "tokio_rt", "serde-json"] }
 napi-derive = "2.16"
 primadb = { path = "../..", features = ["crypto", "native-websocket", "native-webrtc"] }

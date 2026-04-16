@@ -67,7 +67,8 @@ pub use error::{PrimadbError, Result};
 pub use hardening::{PrimadbLimits, PrimadbStats};
 pub use hooks::{
     ConnectHookContext, HookDecision, HookTransport, NetworkHooks, RoomHookContext,
-    ServeRequestContext, ServeResultContext,
+    ServeRequestContext, ServeResultContext, parse_request_hook_json, parse_result_hook_json,
+    parse_void_hook_json,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
 pub use native_mesh::NativeWebRtcMesh;

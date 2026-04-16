@@ -1,16 +1,21 @@
+use futures::executor::block_on;
 use napi::bindgen_prelude::{Buffer, Error, Result, Status};
+use napi::threadsafe_function::{ThreadSafeCallContext, ThreadsafeFunction};
+use napi::{Env, JsFunction, JsObject, JsUnknown, ValueType};
 use napi_derive::napi;
 use primadb::{
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
-    DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig, LexSpec, MeshConfig,
-    NativeWebRtcMesh as CoreWebRtcMesh,
-    NativeWebSocketSync as CoreWebSocketSync, Operation, Primadb as CorePrimadb, QuerySpec,
-    RelayClientConfig, RemotePath, RemoteResult as CoreRemoteResult,
+    ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
+    HookDecision, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
+    PullRequestKind, QuerySpec, RelayClientConfig, RemotePath,
+    RemoteResult as CoreRemoteResult, RoomHookContext, ServeRequestContext, ServeResultContext,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
-    Subscription as CoreSubscription,
+    Subscription as CoreSubscription, parse_request_hook_json, parse_result_hook_json,
+    parse_void_hook_json,
 };
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +76,181 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         "value": remote_result_to_json_value(message.result),
         "error": JsonValue::Null,
     })
+}
+
+type ConnectHookTsfn = ThreadsafeFunction<ConnectHookContext>;
+type RoomHookTsfn = ThreadsafeFunction<RoomHookContext>;
+type RequestHookTsfn = ThreadsafeFunction<ServeRequestContext>;
+type ResultHookTsfn = ThreadsafeFunction<NodeServeResultPayload>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeServeResultPayload {
+    context: ServeResultContext,
+    result: CoreRemoteResult,
+}
+
+struct NodeNetworkHooks {
+    on_connect: Option<ConnectHookTsfn>,
+    on_join_room: Option<RoomHookTsfn>,
+    on_pull: Option<RequestHookTsfn>,
+    on_watch: Option<RequestHookTsfn>,
+    on_serve_result: Option<ResultHookTsfn>,
+}
+
+impl NetworkHooks for NodeNetworkHooks {
+    fn on_connect(&self, context: &ConnectHookContext) -> HookDecision<()> {
+        match &self.on_connect {
+            Some(function) => match call_node_hook(function, context.clone()) {
+                Ok(response) => parse_void_hook_json(Some(response), "connection denied by network hook"),
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(()),
+        }
+    }
+
+    fn on_join_room(&self, context: &RoomHookContext) -> HookDecision<()> {
+        match &self.on_join_room {
+            Some(function) => match call_node_hook(function, context.clone()) {
+                Ok(response) => parse_void_hook_json(Some(response), "room denied by network hook"),
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(()),
+        }
+    }
+
+    fn on_pull(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+        match &self.on_pull {
+            Some(function) => match call_node_hook(function, context.clone()) {
+                Ok(response) => {
+                    parse_request_hook_json(Some(response), &context.request, "pull denied by network hook")
+                }
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(context.request.clone()),
+        }
+    }
+
+    fn on_watch(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+        match &self.on_watch {
+            Some(function) => match call_node_hook(function, context.clone()) {
+                Ok(response) => {
+                    parse_request_hook_json(Some(response), &context.request, "watch denied by network hook")
+                }
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(context.request.clone()),
+        }
+    }
+
+    fn on_serve_result(
+        &self,
+        context: &ServeResultContext,
+        result: CoreRemoteResult,
+    ) -> HookDecision<CoreRemoteResult> {
+        match &self.on_serve_result {
+            Some(function) => match call_node_hook(
+                function,
+                NodeServeResultPayload {
+                    context: context.clone(),
+                    result: result.clone(),
+                },
+            ) {
+                Ok(response) => {
+                    parse_result_hook_json(Some(response), result, "served result denied by network hook")
+                }
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(result),
+        }
+    }
+}
+
+fn optional_hook_function(hooks: &JsObject, key: &str) -> Result<Option<JsFunction>> {
+    if !hooks.has_named_property(key)? {
+        return Ok(None);
+    }
+    let value: JsUnknown = hooks.get_named_property_unchecked(key)?;
+    match value.get_type()? {
+        ValueType::Undefined | ValueType::Null => Ok(None),
+        ValueType::Function => Ok(Some(unsafe { value.cast::<JsFunction>() })),
+        _ => Err(Error::new(
+            Status::InvalidArg,
+            format!("network hook `{key}` must be a function"),
+        )),
+    }
+}
+
+fn normalize_hook_function(env: &Env, function: JsFunction, key: &str) -> Result<JsFunction> {
+    let function_ref = env.create_reference(function)?;
+    let key = key.to_owned();
+    env.create_function_from_closure(&format!("primadb_{key}_hook"), move |ctx| {
+        let function: JsFunction = ctx.env.get_reference_value_unchecked(&function_ref)?;
+        let mut args = (0..ctx.length)
+            .map(|index| ctx.get::<JsUnknown>(index))
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(error) = args.first() {
+            match error.get_type()? {
+                ValueType::Null | ValueType::Undefined => {}
+                _ => {
+                    return Err(Error::new(
+                        Status::GenericFailure,
+                        format!("network hook `{key}` invocation failed before callback execution"),
+                    ));
+                }
+            }
+            args.remove(0);
+        }
+        let result = function.call(None, &args)?;
+        if result.get_type()? == ValueType::Undefined {
+            Ok(ctx.env.get_null()?.into_unknown())
+        } else {
+            Ok(result)
+        }
+    })
+}
+
+fn build_unary_hook_tsfn<T>(env: &Env, hooks: &JsObject, key: &str) -> Result<Option<ThreadsafeFunction<T>>>
+where
+    T: Serialize + Send + 'static,
+{
+    let Some(function) = optional_hook_function(hooks, key)? else {
+        return Ok(None);
+    };
+    let function = normalize_hook_function(env, function, key)?;
+    function
+        .create_threadsafe_function::<T, JsUnknown, _, napi::threadsafe_function::ErrorStrategy::CalleeHandled>(
+            0,
+            |ctx: ThreadSafeCallContext<T>| Ok(vec![ctx.env.to_js_value(&ctx.value)?]),
+        )
+        .map(Some)
+}
+
+fn build_result_hook_tsfn(env: &Env, hooks: &JsObject, key: &str) -> Result<Option<ResultHookTsfn>> {
+    let Some(function) = optional_hook_function(hooks, key)? else {
+        return Ok(None);
+    };
+    let function = normalize_hook_function(env, function, key)?;
+    function
+        .create_threadsafe_function::<
+            NodeServeResultPayload,
+            JsUnknown,
+            _,
+            napi::threadsafe_function::ErrorStrategy::CalleeHandled,
+        >(0, |ctx: ThreadSafeCallContext<NodeServeResultPayload>| {
+            Ok(vec![
+                ctx.env.to_js_value(&ctx.value.context)?,
+                ctx.env.to_js_value(&ctx.value.result)?,
+            ])
+        })
+        .map(Some)
+}
+
+fn call_node_hook<T>(function: &ThreadsafeFunction<T>, payload: T) -> std::result::Result<JsonValue, String>
+where
+    T: 'static,
+{
+    block_on(function.call_async::<JsonValue>(Ok(payload))).map_err(|error| error.to_string())
 }
 
 #[napi]
@@ -233,6 +413,24 @@ impl Primadb {
         Ok(WebRtcMesh {
             inner: Arc::new(Mutex::new(Some(mesh))),
         })
+    }
+
+    #[napi(js_name = "setNetworkHooks")]
+    pub fn set_network_hooks(&self, env: Env, hooks: JsObject) -> Result<()> {
+        let hooks = NodeNetworkHooks {
+            on_connect: build_unary_hook_tsfn(&env, &hooks, "onConnect")?,
+            on_join_room: build_unary_hook_tsfn(&env, &hooks, "onJoinRoom")?,
+            on_pull: build_unary_hook_tsfn(&env, &hooks, "onPull")?,
+            on_watch: build_unary_hook_tsfn(&env, &hooks, "onWatch")?,
+            on_serve_result: build_result_hook_tsfn(&env, &hooks, "onServeResult")?,
+        };
+        self.inner.set_network_hooks(Arc::new(hooks));
+        Ok(())
+    }
+
+    #[napi(js_name = "clearNetworkHooks")]
+    pub fn clear_network_hooks(&self) {
+        self.inner.clear_network_hooks();
     }
 }
 

@@ -14,11 +14,7 @@ Current surface:
 - native relay sync through `connectRelay(...)`, including disconnected startup with background relay retry
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
-
-The core Rust crate also supports optional network-boundary hooks. The browser TypeScript package
-exposes those directly as JS callbacks. The Node addon does not expose callback registration yet,
-because those hooks may fire on background runtime threads and need a separate Node-safe callback
-bridge.
+- network-boundary hooks through `setNetworkHooks(...)` / `clearNetworkHooks()`
 
 ## Package Examples
 
@@ -60,12 +56,26 @@ await db
   .chain("assets")
   .field("archive")
   .putBlob(Buffer.from([5, 6, 7, 8]), "application/octet-stream");
+
+db.setNetworkHooks({
+  onPull(context) {
+    if (context.request.kind === "get" && context.request.path.anchor === "private") {
+      return "private root denied";
+    }
+  },
+  onServeResult(_context, result) {
+    if (result.kind === "get") {
+      return { kind: "get", value: { masked: true } };
+    }
+  },
+});
 ```
 
 ## Smoke Tests
 
 ```bash
 npm run smoke:core
+npm run smoke:hooks
 npm run smoke:relay
 npm run smoke:mesh
 ```

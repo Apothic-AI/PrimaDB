@@ -1,15 +1,17 @@
 use primadb::{
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
-    DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig, LexSpec, MeshConfig,
-    NativeWebRtcMesh as CoreWebRtcMesh,
-    NativeWebSocketSync as CoreWebSocketSync, Operation, Primadb as CorePrimadb, QuerySpec,
-    RelayClientConfig, RemotePath, RemoteResult as CoreRemoteResult,
+    ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
+    HookDecision, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
+    PullRequestKind, QuerySpec, RelayClientConfig, RemotePath,
+    RemoteResult as CoreRemoteResult, RoomHookContext, ServeRequestContext, ServeResultContext,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
-    Subscription as CoreSubscription,
+    Subscription as CoreSubscription, parse_request_hook_json, parse_result_hook_json,
+    parse_void_hook_json,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes};
+use pyo3::types::{PyAny, PyBytes, PyDict};
 use pythonize::{depythonize, pythonize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -87,6 +89,158 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         "value": remote_result_to_json_value(message.result),
         "error": JsonValue::Null,
     })
+}
+
+struct PythonNetworkHookCallbacks {
+    on_connect: Option<Py<PyAny>>,
+    on_join_room: Option<Py<PyAny>>,
+    on_pull: Option<Py<PyAny>>,
+    on_watch: Option<Py<PyAny>>,
+    on_serve_result: Option<Py<PyAny>>,
+}
+
+struct PythonNetworkHooks {
+    callbacks: PythonNetworkHookCallbacks,
+}
+
+impl NetworkHooks for PythonNetworkHooks {
+    fn on_connect(&self, context: &ConnectHookContext) -> HookDecision<()> {
+        match &self.callbacks.on_connect {
+            Some(callback) => match call_python_hook1(callback, context) {
+                Ok(response) => parse_void_hook_json(response, "connection denied by network hook"),
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(()),
+        }
+    }
+
+    fn on_join_room(&self, context: &RoomHookContext) -> HookDecision<()> {
+        match &self.callbacks.on_join_room {
+            Some(callback) => match call_python_hook1(callback, context) {
+                Ok(response) => parse_void_hook_json(response, "room denied by network hook"),
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(()),
+        }
+    }
+
+    fn on_pull(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+        match &self.callbacks.on_pull {
+            Some(callback) => match call_python_hook1(callback, context) {
+                Ok(response) => {
+                    parse_request_hook_json(response, &context.request, "pull denied by network hook")
+                }
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(context.request.clone()),
+        }
+    }
+
+    fn on_watch(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+        match &self.callbacks.on_watch {
+            Some(callback) => match call_python_hook1(callback, context) {
+                Ok(response) => {
+                    parse_request_hook_json(response, &context.request, "watch denied by network hook")
+                }
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(context.request.clone()),
+        }
+    }
+
+    fn on_serve_result(
+        &self,
+        context: &ServeResultContext,
+        result: CoreRemoteResult,
+    ) -> HookDecision<CoreRemoteResult> {
+        match &self.callbacks.on_serve_result {
+            Some(callback) => match call_python_hook2(callback, context, &result) {
+                Ok(response) => parse_result_hook_json(response, result, "served result denied by network hook"),
+                Err(message) => HookDecision::deny(message),
+            },
+            None => HookDecision::allow(result),
+        }
+    }
+}
+
+fn resolve_python_hook(
+    hooks: &Bound<'_, PyAny>,
+    snake_key: &str,
+    camel_key: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if hooks.is_none() {
+        return Ok(None);
+    }
+    if let Ok(dict) = hooks.cast::<PyDict>() {
+        if let Some(value) = dict.get_item(snake_key)? {
+            return python_hook_value(value, snake_key);
+        }
+        if let Some(value) = dict.get_item(camel_key)? {
+            return python_hook_value(value, camel_key);
+        }
+    }
+    if hooks.hasattr(snake_key)? {
+        let value = hooks.getattr(snake_key)?;
+        return python_hook_value(value, snake_key);
+    }
+    if hooks.hasattr(camel_key)? {
+        let value = hooks.getattr(camel_key)?;
+        return python_hook_value(value, camel_key);
+    }
+    Ok(None)
+}
+
+fn python_hook_value(value: Bound<'_, PyAny>, key: &str) -> PyResult<Option<Py<PyAny>>> {
+    if value.is_none() {
+        return Ok(None);
+    }
+    if !value.is_callable() {
+        return Err(PyRuntimeError::new_err(format!(
+            "network hook `{key}` must be callable"
+        )));
+    }
+    Ok(Some(value.unbind()))
+}
+
+fn call_python_hook1<T: Serialize>(
+    callback: &Py<PyAny>,
+    arg: &T,
+) -> std::result::Result<Option<JsonValue>, String> {
+    Python::attach(|py| {
+        let arg = pythonize(py, arg).map_err(|error| error.to_string())?;
+        let result = callback
+            .bind(py)
+            .call1((arg,))
+            .map_err(|error| error.to_string())?;
+        python_hook_response_to_json(result)
+    })
+}
+
+fn call_python_hook2<A: Serialize, B: Serialize>(
+    callback: &Py<PyAny>,
+    arg_a: &A,
+    arg_b: &B,
+) -> std::result::Result<Option<JsonValue>, String> {
+    Python::attach(|py| {
+        let arg_a = pythonize(py, arg_a).map_err(|error| error.to_string())?;
+        let arg_b = pythonize(py, arg_b).map_err(|error| error.to_string())?;
+        let result = callback
+            .bind(py)
+            .call1((arg_a, arg_b))
+            .map_err(|error| error.to_string())?;
+        python_hook_response_to_json(result)
+    })
+}
+
+fn python_hook_response_to_json(
+    value: Bound<'_, PyAny>,
+) -> std::result::Result<Option<JsonValue>, String> {
+    if value.is_none() {
+        return Ok(None);
+    }
+    depythonize::<JsonValue>(&value)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 #[pyclass(module = "primadb._native")]
@@ -238,6 +392,27 @@ impl Primadb {
         Ok(WebRtcMesh {
             inner: Arc::new(Mutex::new(Some(mesh))),
         })
+    }
+
+    fn set_network_hooks(&self, hooks: &Bound<'_, PyAny>) -> PyResult<()> {
+        if hooks.is_none() {
+            self.inner.clear_network_hooks();
+            return Ok(());
+        }
+        let callbacks = PythonNetworkHookCallbacks {
+            on_connect: resolve_python_hook(hooks, "on_connect", "onConnect")?,
+            on_join_room: resolve_python_hook(hooks, "on_join_room", "onJoinRoom")?,
+            on_pull: resolve_python_hook(hooks, "on_pull", "onPull")?,
+            on_watch: resolve_python_hook(hooks, "on_watch", "onWatch")?,
+            on_serve_result: resolve_python_hook(hooks, "on_serve_result", "onServeResult")?,
+        };
+        self.inner
+            .set_network_hooks(Arc::new(PythonNetworkHooks { callbacks }));
+        Ok(())
+    }
+
+    fn clear_network_hooks(&self) {
+        self.inner.clear_network_hooks();
     }
 }
 

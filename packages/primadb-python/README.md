@@ -14,11 +14,7 @@ Current surface:
 - native relay sync through `connect_relay(...)`, including disconnected startup with background relay retry
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
-
-The core Rust crate also supports optional network-boundary hooks. The browser TypeScript package
-exposes those directly as JS callbacks. The Python package does not expose callback registration
-yet, because those hooks may fire on background runtime threads and need a separate Python callback
-bridge.
+- network-boundary hooks through `set_network_hooks(...)` / `clear_network_hooks()`
 
 ## Package Examples
 
@@ -70,6 +66,22 @@ db.chain("assets").field("archive").put_blob(
     b"\x05\x06\x07\x08",
     "application/octet-stream",
 )
+
+
+class PrivateDocsHooks:
+    def on_pull(self, context):
+        request = context["request"]
+        if request["kind"] == "get" and request["path"]["anchor"] == "private":
+            return "private root denied"
+        return None
+
+    def on_serve_result(self, _context, result):
+        if result["kind"] == "get":
+            return {"kind": "get", "value": {"masked": True}}
+        return None
+
+
+db.set_network_hooks(PrivateDocsHooks())
 ```
 
 ## Smoke Tests
@@ -78,6 +90,7 @@ db.chain("assets").field("archive").put_blob(
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
 uv sync
 uv run python scripts/smoke_core.py
+uv run python scripts/smoke_hooks.py
 uv run python scripts/smoke_relay.py
 uv run python scripts/smoke_relay_offline.py
 uv run python scripts/smoke_mesh.py

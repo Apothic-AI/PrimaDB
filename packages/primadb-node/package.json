@@ -16,9 +16,10 @@
   "scripts": {
     "build": "node ./scripts/build-native.mjs",
     "smoke:core": "npm run build && node ./scripts/smoke-core.mjs",
+    "smoke:hooks": "npm run build && node ./scripts/smoke-hooks.mjs",
     "smoke:relay": "npm run build && node ./scripts/smoke-relay.mjs",
     "smoke:mesh": "npm run build && node ./scripts/smoke-mesh.mjs",
-    "smoke": "npm run smoke:core && npm run smoke:relay && npm run smoke:mesh",
+    "smoke": "npm run smoke:core && npm run smoke:hooks && npm run smoke:relay && npm run smoke:mesh",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {

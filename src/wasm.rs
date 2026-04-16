@@ -4907,36 +4907,10 @@ fn parse_void_hook_decision(
     default_message: &str,
 ) -> crate::HookDecision<()> {
     match response {
-        Ok(value) => {
-            if value.is_null() || value.is_undefined() {
-                return crate::HookDecision::allow(());
-            }
-            if let Some(flag) = value.as_bool() {
-                return if flag {
-                    crate::HookDecision::allow(())
-                } else {
-                    crate::HookDecision::deny(default_message)
-                };
-            }
-            if let Some(message) = value.as_string() {
-                return crate::HookDecision::deny(message);
-            }
-            if has_hook_wrapper_fields(&value) {
-                let allow = js_bool_prop(&value, "allow").unwrap_or(true);
-                if allow {
-                    crate::HookDecision::allow(())
-                } else {
-                    crate::HookDecision::deny(
-                        js_string_prop(&value, "message")
-                            .unwrap_or_else(|| default_message.to_owned()),
-                    )
-                }
-            } else {
-                crate::HookDecision::deny(format!(
-                    "invalid network hook return value: expected boolean, string, or decision object"
-                ))
-            }
-        }
+        Ok(value) => match js_hook_json(value) {
+            Ok(value) => crate::parse_void_hook_json(value, default_message),
+            Err(message) => crate::HookDecision::deny(message),
+        },
         Err(message) => crate::HookDecision::deny(message),
     }
 }
@@ -4947,44 +4921,10 @@ fn parse_request_hook_decision(
     default_message: &str,
 ) -> crate::HookDecision<PullRequestKind> {
     match response {
-        Ok(value) => {
-            if value.is_null() || value.is_undefined() {
-                return crate::HookDecision::allow(default_request.clone());
-            }
-            if let Some(flag) = value.as_bool() {
-                return if flag {
-                    crate::HookDecision::allow(default_request.clone())
-                } else {
-                    crate::HookDecision::deny(default_message)
-                };
-            }
-            if let Some(message) = value.as_string() {
-                return crate::HookDecision::deny(message);
-            }
-            if has_hook_wrapper_fields(&value) {
-                let allow = js_bool_prop(&value, "allow").unwrap_or(true);
-                if !allow {
-                    return crate::HookDecision::deny(
-                        js_string_prop(&value, "message")
-                            .unwrap_or_else(|| default_message.to_owned()),
-                    );
-                }
-                if let Some(request) = js_value_prop(&value, "request")
-                    && !request.is_null()
-                    && !request.is_undefined()
-                {
-                    return match serde_wasm_bindgen::from_value::<PullRequestKind>(request) {
-                        Ok(request) => crate::HookDecision::allow(request),
-                        Err(error) => crate::HookDecision::deny(error.to_string()),
-                    };
-                }
-                return crate::HookDecision::allow(default_request.clone());
-            }
-            match serde_wasm_bindgen::from_value::<PullRequestKind>(value) {
-                Ok(request) => crate::HookDecision::allow(request),
-                Err(error) => crate::HookDecision::deny(error.to_string()),
-            }
-        }
+        Ok(value) => match js_hook_json(value) {
+            Ok(value) => crate::parse_request_hook_json(value, default_request, default_message),
+            Err(message) => crate::HookDecision::deny(message),
+        },
         Err(message) => crate::HookDecision::deny(message),
     }
 }
@@ -4995,68 +4935,19 @@ fn parse_result_hook_decision(
     default_message: &str,
 ) -> crate::HookDecision<RemoteResult> {
     match response {
-        Ok(value) => {
-            if value.is_null() || value.is_undefined() {
-                return crate::HookDecision::allow(default_result);
-            }
-            if let Some(flag) = value.as_bool() {
-                return if flag {
-                    crate::HookDecision::allow(default_result)
-                } else {
-                    crate::HookDecision::deny(default_message)
-                };
-            }
-            if let Some(message) = value.as_string() {
-                return crate::HookDecision::deny(message);
-            }
-            if has_hook_wrapper_fields(&value) {
-                let allow = js_bool_prop(&value, "allow").unwrap_or(true);
-                if !allow {
-                    return crate::HookDecision::deny(
-                        js_string_prop(&value, "message")
-                            .unwrap_or_else(|| default_message.to_owned()),
-                    );
-                }
-                if let Some(result) = js_value_prop(&value, "result")
-                    && !result.is_null()
-                    && !result.is_undefined()
-                {
-                    return match serde_wasm_bindgen::from_value::<RemoteResult>(result) {
-                        Ok(result) => crate::HookDecision::allow(result),
-                        Err(error) => crate::HookDecision::deny(error.to_string()),
-                    };
-                }
-                return crate::HookDecision::allow(default_result);
-            }
-            match serde_wasm_bindgen::from_value::<RemoteResult>(value) {
-                Ok(result) => crate::HookDecision::allow(result),
-                Err(error) => crate::HookDecision::deny(error.to_string()),
-            }
-        }
+        Ok(value) => match js_hook_json(value) {
+            Ok(value) => crate::parse_result_hook_json(value, default_result, default_message),
+            Err(message) => crate::HookDecision::deny(message),
+        },
         Err(message) => crate::HookDecision::deny(message),
     }
 }
 
-fn has_hook_wrapper_fields(value: &JsValue) -> bool {
-    ["allow", "message", "request", "result"]
-        .into_iter()
-        .any(|key| js_sys::Reflect::has(value, &JsValue::from_str(key)).unwrap_or(false))
-}
-
-fn js_bool_prop(value: &JsValue, key: &str) -> Option<bool> {
-    js_value_prop(value, key)?.as_bool()
-}
-
-fn js_string_prop(value: &JsValue, key: &str) -> Option<String> {
-    js_value_prop(value, key)?.as_string()
-}
-
-fn js_value_prop(value: &JsValue, key: &str) -> Option<JsValue> {
-    let value = js_sys::Reflect::get(value, &JsValue::from_str(key)).ok()?;
+fn js_hook_json(value: JsValue) -> std::result::Result<Option<JsonValue>, String> {
     if value.is_null() || value.is_undefined() {
-        None
+        Ok(None)
     } else {
-        Some(value)
+        js_to_json(value).map(Some).map_err(js_hook_error_string)
     }
 }
 

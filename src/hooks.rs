@@ -1,5 +1,6 @@
 use crate::{PeerPresence, PullRequestKind, RemoteResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -105,4 +106,158 @@ pub trait NetworkHooks: Send + Sync {
     ) -> HookDecision<RemoteResult> {
         HookDecision::allow(result)
     }
+}
+
+pub fn parse_void_hook_json(
+    response: Option<JsonValue>,
+    default_message: &str,
+) -> HookDecision<()> {
+    match response {
+        None | Some(JsonValue::Null) => HookDecision::allow(()),
+        Some(JsonValue::Bool(allow)) => {
+            if allow {
+                HookDecision::allow(())
+            } else {
+                HookDecision::deny(default_message)
+            }
+        }
+        Some(JsonValue::String(message)) => HookDecision::deny(message),
+        Some(value @ JsonValue::Object(_)) => {
+            if let Some(wrapper) = hook_wrapper_from_json(&value) {
+                if !wrapper.allow {
+                    return HookDecision::deny(
+                        wrapper
+                            .message
+                            .unwrap_or_else(|| default_message.to_owned()),
+                    );
+                }
+                HookDecision::allow(())
+            } else {
+                HookDecision::deny(
+                    "invalid network hook return value: expected boolean, string, or decision object",
+                )
+            }
+        }
+        Some(_) => HookDecision::deny(
+            "invalid network hook return value: expected boolean, string, or decision object",
+        ),
+    }
+}
+
+pub fn parse_request_hook_json(
+    response: Option<JsonValue>,
+    default_request: &PullRequestKind,
+    default_message: &str,
+) -> HookDecision<PullRequestKind> {
+    match response {
+        None | Some(JsonValue::Null) => HookDecision::allow(default_request.clone()),
+        Some(JsonValue::Bool(allow)) => {
+            if allow {
+                HookDecision::allow(default_request.clone())
+            } else {
+                HookDecision::deny(default_message)
+            }
+        }
+        Some(JsonValue::String(message)) => HookDecision::deny(message),
+        Some(value @ JsonValue::Object(_)) => {
+            if let Some(wrapper) = hook_wrapper_from_json(&value) {
+                if !wrapper.allow {
+                    return HookDecision::deny(
+                        wrapper
+                            .message
+                            .unwrap_or_else(|| default_message.to_owned()),
+                    );
+                }
+                if let Some(request) = wrapper.request {
+                    return match serde_json::from_value::<PullRequestKind>(request) {
+                        Ok(request) => HookDecision::allow(request),
+                        Err(error) => HookDecision::deny(error.to_string()),
+                    };
+                }
+                return HookDecision::allow(default_request.clone());
+            }
+            match serde_json::from_value::<PullRequestKind>(value) {
+                Ok(request) => HookDecision::allow(request),
+                Err(error) => HookDecision::deny(error.to_string()),
+            }
+        }
+        Some(value) => match serde_json::from_value::<PullRequestKind>(value) {
+            Ok(request) => HookDecision::allow(request),
+            Err(error) => HookDecision::deny(error.to_string()),
+        },
+    }
+}
+
+pub fn parse_result_hook_json(
+    response: Option<JsonValue>,
+    default_result: RemoteResult,
+    default_message: &str,
+) -> HookDecision<RemoteResult> {
+    match response {
+        None | Some(JsonValue::Null) => HookDecision::allow(default_result),
+        Some(JsonValue::Bool(allow)) => {
+            if allow {
+                HookDecision::allow(default_result)
+            } else {
+                HookDecision::deny(default_message)
+            }
+        }
+        Some(JsonValue::String(message)) => HookDecision::deny(message),
+        Some(value @ JsonValue::Object(_)) => {
+            if let Some(wrapper) = hook_wrapper_from_json(&value) {
+                if !wrapper.allow {
+                    return HookDecision::deny(
+                        wrapper
+                            .message
+                            .unwrap_or_else(|| default_message.to_owned()),
+                    );
+                }
+                if let Some(result) = wrapper.result {
+                    return match serde_json::from_value::<RemoteResult>(result) {
+                        Ok(result) => HookDecision::allow(result),
+                        Err(error) => HookDecision::deny(error.to_string()),
+                    };
+                }
+                return HookDecision::allow(default_result);
+            }
+            match serde_json::from_value::<RemoteResult>(value) {
+                Ok(result) => HookDecision::allow(result),
+                Err(error) => HookDecision::deny(error.to_string()),
+            }
+        }
+        Some(value) => match serde_json::from_value::<RemoteResult>(value) {
+            Ok(result) => HookDecision::allow(result),
+            Err(error) => HookDecision::deny(error.to_string()),
+        },
+    }
+}
+
+#[derive(Debug, Default)]
+struct HookWrapper {
+    allow: bool,
+    message: Option<String>,
+    request: Option<JsonValue>,
+    result: Option<JsonValue>,
+}
+
+fn hook_wrapper_from_json(value: &JsonValue) -> Option<HookWrapper> {
+    let object = value.as_object()?;
+    let has_wrapper_fields = ["allow", "message", "request", "result"]
+        .into_iter()
+        .any(|key| object.contains_key(key));
+    if !has_wrapper_fields {
+        return None;
+    }
+    Some(HookWrapper {
+        allow: object
+            .get("allow")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        message: object
+            .get("message")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_owned()),
+        request: object.get("request").cloned(),
+        result: object.get("result").cloned(),
+    })
 }
