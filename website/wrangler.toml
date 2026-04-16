@@ -1,0 +1,5 @@
+name = "primadb-docs"
+compatibility_date = "2026-04-16"
+
+[assets]
+directory = "./build"

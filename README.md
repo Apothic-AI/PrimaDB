@@ -8,9 +8,11 @@ PrimaDB now has a Docusaurus docs site in
 [website/](/home/bitnom/Code/gunport/primadb/website), with authored content living under
 [docs/](/home/bitnom/Code/gunport/primadb/docs).
 
-The published site target is GitHub Pages:
+The published site target is Cloudflare Workers.
 
-- `https://apothic-ai.github.io/PrimaDB/`
+Current docs URL:
+
+- `https://primadb-docs.apothic.workers.dev`
 
 Run it locally with:
 
@@ -18,6 +20,14 @@ Run it locally with:
 cd /home/bitnom/Code/gunport/primadb/website
 pnpm install
 pnpm run start
+```
+
+Deploy it with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/website
+pnpm install
+pnpm run deploy
 ```
 
 The earlier planning notes were moved out of `docs/` and are temporarily parked under

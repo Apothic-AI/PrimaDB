@@ -21,14 +21,26 @@ cd /home/bitnom/Code/gunport/primadb/website
 pnpm run build
 ```
 
-## GitHub Pages
+## Cloudflare Workers
 
-The docs site is configured for GitHub Pages at:
+The docs site is configured for static asset deploys through Wrangler using
+[wrangler.toml](https://github.com/Apothic-AI/PrimaDB/tree/master/website/wrangler.toml).
 
-- `https://apothic-ai.github.io/PrimaDB/`
+Current public URL:
 
-The Pages deploy runs from [.github/workflows/docs.yml](https://github.com/Apothic-AI/PrimaDB/tree/master/.github/workflows/docs.yml).
-Pull requests still build the site for validation, but only pushes to `master` publish it.
+- `https://primadb-docs.apothic.workers.dev`
+
+Deploy it with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/website
+pnpm install
+pnpm run deploy
+```
+
+The CI workflow in [.github/workflows/docs.yml](https://github.com/Apothic-AI/PrimaDB/tree/master/.github/workflows/docs.yml)
+continues to validate the build, but deployment now happens through Cloudflare rather than GitHub
+Pages.
 
 ## Notes
 

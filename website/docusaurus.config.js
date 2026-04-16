@@ -1,10 +1,12 @@
 // @ts-check
 
+const siteUrl = process.env.DOCS_SITE_URL || "https://primadb-docs.apothic.workers.dev";
+
 const config = {
   title: "PrimaDB",
   tagline: "Local-first graph database with relay and mesh replication",
-  url: "https://apothic-ai.github.io",
-  baseUrl: "/PrimaDB/",
+  url: siteUrl,
+  baseUrl: "/",
   organizationName: "Apothic-AI",
   projectName: "PrimaDB",
   trailingSlash: false,
