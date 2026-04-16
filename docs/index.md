@@ -38,6 +38,7 @@ bridges.
 - [TypeScript package](sdk/typescript)
 - [Node package](sdk/node)
 - [Python package](sdk/python)
+- [API reference](category/api-reference)
 
 ## Core Concepts
 
@@ -50,6 +51,7 @@ bridges.
 
 ## Examples And Operations
 
+- [API reference overview](api)
 - [Examples overview](examples/overview)
 - [Running examples](examples/running-examples)
 - [Build targets](reference/build-targets)

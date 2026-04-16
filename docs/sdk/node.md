@@ -10,6 +10,10 @@ Source:
 
 - [packages/primadb-node](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node)
 
+Full API reference:
+
+- [Node package API](../api/node-package)
+
 ## Build
 
 ```bash

@@ -10,6 +10,10 @@ Source:
 
 - [js/primadb-gun.js](https://github.com/Apothic-AI/PrimaDB/tree/master/js/primadb-gun.js)
 
+Full API reference:
+
+- [Gun runtime API](../api/gun-runtime-api)
+
 ## What It Covers
 
 - `get`

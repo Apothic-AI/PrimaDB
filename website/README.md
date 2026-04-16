@@ -11,6 +11,7 @@ only the site shell, theme config, and pnpm-managed toolchain.
 ```bash
 cd /home/bitnom/Code/gunport/primadb/website
 pnpm install
+pnpm run generate:api
 pnpm run start
 ```
 
@@ -18,6 +19,7 @@ pnpm run start
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/website
+pnpm run generate:api
 pnpm run build
 ```
 
@@ -45,6 +47,7 @@ Pages.
 ## Notes
 
 - `docs/` is the canonical location for Markdown and MDX docs pages.
+- `pnpm run generate:api` refreshes the generated API reference pages and bundled Rust rustdoc.
 - planning notes were intentionally moved to
   [tmp/planning-docs/](https://github.com/Apothic-AI/PrimaDB/tree/master/tmp/planning-docs) so the
   public docs directory can stay clean.

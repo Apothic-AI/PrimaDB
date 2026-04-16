@@ -10,6 +10,10 @@ Source:
 
 - [packages/primadb-python](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-python)
 
+Full API reference:
+
+- [Python package API](../api/python-package)
+
 ## Install
 
 ```bash

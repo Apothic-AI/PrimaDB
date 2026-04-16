@@ -1,0 +1,8 @@
+{
+  "label": "API Reference",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "Comprehensive reference for the browser package, browser runtime, Node package, Python package, and Rust crate."
+  }
+}

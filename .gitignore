@@ -11,6 +11,7 @@
 **/target/
 website/.docusaurus/
 website/build/
+website/static/rust-api/
 *.node
 *.whl
 *.tar.gz

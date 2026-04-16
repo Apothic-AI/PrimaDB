@@ -10,6 +10,12 @@ Source:
 
 - [packages/primadb](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb)
 
+Full API reference:
+
+- [Browser TypeScript package API](../api/browser-typescript)
+- [Browser runtime API](../api/browser-runtime)
+- [Threaded browser package API](../api/browser-threads)
+
 ## Entry Points
 
 - `primadb`
