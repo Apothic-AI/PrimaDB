@@ -50,16 +50,17 @@ pub use crypto::{
 };
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, Primadb, QueryBuilder,
-    Subscription,
+    Subscription, VacuumReport,
 };
 pub use durable::{DurableStorageBinding, DurableStorageConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use engine::SegmentFileStore;
 pub use engine::{
-    AuthNodeMeta, DirectScalarIndexEntry, IncrementalStore, NodeIndexManifest, StorageMetadata,
-    StorageTransaction, StoredAuthFieldMeta, build_storage_metadata, build_storage_transaction,
-    build_storage_transaction_from_ops, direct_index_key, encode_component, node_matches_root,
-    operation_matches_root, sortable_scalar_key, touched_nodes,
+    AuthNodeMeta, DirectIndexScan, DirectScalarIndexEntry, IncrementalStore, NodeIndexManifest,
+    StorageMetadata, StorageTransaction, StorageVacuumReport, StoredAuthFieldMeta,
+    build_storage_metadata, build_storage_transaction, build_storage_transaction_from_ops,
+    direct_index_encode_prefix, direct_index_key, encode_component, node_matches_root,
+    operation_matches_root, sortable_scalar_key, touched_nodes, touched_storage_nodes,
 };
 pub use error::{PrimadbError, Result};
 pub use hardening::{PrimadbLimits, PrimadbStats};

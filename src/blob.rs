@@ -4,6 +4,7 @@ use crate::error::PrimadbError;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
@@ -29,6 +30,10 @@ pub trait BlobStore: Debug + Send + Sync {
     fn get_blob(&self, blob_id: &str) -> Result<Option<StoredBlob>>;
     fn has_blob(&self, blob_id: &str) -> Result<bool> {
         Ok(self.get_blob(blob_id)?.is_some())
+    }
+    fn delete_unreferenced(&self, live_blob_ids: &BTreeSet<String>) -> Result<usize> {
+        let _ = live_blob_ids;
+        Ok(0)
     }
 }
 
@@ -91,6 +96,13 @@ impl BlobStore for MemoryBlobStore {
     fn get_blob(&self, blob_id: &str) -> Result<Option<StoredBlob>> {
         Ok(self.blobs.lock().unwrap().get(blob_id).cloned())
     }
+
+    fn delete_unreferenced(&self, live_blob_ids: &BTreeSet<String>) -> Result<usize> {
+        let mut blobs = self.blobs.lock().unwrap();
+        let before = blobs.len();
+        blobs.retain(|blob_id, _| live_blob_ids.contains(blob_id));
+        Ok(before.saturating_sub(blobs.len()))
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -137,7 +149,7 @@ impl BlobStore for FileBlobStore {
         std::fs::write(self.blob_data_path(&reference.id), data)?;
         std::fs::write(
             self.blob_meta_path(&reference.id),
-            serde_json::to_string_pretty(&reference)?,
+            serde_json::to_vec(&reference)?,
         )?;
         Ok(reference)
     }
@@ -162,6 +174,31 @@ impl BlobStore for FileBlobStore {
             reference,
             data: BinaryBytes::from(data),
         }))
+    }
+
+    fn delete_unreferenced(&self, live_blob_ids: &BTreeSet<String>) -> Result<usize> {
+        self.ensure_layout()?;
+        let root = self.root.join("blobs");
+        if !root.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let blob_id = name.replace('_', ":");
+            if !live_blob_ids.contains(&blob_id) {
+                std::fs::remove_dir_all(path)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 }
 

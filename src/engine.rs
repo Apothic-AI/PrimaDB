@@ -5,6 +5,7 @@ use crate::query::QueryDirection;
 use crate::snapshot::DatabaseSnapshot;
 use crate::value::{FieldValue, NodeId, NodeState};
 use serde::{Deserialize, Serialize};
+use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -36,6 +37,59 @@ pub struct DirectScalarIndexEntry {
     pub path: String,
     pub value: JsonValue,
     pub sortable_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DirectIndexScan {
+    #[serde(default)]
+    pub exact_sortable_key: Option<String>,
+    #[serde(default)]
+    pub prefix_sortable_key: Option<String>,
+    #[serde(default)]
+    pub start_at: Option<String>,
+    #[serde(default)]
+    pub start_after: Option<String>,
+    #[serde(default)]
+    pub end_at: Option<String>,
+    #[serde(default)]
+    pub end_before: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+impl DirectIndexScan {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn matches_sortable_key(&self, candidate: &str) -> bool {
+        if let Some(exact) = &self.exact_sortable_key {
+            return candidate == exact;
+        }
+        if let Some(prefix) = &self.prefix_sortable_key
+            && !candidate.starts_with(prefix)
+        {
+            return false;
+        }
+        if let Some(start_at) = &self.start_at
+            && candidate < start_at.as_str()
+        {
+            return false;
+        }
+        if let Some(start_after) = &self.start_after
+            && candidate <= start_after.as_str()
+        {
+            return false;
+        }
+        if let Some(end_at) = &self.end_at
+            && candidate > end_at.as_str()
+        {
+            return false;
+        }
+        if let Some(end_before) = &self.end_before
+            && candidate >= end_before.as_str()
+        {
+            return false;
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -73,11 +127,34 @@ pub trait IncrementalStore: Debug + Send + Sync {
     fn apply_transaction(&self, transaction: &StorageTransaction) -> Result<()>;
     fn get_node(&self, node_id: &str) -> Result<Option<NodeState>>;
     fn export_snapshot(&self, root: Option<&str>) -> Result<DatabaseSnapshot>;
+    fn scan_direct_index_entries(
+        &self,
+        path: &str,
+        direction: QueryDirection,
+        scan: &DirectIndexScan,
+    ) -> Result<Vec<DirectScalarIndexEntry>>;
     fn list_direct_index_entries(
         &self,
         path: &str,
         direction: QueryDirection,
-    ) -> Result<Vec<DirectScalarIndexEntry>>;
+    ) -> Result<Vec<DirectScalarIndexEntry>> {
+        self.scan_direct_index_entries(path, direction, &DirectIndexScan::default())
+    }
+    fn vacuum(&self, transaction: &StorageTransaction) -> Result<StorageVacuumReport> {
+        let _ = transaction;
+        Ok(StorageVacuumReport::default())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageVacuumReport {
+    pub removed_node_files: usize,
+    pub removed_auth_files: usize,
+    pub removed_index_manifests: usize,
+    pub removed_direct_index_files: usize,
+    pub removed_empty_index_dirs: usize,
+    pub pruned_journal_files: usize,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -164,6 +241,11 @@ impl SegmentFileStore {
     }
 
     fn prune_journal(&self) -> Result<()> {
+        let _ = self.prune_journal_with_report()?;
+        Ok(())
+    }
+
+    fn prune_journal_with_report(&self) -> Result<usize> {
         let mut entries: Vec<_> = std::fs::read_dir(self.root.join("journal"))?
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| {
@@ -174,13 +256,88 @@ impl SegmentFileStore {
             .collect();
         entries.sort();
         if entries.len() <= self.journal_retention {
-            return Ok(());
+            return Ok(0);
         }
         let remove_count = entries.len() - self.journal_retention;
         for path in entries.into_iter().take(remove_count) {
             let _ = std::fs::remove_file(path);
         }
-        Ok(())
+        Ok(remove_count)
+    }
+
+    fn collect_live_index_paths(
+        transaction: &StorageTransaction,
+    ) -> (
+        BTreeSet<String>,
+        BTreeSet<String>,
+        BTreeSet<String>,
+        BTreeSet<String>,
+    ) {
+        let live_nodes = transaction.nodes.keys().cloned().collect::<BTreeSet<_>>();
+        let live_auth = transaction
+            .auth_meta
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let live_manifests = transaction
+            .node_indexes
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let live_direct = transaction
+            .direct_indexes
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        (live_nodes, live_auth, live_manifests, live_direct)
+    }
+
+    fn vacuum_files_for_dir(
+        &self,
+        dir: std::path::PathBuf,
+        live_stems: &BTreeSet<String>,
+    ) -> Result<usize> {
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Ok(decoded) = decode_component(stem) else {
+                continue;
+            };
+            if !live_stems.contains(&decoded) {
+                std::fs::remove_file(path)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    fn prune_empty_index_dirs(&self, root: &std::path::Path) -> Result<usize> {
+        if !root.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                removed += self.prune_empty_index_dirs(&path)?;
+                if std::fs::read_dir(&path)?.next().is_none() {
+                    std::fs::remove_dir(&path)?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 }
 
@@ -210,20 +367,14 @@ impl IncrementalStore for SegmentFileStore {
         self.ensure_layout()?;
 
         let pending_path = self.journal_pending_path(transaction.id);
-        std::fs::write(&pending_path, serde_json::to_string_pretty(transaction)?)?;
+        std::fs::write(&pending_path, serde_json::to_vec(transaction)?)?;
 
         for (node_id, node_state) in &transaction.nodes {
-            std::fs::write(
-                self.node_path(node_id),
-                serde_json::to_string_pretty(node_state)?,
-            )?;
+            std::fs::write(self.node_path(node_id), serde_json::to_vec(node_state)?)?;
         }
 
         for (node_id, auth_meta) in &transaction.auth_meta {
-            std::fs::write(
-                self.auth_meta_path(node_id),
-                serde_json::to_string_pretty(auth_meta)?,
-            )?;
+            std::fs::write(self.auth_meta_path(node_id), serde_json::to_vec(auth_meta)?)?;
         }
 
         for (node_id, manifest) in &transaction.node_indexes {
@@ -247,17 +398,17 @@ impl IncrementalStore for SegmentFileStore {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(path, serde_json::to_string_pretty(entry)?)?;
+                std::fs::write(path, serde_json::to_vec(entry)?)?;
             }
             std::fs::write(
                 self.node_index_manifest_path(node_id),
-                serde_json::to_string_pretty(manifest)?,
+                serde_json::to_vec(manifest)?,
             )?;
         }
 
         std::fs::write(
             self.manifest_path(),
-            serde_json::to_string_pretty(&transaction.metadata)?,
+            serde_json::to_vec(&transaction.metadata)?,
         )?;
 
         let final_path = self.journal_final_path(transaction.id);
@@ -312,33 +463,97 @@ impl IncrementalStore for SegmentFileStore {
         })
     }
 
-    fn list_direct_index_entries(
+    fn scan_direct_index_entries(
         &self,
         path: &str,
         direction: QueryDirection,
+        scan: &DirectIndexScan,
     ) -> Result<Vec<DirectScalarIndexEntry>> {
         self.ensure_layout()?;
         let root = self.direct_index_root(path);
         if !root.exists() {
             return Ok(Vec::new());
         }
-        let mut files = Vec::new();
-        collect_files(&root, &mut files)?;
-        let mut entries = Vec::with_capacity(files.len());
-        for file in files {
-            let entry: DirectScalarIndexEntry =
-                serde_json::from_str(&std::fs::read_to_string(file)?)?;
-            entries.push(entry);
-        }
-        entries.sort_by(|left, right| {
-            left.sortable_key
-                .cmp(&right.sortable_key)
-                .then_with(|| left.node_id.cmp(&right.node_id))
-        });
+
+        let mut sortable_roots = std::fs::read_dir(&root)?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let path = entry.path();
+                path.is_dir()
+                    .then_some((entry.file_name().to_string_lossy().to_string(), path))
+            })
+            .collect::<Vec<_>>();
+        sortable_roots.sort_by(|left, right| left.0.cmp(&right.0));
         if matches!(direction, QueryDirection::Desc) {
-            entries.reverse();
+            sortable_roots.reverse();
+        }
+
+        let mut entries = Vec::new();
+        for (sortable_key, dir) in sortable_roots {
+            if !scan.matches_sortable_key(&sortable_key) {
+                continue;
+            }
+            let mut files = Vec::new();
+            collect_files(&dir, &mut files)?;
+            files.sort();
+            if matches!(direction, QueryDirection::Desc) {
+                files.reverse();
+            }
+            for file in files {
+                let entry: DirectScalarIndexEntry =
+                    serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                entries.push(entry);
+                if scan.limit.is_some_and(|limit| entries.len() >= limit) {
+                    return Ok(entries);
+                }
+            }
         }
         Ok(entries)
+    }
+
+    fn vacuum(&self, transaction: &StorageTransaction) -> Result<StorageVacuumReport> {
+        self.ensure_layout()?;
+        let (live_nodes, live_auth, live_manifests, live_direct) =
+            Self::collect_live_index_paths(transaction);
+
+        let mut report = StorageVacuumReport::default();
+        report.removed_node_files =
+            self.vacuum_files_for_dir(self.root.join("nodes"), &live_nodes)?;
+        report.removed_auth_files =
+            self.vacuum_files_for_dir(self.root.join("auth"), &live_auth)?;
+        report.removed_index_manifests =
+            self.vacuum_files_for_dir(self.root.join("node_indexes"), &live_manifests)?;
+
+        let direct_root = self.root.join("indexes").join("direct");
+        if direct_root.exists() {
+            let mut files = Vec::new();
+            collect_files(&direct_root, &mut files)?;
+            for file in files {
+                let Ok(relative) = file.strip_prefix(self.root.join("indexes")) else {
+                    continue;
+                };
+                let mut components = relative.components();
+                let Some(prefix) = components.next().and_then(|part| part.as_os_str().to_str())
+                else {
+                    continue;
+                };
+                if prefix != "direct" {
+                    continue;
+                }
+                let key = relative
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if !live_direct.contains(&key) {
+                    std::fs::remove_file(file)?;
+                    report.removed_direct_index_files += 1;
+                }
+            }
+            report.removed_empty_index_dirs = self.prune_empty_index_dirs(&direct_root)?;
+        }
+
+        report.pruned_journal_files = self.prune_journal_with_report()?;
+        Ok(report)
     }
 }
 
@@ -360,7 +575,7 @@ pub fn build_storage_transaction(
     let mut auth_meta = BTreeMap::new();
 
     for (node_id, node_state) in &nodes {
-        let direct = direct_scalar_indexes(node_id, node_state);
+        let direct = direct_scalar_indexes(node_id, &nodes);
         let manifest = NodeIndexManifest {
             direct_index_keys: direct.keys().cloned().collect(),
         };
@@ -386,7 +601,7 @@ pub fn build_storage_transaction_from_ops(
     nodes: &BTreeMap<NodeId, NodeState>,
     ops: &[Operation],
 ) -> StorageTransaction {
-    let touched = touched_nodes(ops);
+    let touched = touched_storage_nodes(nodes, ops);
     let materialized_nodes = touched
         .into_iter()
         .filter_map(|node_id| nodes.get(&node_id).cloned().map(|state| (node_id, state)))
@@ -406,6 +621,24 @@ pub fn touched_nodes(ops: &[Operation]) -> BTreeSet<NodeId> {
             | crate::operation::OperationAction::DeleteField { node, .. } => {
                 touched.insert(node.clone());
             }
+        }
+    }
+    touched
+}
+
+pub fn touched_storage_nodes(
+    nodes: &BTreeMap<NodeId, NodeState>,
+    ops: &[Operation],
+) -> BTreeSet<NodeId> {
+    let mut touched = touched_nodes(ops);
+    let direct = touched.clone();
+    for node_id in direct {
+        let mut current = node_id.as_str();
+        while let Some((parent, _)) = current.rsplit_once('/') {
+            if nodes.contains_key(parent) {
+                touched.insert(parent.to_owned());
+            }
+            current = parent;
         }
     }
     touched
@@ -448,6 +681,10 @@ pub fn encode_component(input: &str) -> String {
     output
 }
 
+pub fn direct_index_encode_prefix(input: &str) -> String {
+    encode_component(input)
+}
+
 pub fn decode_component(input: &str) -> Result<String> {
     if input.len() % 2 != 0 {
         return Err(PrimadbError::Message(format!(
@@ -486,31 +723,83 @@ pub fn operation_matches_root(op: &Operation, root: &str) -> bool {
 
 fn direct_scalar_indexes(
     node_id: &str,
-    node_state: &NodeState,
+    nodes: &BTreeMap<NodeId, NodeState>,
 ) -> BTreeMap<String, DirectScalarIndexEntry> {
     let mut indexes = BTreeMap::new();
-    for (field, state) in &node_state.fields {
-        let FieldValue::Scalar(value) = &state.value else {
-            continue;
-        };
-        let Some(value) = storage_materialized_scalar(node_id, field, value) else {
-            continue;
-        };
-        let Some(sortable_key) = sortable_scalar_key(&value) else {
-            continue;
-        };
-        let key = direct_index_key(field, &sortable_key, node_id);
-        indexes.insert(
-            key,
-            DirectScalarIndexEntry {
-                node_id: node_id.to_owned(),
-                path: field.clone(),
-                value,
-                sortable_key,
-            },
-        );
-    }
+    let materialized = storage_materialize_node(node_id, nodes, &mut BTreeSet::new());
+    collect_direct_scalar_indexes(node_id, "", &materialized, &mut indexes);
     indexes
+}
+
+fn storage_materialize_node(
+    node_id: &str,
+    nodes: &BTreeMap<NodeId, NodeState>,
+    visited: &mut BTreeSet<NodeId>,
+) -> JsonValue {
+    if !visited.insert(node_id.to_owned()) {
+        return JsonValue::Null;
+    }
+    let value = nodes
+        .get(node_id)
+        .map(|node_state| {
+            let mut object = JsonMap::new();
+            for (field, state) in &node_state.fields {
+                match &state.value {
+                    FieldValue::Scalar(value) => {
+                        if let Some(value) = storage_materialized_scalar(node_id, field, value) {
+                            object.insert(field.clone(), value);
+                        }
+                    }
+                    FieldValue::Link(target) => {
+                        let value = storage_materialize_node(target, nodes, visited);
+                        if !value.is_null() {
+                            object.insert(field.clone(), value);
+                        }
+                    }
+                    FieldValue::Set(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
+                }
+            }
+            JsonValue::Object(object)
+        })
+        .unwrap_or(JsonValue::Null);
+    visited.remove(node_id);
+    value
+}
+
+fn collect_direct_scalar_indexes(
+    node_id: &str,
+    path: &str,
+    value: &JsonValue,
+    indexes: &mut BTreeMap<String, DirectScalarIndexEntry>,
+) {
+    match value {
+        JsonValue::Object(object) => {
+            for (field, value) in object {
+                let next_path = if path.is_empty() {
+                    field.clone()
+                } else {
+                    format!("{path}.{field}")
+                };
+                collect_direct_scalar_indexes(node_id, &next_path, value, indexes);
+            }
+        }
+        JsonValue::String(_) | JsonValue::Number(_) | JsonValue::Bool(_) | JsonValue::Null => {
+            let Some(sortable_key) = sortable_scalar_key(value) else {
+                return;
+            };
+            let key = direct_index_key(path, &sortable_key, node_id);
+            indexes.insert(
+                key,
+                DirectScalarIndexEntry {
+                    node_id: node_id.to_owned(),
+                    path: path.to_owned(),
+                    value: value.clone(),
+                    sortable_key,
+                },
+            );
+        }
+        JsonValue::Array(_) => {}
+    }
 }
 
 fn auth_node_meta(node_id: &str, node_state: &NodeState) -> AuthNodeMeta {

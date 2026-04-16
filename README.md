@@ -24,6 +24,7 @@
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
 - Routed transport envelopes with presence, signaling, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
 - Remote live watches for `get` / `map` / `query` / `lex` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
+- Narrow watch invalidation based on touched logical paths, plus burst coalescing in relay/mesh watch refresh loops so unrelated writes do not fan out through every active watch.
 - Browser WebRTC mesh sync with both local `BroadcastChannel` signaling and relay-backed signaling for cross-browser peers.
 - Native WebRTC mesh starts offline, keeps local reads/writes/durable state available, and retries relay signaling in the background until a relay peer appears.
 - Optional native WebSocket sync adapter behind the `native-websocket` feature, with disconnected startup and background relay retry on native.
@@ -33,7 +34,7 @@
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
 - SEA-style browser crypto surface with pair generation, password work, sign/verify, encrypt/decrypt, shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
-- Incremental segment-backed native storage with lazy node restore, canonical node/index records, manifest metadata, direct-scalar indexes, and journaled transactions.
+- Incremental segment-backed native storage with lazy node restore, canonical node/index records, manifest metadata, nested scalar indexes, bounded direct-index scans, journaled transactions, and explicit vacuum/GC support.
 - Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
 - Gun compatibility surface with `Gun` / `GunChain`, Gun link markers, and Gun graph import/export helpers.
 - Runtime stats and limit controls for transport and queue hardening.
@@ -54,6 +55,7 @@ This is intentionally not a 1:1 port of Gun internals.
 - Browser support stays on stable `wasm32-unknown-unknown` patterns instead of assuming newer WebAssembly proposals are enabled by default.
 - Threaded WASM is an explicit opt-in path layered on top of the default browser build instead of changing the default toolchain or hosting requirements.
 - Native storage no longer needs full snapshot hydration up front: the incremental store can restore clock/pending metadata first and lazy-load nodes on demand.
+- Explicit `vacuum_storage()` cleanup keeps native segment files and attached blob stores from accumulating orphaned artifacts without forcing automatic destructive GC into the hot write path.
 
 That gives the project a more inspectable merge model and makes it easier to test and evolve without carrying over Gun's event-routing bugs.
 
@@ -61,6 +63,7 @@ That gives the project a more inspectable merge model and makes it easier to tes
 
 - [docs/scale-and-storage-maturity-plan.md](/home/bitnom/Code/gunport/primadb/docs/scale-and-storage-maturity-plan.md): Storage-boundary redesign plan for incremental reads, page/segment persistence, query pushdown, browser/native backends, compaction, and scale-oriented testing.
 - [docs/cross-platform-parity-plan.md](/home/bitnom/Code/gunport/primadb/docs/cross-platform-parity-plan.md): Cross-platform parity plan for shared relay, durable storage, and browser/native WebRTC mesh.
+- [docs/watch-index-storage-plan.md](/home/bitnom/Code/gunport/primadb/docs/watch-index-storage-plan.md): Implementation plan for narrowed watch invalidation, broader index pushdown, and explicit storage vacuum/GC.
 
 ## Rust Example
 

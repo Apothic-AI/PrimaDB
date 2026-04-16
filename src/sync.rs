@@ -167,6 +167,16 @@ impl PullRequestKind {
             Self::Snapshot { .. } => "snapshot",
         }
     }
+
+    pub fn interest_path(&self) -> Option<String> {
+        match self {
+            Self::Get { path }
+            | Self::Map { path }
+            | Self::Query { path, .. }
+            | Self::Lex { path, .. } => Some(path.path()),
+            Self::Snapshot { root } => root.clone(),
+        }
+    }
 }
 
 impl PullResponse {

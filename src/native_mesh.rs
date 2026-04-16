@@ -58,6 +58,7 @@ struct PendingWatchSequence {
 struct IncomingWatch {
     target_peer_id: String,
     request_kind: crate::PullRequestKind,
+    interest_path: Option<String>,
     next_sequence: u64,
     last_hash: Option<String>,
 }
@@ -174,12 +175,15 @@ impl NativeWebRtcMesh {
         let change_receiver = change_subscription.receiver();
         let change_state = state.clone();
         let change_task = tokio::spawn(async move {
-            while let Ok(event) = change_receiver.recv().await {
+            while let Ok(mut event) = change_receiver.recv().await {
+                while let Ok(next) = change_receiver.try_recv() {
+                    event.merge(next);
+                }
                 if event.pending_ops > 0 {
                     let _ = flush_mesh_pending_state(&change_state).await;
                 }
                 if event.data_changed {
-                    let _ = emit_incoming_mesh_watch_updates(&change_state).await;
+                    let _ = emit_incoming_mesh_watch_updates(&change_state, &event).await;
                 }
             }
         });
@@ -1056,11 +1060,13 @@ async fn handle_mesh_watch_request(
                 if incoming.len() >= limit && !incoming.contains_key(&request.watch_id) {
                     return Err(PrimadbError::TooManyRemoteWatches { limit });
                 }
+                let interest_path = request_kind.interest_path();
                 incoming.insert(
                     request.watch_id.clone(),
                     IncomingWatch {
                         target_peer_id: remote_peer.to_owned(),
                         request_kind,
+                        interest_path,
                         next_sequence: 0,
                         last_hash: None,
                     },
@@ -1151,10 +1157,18 @@ async fn accept_mesh_watch_event(
     Ok(())
 }
 
-async fn emit_incoming_mesh_watch_updates(state: &Arc<NativeWebRtcMeshState>) -> Result<usize> {
+async fn emit_incoming_mesh_watch_updates(
+    state: &Arc<NativeWebRtcMeshState>,
+    event: &crate::ChangeEvent,
+) -> Result<usize> {
     let watch_ids = {
         let incoming = state.incoming_watches.lock().await;
-        incoming.keys().cloned().collect::<Vec<_>>()
+        incoming
+            .iter()
+            .filter_map(|(watch_id, watch)| {
+                incoming_watch_overlaps_event(watch, event).then_some(watch_id.clone())
+            })
+            .collect::<Vec<_>>()
     };
     let mut emitted = 0;
     for watch_id in watch_ids {
@@ -1214,6 +1228,26 @@ async fn fail_outgoing_mesh_watches(state: &Arc<NativeWebRtcMeshState>, message:
 
 async fn clear_incoming_mesh_watches(state: &Arc<NativeWebRtcMeshState>) {
     state.incoming_watches.lock().await.clear();
+}
+
+fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEvent) -> bool {
+    event.full_refresh
+        || watch.interest_path.as_ref().map_or(true, |path| {
+            event
+                .touched_paths
+                .iter()
+                .any(|changed| paths_overlap(path, changed))
+        })
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 async fn flush_mesh_pending_state(state: &Arc<NativeWebRtcMeshState>) -> Result<usize> {

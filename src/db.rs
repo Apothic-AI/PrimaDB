@@ -8,8 +8,8 @@ use crate::clock::{HybridClock, Revision, VersionMarker};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::durable::{DurableStorageBinding, DurableStorageConfig};
 use crate::engine::{
-    IncrementalStore, build_storage_metadata, build_storage_transaction,
-    build_storage_transaction_from_ops,
+    DirectIndexScan, IncrementalStore, StorageVacuumReport, build_storage_metadata,
+    build_storage_transaction, build_storage_transaction_from_ops,
 };
 use crate::error::{PrimadbError, Result};
 use crate::hardening::{PrimadbLimits, PrimadbStats};
@@ -57,6 +57,10 @@ pub struct ChangeEvent {
     pub revision: u64,
     pub pending_ops: usize,
     pub data_changed: bool,
+    #[serde(default)]
+    pub full_refresh: bool,
+    #[serde(default)]
+    pub touched_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +93,13 @@ pub struct QueryBuilder {
 pub struct LexBuilder {
     chain: Chain,
     spec: LexSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VacuumReport {
+    pub storage: StorageVacuumReport,
+    pub removed_blob_entries: usize,
 }
 
 struct SubscriptionInner {
@@ -129,6 +140,8 @@ struct Inner {
 struct Watcher {
     anchor: NodeId,
     segments: Vec<String>,
+    path_key: String,
+    last_hash: Option<String>,
     sender: Sender<Option<JsonValue>>,
 }
 
@@ -147,6 +160,53 @@ enum Cursor {
 enum OperationOrigin {
     Local,
     Remote,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ChangeImpact {
+    data_changed: bool,
+    full_refresh: bool,
+    touched_paths: Vec<String>,
+}
+
+impl ChangeImpact {
+    fn pending_only() -> Self {
+        Self::default()
+    }
+
+    fn full_refresh() -> Self {
+        Self {
+            data_changed: true,
+            full_refresh: true,
+            touched_paths: Vec::new(),
+        }
+    }
+
+    fn from_ops(ops: &[Operation]) -> Self {
+        let mut touched_paths = BTreeSet::new();
+        for op in ops {
+            touched_paths.insert(operation_touched_path(op));
+        }
+        Self {
+            data_changed: !ops.is_empty(),
+            full_refresh: false,
+            touched_paths: touched_paths.into_iter().collect(),
+        }
+    }
+}
+
+impl ChangeEvent {
+    pub fn merge(&mut self, other: Self) {
+        self.revision = self.revision.max(other.revision);
+        self.pending_ops = other.pending_ops;
+        self.data_changed |= other.data_changed;
+        self.full_refresh |= other.full_refresh;
+        if !other.touched_paths.is_empty() {
+            let mut merged: BTreeSet<_> = self.touched_paths.iter().cloned().collect();
+            merged.extend(other.touched_paths);
+            self.touched_paths = merged.into_iter().collect();
+        }
+    }
 }
 
 enum ParsedInput {
@@ -292,7 +352,7 @@ impl Primadb {
             inner.unflushed_ops.clear();
             inner.missing_nodes.clear();
         }
-        self.finalize_change(true)
+        self.finalize_change(ChangeImpact::full_refresh())
     }
 
     pub fn merge_snapshot(&self, snapshot: DatabaseSnapshot) -> Result<()> {
@@ -300,7 +360,7 @@ impl Primadb {
             let mut inner = self.inner.lock().unwrap();
             merge_snapshot_into_inner(&mut inner, snapshot);
         }
-        self.finalize_change(true)
+        self.finalize_change(ChangeImpact::full_refresh())
     }
 
     fn load_persisted_snapshot(&self, snapshot: DatabaseSnapshot) -> Result<()> {
@@ -318,7 +378,7 @@ impl Primadb {
             inner.unflushed_ops.clear();
             inner.missing_nodes.clear();
         }
-        self.finalize_change(true)
+        self.finalize_change(ChangeImpact::full_refresh())
     }
 
     pub fn pending_operations(&self) -> Vec<Operation> {
@@ -342,7 +402,7 @@ impl Primadb {
             std::mem::take(&mut inner.pending_ops)
         };
         if !ops.is_empty() {
-            self.finalize_change(false)?;
+            self.finalize_change(ChangeImpact::pending_only())?;
         }
         Ok(ops)
     }
@@ -360,7 +420,7 @@ impl Primadb {
             }
         }
         if count > 0 {
-            self.finalize_change(false)?;
+            self.finalize_change(ChangeImpact::pending_only())?;
         }
         Ok(count)
     }
@@ -390,16 +450,18 @@ impl Primadb {
         I: IntoIterator<Item = Operation>,
     {
         let mut applied = 0;
+        let mut applied_ops = Vec::new();
         {
             let mut inner = self.inner.lock().unwrap();
             for op in ops {
-                if inner.apply_operation_internal(op, OperationOrigin::Remote) {
+                if inner.apply_operation_internal(op.clone(), OperationOrigin::Remote) {
                     applied += 1;
+                    applied_ops.push(op);
                 }
             }
         }
         if applied > 0 {
-            self.finalize_change(true)?;
+            self.finalize_change(ChangeImpact::from_ops(&applied_ops))?;
         }
         Ok(applied)
     }
@@ -582,6 +644,8 @@ impl Primadb {
                 revision: inner.change_revision,
                 pending_ops: inner.pending_ops.len(),
                 data_changed: false,
+                full_refresh: false,
+                touched_paths: Vec::new(),
             };
             inner.change_subscriptions.insert(
                 id,
@@ -736,6 +800,43 @@ impl Primadb {
             .clone()
             .ok_or(PrimadbError::BlobStoreUnavailable)?;
         store.get_blob(blob_id)
+    }
+
+    pub fn vacuum_storage(&self) -> Result<VacuumReport> {
+        let (storage, blob_store, metadata, nodes, next_storage_tx_id) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.storage_engine.clone(),
+                inner.blob_store.clone(),
+                build_storage_metadata(
+                    inner.clock.clone(),
+                    inner.pending_ops.clone(),
+                    inner.next_storage_tx_id + 1,
+                ),
+                inner.nodes.clone(),
+                inner.next_storage_tx_id,
+            )
+        };
+
+        let storage_report = if let Some(storage) = storage {
+            let transaction =
+                build_storage_transaction(next_storage_tx_id, metadata, nodes.clone());
+            storage.vacuum(&transaction)?
+        } else {
+            StorageVacuumReport::default()
+        };
+
+        let removed_blob_entries = if let Some(store) = blob_store {
+            let live_blob_ids = referenced_blob_ids(&nodes);
+            store.delete_unreferenced(&live_blob_ids)?
+        } else {
+            0
+        };
+
+        Ok(VacuumReport {
+            storage: storage_report,
+            removed_blob_entries,
+        })
     }
 
     pub fn has_blob(&self, blob_id: &str) -> Result<bool> {
@@ -952,18 +1053,32 @@ impl Primadb {
         Ok(())
     }
 
-    fn finalize_change(&self, data_changed: bool) -> Result<()> {
-        let revision = {
+    fn finalize_change(&self, impact: ChangeImpact) -> Result<()> {
+        let event = {
             let mut inner = self.inner.lock().unwrap();
             inner.change_revision = inner.change_revision.saturating_add(1);
-            inner.change_revision
+            ChangeEvent {
+                revision: inner.change_revision,
+                pending_ops: inner.pending_ops.len(),
+                data_changed: impact.data_changed,
+                full_refresh: impact.full_refresh,
+                touched_paths: impact.touched_paths,
+            }
         };
         self.persist_if_needed()?;
-        if data_changed {
-            self.notify_subscribers()?;
+        if event.data_changed {
+            self.notify_subscribers(&event)?;
         }
-        self.notify_change_subscribers(revision, data_changed)?;
+        self.notify_change_subscribers(event)?;
         Ok(())
+    }
+
+    fn finalize_local_change(&self) -> Result<()> {
+        let impact = {
+            let inner = self.inner.lock().unwrap();
+            ChangeImpact::from_ops(&inner.unflushed_ops)
+        };
+        self.finalize_change(impact)
     }
 
     fn materialize(&self, anchor: &str, segments: &[String]) -> Result<Option<JsonValue>> {
@@ -1081,54 +1196,84 @@ impl Primadb {
             return Ok(None);
         };
 
-        let indexed_path = spec
-            .filters
-            .iter()
-            .find_map(indexed_filter_path)
-            .or_else(|| spec.order.as_ref().and_then(indexed_order_path));
-        let Some(indexed_path) = indexed_path else {
+        let ordered_index_path = spec.order.as_ref().and_then(indexed_order_path);
+        let indexed_filter_groups = build_index_filter_groups(spec);
+        if indexed_filter_groups.is_empty() && ordered_index_path.is_none() {
             return Ok(None);
-        };
-
-        let direction = spec
-            .order
-            .as_ref()
-            .filter(|order| order.path == indexed_path)
-            .map(|order| order.direction)
-            .unwrap_or(QueryDirection::Asc);
+        }
 
         let candidate_ids: BTreeSet<_> = set.members.keys().cloned().collect();
-        let indexed_filters: Vec<_> = spec
-            .filters
-            .iter()
-            .filter(|filter| indexed_filter_path(filter).as_deref() == Some(indexed_path.as_str()))
-            .collect();
-
-        let mut ordered_member_ids = Vec::new();
-        let mut seen = BTreeSet::new();
-        for entry in engine.list_direct_index_entries(&indexed_path, direction)? {
-            if !candidate_ids.contains(&entry.node_id) || !seen.insert(entry.node_id.clone()) {
-                continue;
+        let mut eligible_ids = candidate_ids.clone();
+        for (path, filters) in &indexed_filter_groups {
+            let scan = build_direct_index_scan(filters, None);
+            let mut matched = BTreeSet::new();
+            for entry in engine.scan_direct_index_entries(path, QueryDirection::Asc, &scan)? {
+                if !candidate_ids.contains(&entry.node_id) {
+                    continue;
+                }
+                if filters
+                    .iter()
+                    .all(|filter| filter_matches_index_entry(filter, &entry.value))
+                {
+                    matched.insert(entry.node_id);
+                }
             }
-            if indexed_filters
-                .iter()
-                .all(|filter| filter_matches_index_entry(filter, &entry.value))
-            {
-                ordered_member_ids.push(entry.node_id);
+            eligible_ids = eligible_ids
+                .intersection(&matched)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if eligible_ids.is_empty() {
+                return Ok(Some(Vec::new()));
             }
         }
 
         let mut entries = Vec::new();
-        for member_id in ordered_member_ids {
-            entries.push(MapEntry {
-                key: member_id.clone(),
-                value: inner.materialize_node(&member_id, &member_id, &mut BTreeSet::new()),
-            });
+        let mut scan_path = None;
+        if let Some(order_path) = ordered_index_path.clone() {
+            let direction = spec
+                .order
+                .as_ref()
+                .map(|order| order.direction)
+                .unwrap_or(QueryDirection::Asc);
+            let filters = indexed_filter_groups
+                .get(&order_path)
+                .map(|filters| filters.as_slice())
+                .unwrap_or(&[]);
+            let scan = build_direct_index_scan(filters, None);
+            let target_count = spec
+                .limit
+                .map(|limit| spec.offset.saturating_add(limit))
+                .filter(|_| can_early_stop_index_query(spec));
+            let mut seen = BTreeSet::new();
+            for entry in engine.scan_direct_index_entries(&order_path, direction, &scan)? {
+                if !eligible_ids.contains(&entry.node_id) || !seen.insert(entry.node_id.clone()) {
+                    continue;
+                }
+                entries.push(MapEntry {
+                    key: entry.node_id.clone(),
+                    value: inner.materialize_node(
+                        &entry.node_id,
+                        &entry.node_id,
+                        &mut BTreeSet::new(),
+                    ),
+                });
+                if target_count.is_some_and(|target| entries.len() >= target) {
+                    break;
+                }
+            }
+            scan_path = Some(order_path);
+        } else {
+            for member_id in &eligible_ids {
+                entries.push(MapEntry {
+                    key: member_id.clone(),
+                    value: inner.materialize_node(member_id, member_id, &mut BTreeSet::new()),
+                });
+            }
         }
 
         entries = filter_query_entries(entries, spec);
         if let Some(order) = &spec.order {
-            if order.path != indexed_path {
+            if scan_path.as_deref() != Some(order.path.as_str()) {
                 sort_query_entries(&mut entries, order);
             }
         }
@@ -1188,6 +1333,10 @@ impl Primadb {
             inner.resolve_cursor(anchor, segments)?
         };
 
+        let snapshot = self.materialize(anchor, segments)?;
+        let path_key = watch_path_key(anchor, segments);
+        let last_hash = crate::stable_content_hash(&snapshot);
+
         let (sender, receiver) = async_channel::unbounded();
         let id = {
             let mut inner = self.inner.lock().unwrap();
@@ -1198,13 +1347,13 @@ impl Primadb {
                 Watcher {
                     anchor: anchor.to_owned(),
                     segments: segments.to_vec(),
+                    path_key,
+                    last_hash,
                     sender: sender.clone(),
                 },
             );
             id
         };
-
-        let snapshot = self.materialize(anchor, segments)?;
         let _ = sender.try_send(snapshot);
 
         Ok(Subscription {
@@ -1216,7 +1365,7 @@ impl Primadb {
         })
     }
 
-    fn notify_subscribers(&self) -> Result<()> {
+    fn notify_subscribers(&self, event: &ChangeEvent) -> Result<()> {
         let watchers: Vec<(u64, Watcher)> = {
             let inner = self.inner.lock().unwrap();
             inner
@@ -1227,17 +1376,32 @@ impl Primadb {
         };
 
         let mut stale = Vec::new();
+        let mut hash_updates = Vec::new();
         for (id, watcher) in watchers {
+            if !event.full_refresh && !watch_change_overlaps(&watcher.path_key, event) {
+                continue;
+            }
             let snapshot = self
                 .materialize(&watcher.anchor, &watcher.segments)
                 .unwrap_or(None);
+            let snapshot_hash = crate::stable_content_hash(&snapshot);
+            if snapshot_hash == watcher.last_hash {
+                continue;
+            }
             if watcher.sender.try_send(snapshot).is_err() {
                 stale.push(id);
+            } else {
+                hash_updates.push((id, snapshot_hash));
             }
         }
 
-        if !stale.is_empty() {
+        if !stale.is_empty() || !hash_updates.is_empty() {
             let mut inner = self.inner.lock().unwrap();
+            for (id, hash) in hash_updates {
+                if let Some(watcher) = inner.subscriptions.get_mut(&id) {
+                    watcher.last_hash = hash;
+                }
+            }
             for id in stale {
                 inner.subscriptions.remove(&id);
             }
@@ -1246,7 +1410,7 @@ impl Primadb {
         Ok(())
     }
 
-    fn notify_change_subscribers(&self, revision: u64, data_changed: bool) -> Result<()> {
+    fn notify_change_subscribers(&self, event: ChangeEvent) -> Result<()> {
         let (watchers, pending_ops): (Vec<(u64, ChangeWatcher)>, usize) = {
             let inner = self.inner.lock().unwrap();
             (
@@ -1260,11 +1424,8 @@ impl Primadb {
         };
 
         let mut stale = Vec::new();
-        let event = ChangeEvent {
-            revision,
-            pending_ops,
-            data_changed,
-        };
+        let mut event = event;
+        event.pending_ops = pending_ops;
         for (id, watcher) in watchers {
             if watcher.sender.try_send(event.clone()).is_err() {
                 stale.push(id);
@@ -1308,7 +1469,7 @@ impl Primadb {
                 )?;
             }
         }
-        self.finalize_change(true)
+        self.finalize_local_change()
     }
 
     #[cfg(feature = "crypto")]
@@ -1351,7 +1512,7 @@ impl Primadb {
                 )?;
             }
         }
-        self.finalize_change(true)
+        self.finalize_local_change()
     }
 
     fn unset(&self, anchor: &str, segments: &[String]) -> Result<()> {
@@ -1370,7 +1531,7 @@ impl Primadb {
             };
             inner.delete_field(&node, &field);
         }
-        self.finalize_change(true)
+        self.finalize_local_change()
     }
 
     fn set_json(&self, anchor: &str, segments: &[String], value: JsonValue) -> Result<String> {
@@ -1391,7 +1552,7 @@ impl Primadb {
             let parsed = parse_input(value, &display_path(anchor, segments))?;
             inner.add_member_to_set(&node, &field, parsed, &display_path(anchor, segments))?
         };
-        self.finalize_change(true)?;
+        self.finalize_local_change()?;
         Ok(member_id)
     }
 
@@ -1426,7 +1587,7 @@ impl Primadb {
                 certificate.as_deref(),
             )?
         };
-        self.finalize_change(true)?;
+        self.finalize_local_change()?;
         Ok(member_id)
     }
 
@@ -1449,7 +1610,7 @@ impl Primadb {
             inner.remove_member_from_set(&node, &field, &member_id);
             member_id
         };
-        self.finalize_change(true)?;
+        self.finalize_local_change()?;
         Ok(member_id)
     }
 }
@@ -2838,6 +2999,53 @@ fn display_path(anchor: &str, segments: &[String]) -> String {
     }
 }
 
+fn watch_path_key(anchor: &str, segments: &[String]) -> String {
+    if segments.is_empty() {
+        anchor.to_owned()
+    } else {
+        format!("{anchor}/{}", segments.join("/"))
+    }
+}
+
+fn path_overlaps(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn watch_change_overlaps(path: &str, event: &ChangeEvent) -> bool {
+    event.full_refresh
+        || event
+            .touched_paths
+            .iter()
+            .any(|changed| path_overlaps(path, changed))
+}
+
+fn operation_touched_path(op: &Operation) -> String {
+    match &op.action {
+        OperationAction::SetField { node, field, .. }
+        | OperationAction::AddSetMember { node, field, .. }
+        | OperationAction::RemoveSetMember { node, field, .. }
+        | OperationAction::DeleteField { node, field } => format!("{node}/{field}"),
+    }
+}
+
+fn referenced_blob_ids(nodes: &BTreeMap<NodeId, NodeState>) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for node in nodes.values() {
+        for field in node.fields.values() {
+            if let FieldValue::Blob(reference) = &field.value {
+                ids.insert(reference.id.clone());
+            }
+        }
+    }
+    ids
+}
+
 fn parse_input(value: JsonValue, path: &str) -> Result<ParsedInput> {
     match value {
         JsonValue::Object(object) => {
@@ -3547,7 +3755,81 @@ fn indexed_order_path(order: &crate::query::QueryOrder) -> Option<String> {
 }
 
 fn is_direct_index_path(path: &str) -> bool {
-    !path.is_empty() && path != "$key" && path != "$value" && !path.contains('.')
+    !path.is_empty() && path != "$key" && path != "$value"
+}
+
+fn build_index_filter_groups<'a>(spec: &'a QuerySpec) -> BTreeMap<String, Vec<&'a QueryFilter>> {
+    let mut groups = BTreeMap::new();
+    for filter in &spec.filters {
+        if let Some(path) = indexed_filter_path(filter) {
+            groups.entry(path).or_insert_with(Vec::new).push(filter);
+        }
+    }
+    groups
+}
+
+fn build_direct_index_scan(filters: &[&QueryFilter], limit: Option<usize>) -> DirectIndexScan {
+    let mut scan = DirectIndexScan {
+        limit,
+        ..DirectIndexScan::default()
+    };
+    for filter in filters {
+        match filter {
+            QueryFilter::Eq { value, .. } => {
+                if let Some(key) = crate::engine::sortable_scalar_key(value) {
+                    scan.exact_sortable_key = Some(key);
+                }
+            }
+            QueryFilter::Gt { value, .. } => {
+                if let Some(key) = crate::engine::sortable_scalar_key(value) {
+                    scan.start_after = Some(match scan.start_after.take() {
+                        Some(current) => current.max(key),
+                        None => key,
+                    });
+                }
+            }
+            QueryFilter::Gte { value, .. } => {
+                if let Some(key) = crate::engine::sortable_scalar_key(value) {
+                    scan.start_at = Some(match scan.start_at.take() {
+                        Some(current) => current.max(key),
+                        None => key,
+                    });
+                }
+            }
+            QueryFilter::Lt { value, .. } => {
+                if let Some(key) = crate::engine::sortable_scalar_key(value) {
+                    scan.end_before = Some(match scan.end_before.take() {
+                        Some(current) => current.min(key),
+                        None => key,
+                    });
+                }
+            }
+            QueryFilter::Lte { value, .. } => {
+                if let Some(key) = crate::engine::sortable_scalar_key(value) {
+                    scan.end_at = Some(match scan.end_at.take() {
+                        Some(current) => current.min(key),
+                        None => key,
+                    });
+                }
+            }
+            QueryFilter::Prefix { value, .. } => {
+                scan.prefix_sortable_key = Some(format!(
+                    "s_{}",
+                    crate::engine::direct_index_encode_prefix(value)
+                ));
+            }
+            QueryFilter::Ne { .. } | QueryFilter::Contains { .. } | QueryFilter::Exists { .. } => {}
+        }
+    }
+    scan
+}
+
+fn can_early_stop_index_query(spec: &QuerySpec) -> bool {
+    spec.order.as_ref().and_then(indexed_order_path).is_some()
+        && spec
+            .filters
+            .iter()
+            .all(|filter| indexed_filter_path(filter).is_some())
 }
 
 fn filter_matches_index_entry(filter: &QueryFilter, value: &JsonValue) -> bool {
@@ -3925,6 +4207,26 @@ mod tests {
     }
 
     #[test]
+    fn subscriptions_skip_unrelated_changes() -> Result<()> {
+        let db = Primadb::with_replica_id("node-a");
+        let subscription = db.root("users").field("alice").subscribe()?;
+
+        assert_eq!(subscription.recv_blocking(), Some(None));
+
+        db.root("docs")
+            .field("hello")
+            .put(json!({"value": "world"}))?;
+        assert_eq!(subscription.try_recv(), None);
+
+        db.root("users")
+            .field("alice")
+            .put(json!({"name": "Alice"}))?;
+        let update = subscription.recv_blocking().unwrap().unwrap();
+        assert_eq!(update["name"], "Alice");
+        Ok(())
+    }
+
+    #[test]
     fn file_persistence_round_trips_state() -> Result<()> {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4152,6 +4454,136 @@ mod tests {
         assert!(reader.stats().nodes < 24);
 
         let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_storage_pushes_down_nested_scalar_indexes() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-nested-{unique}"));
+
+        let writer = Primadb::with_replica_id("writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        for index in 0..24 {
+            writer
+                .root("lists")
+                .field("main")
+                .field("items")
+                .set(json!({
+                    "title": format!("Task {index}"),
+                    "flags": { "archived": index % 5 == 0 },
+                    "profile": { "rank": index },
+                }))?;
+        }
+
+        let reader = Primadb::with_replica_id("reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert_eq!(reader.stats().nodes, 0);
+
+        let ranked = reader
+            .root("lists")
+            .field("main")
+            .field("items")
+            .query(QuerySpec {
+                filters: vec![
+                    QueryFilter::Eq {
+                        path: "flags.archived".to_owned(),
+                        value: json!(false),
+                    },
+                    QueryFilter::Gte {
+                        path: "profile.rank".to_owned(),
+                        value: json!(10),
+                    },
+                ],
+                order: Some(crate::query::QueryOrder {
+                    path: "profile.rank".to_owned(),
+                    direction: QueryDirection::Desc,
+                }),
+                limit: Some(3),
+                offset: 0,
+            })?;
+
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].value["title"], "Task 23");
+        assert_eq!(ranked[1].value["title"], "Task 22");
+        assert_eq!(ranked[2].value["title"], "Task 21");
+        assert!(reader.stats().nodes < 24);
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn vacuum_storage_removes_orphaned_segment_and_blob_entries() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let storage_root = std::env::temp_dir().join(format!("primadb-vacuum-store-{unique}"));
+        let blob_root = std::env::temp_dir().join(format!("primadb-vacuum-blobs-{unique}"));
+
+        let db = Primadb::with_replica_id("vacuum-a");
+        assert!(!db.use_radisk_storage(storage_root.clone(), 8)?);
+        db.open_blob_storage(crate::BlobStorageConfig::Files {
+            directory: blob_root.display().to_string(),
+        })?;
+        let live_blob = db
+            .root("assets")
+            .field("keep")
+            .put_blob(b"keep-me".to_vec(), Some("application/octet-stream"))?;
+        db.root("docs")
+            .field("hello")
+            .put(json!({"value": "world"}))?;
+
+        let orphan_node = storage_root
+            .join("nodes")
+            .join(format!("{}.json", crate::encode_component("orphan/node")));
+        let orphan_auth = storage_root
+            .join("auth")
+            .join(format!("{}.json", crate::encode_component("orphan/node")));
+        let orphan_manifest = storage_root
+            .join("node_indexes")
+            .join(format!("{}.json", crate::encode_component("orphan/node")));
+        std::fs::write(&orphan_node, b"{}")?;
+        std::fs::write(&orphan_auth, b"{}")?;
+        std::fs::write(&orphan_manifest, b"{}")?;
+
+        let stale_key = crate::direct_index_key("ghost.path", "s_dead", "orphan/node");
+        let mut stale_index = storage_root.join("indexes");
+        for segment in stale_key.split('/') {
+            stale_index.push(segment);
+        }
+        stale_index.set_extension("json");
+        if let Some(parent) = stale_index.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&stale_index, b"{}")?;
+
+        let orphan_blob_dir = blob_root.join("blobs").join("sha256_deadbeef");
+        std::fs::create_dir_all(&orphan_blob_dir)?;
+        std::fs::write(orphan_blob_dir.join("meta.json"), b"{}")?;
+        std::fs::write(orphan_blob_dir.join("data.bin"), b"orphan")?;
+
+        let report = db.vacuum_storage()?;
+        assert!(report.storage.removed_node_files >= 1);
+        assert!(report.storage.removed_auth_files >= 1);
+        assert!(report.storage.removed_index_manifests >= 1);
+        assert!(report.storage.removed_direct_index_files >= 1);
+        assert!(report.removed_blob_entries >= 1);
+
+        assert!(!orphan_node.exists());
+        assert!(!orphan_auth.exists());
+        assert!(!orphan_manifest.exists());
+        assert!(!stale_index.exists());
+        assert!(!orphan_blob_dir.exists());
+        assert!(db.get_blob(&live_blob.id)?.is_some());
+
+        let _ = std::fs::remove_dir_all(storage_root);
+        let _ = std::fs::remove_dir_all(blob_root);
         Ok(())
     }
 

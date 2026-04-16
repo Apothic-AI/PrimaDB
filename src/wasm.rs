@@ -149,6 +149,7 @@ struct PendingWatchSequence {
 struct IncomingWatch {
     target_peer_id: String,
     request_kind: PullRequestKind,
+    interest_path: Option<String>,
     next_sequence: u64,
     last_hash: Option<String>,
 }
@@ -599,7 +600,10 @@ impl WasmPrimadb {
         let store = store_name.clone();
         let snapshot_key = key.clone();
         spawn_local(async move {
-            while let Ok(event) = receiver.recv().await {
+            while let Ok(mut event) = receiver.recv().await {
+                while let Ok(next) = receiver.try_recv() {
+                    event.merge(next);
+                }
                 if !event.data_changed && event.pending_ops == 0 {
                     continue;
                 }
@@ -681,7 +685,10 @@ impl WasmPrimadb {
         let store = store_name.clone();
         let namespace_key = namespace.clone();
         spawn_local(async move {
-            while let Ok(event) = receiver.recv().await {
+            while let Ok(mut event) = receiver.recv().await {
+                while let Ok(next) = receiver.try_recv() {
+                    event.merge(next);
+                }
                 if !event.data_changed && event.pending_ops == 0 {
                     continue;
                 }
@@ -918,12 +925,15 @@ impl WasmPrimadb {
         let receiver = change_subscription.receiver();
         let change_state = state.clone();
         spawn_local(async move {
-            while let Ok(event) = receiver.recv().await {
+            while let Ok(mut event) = receiver.recv().await {
+                while let Ok(next) = receiver.try_recv() {
+                    event.merge(next);
+                }
                 if event.pending_ops > 0 {
                     let _ = flush_pending_state(&change_state);
                 }
                 if event.data_changed {
-                    let _ = emit_incoming_watch_updates_state(&change_state);
+                    let _ = emit_incoming_watch_updates_state(&change_state, &event);
                 }
             }
         });
@@ -1048,12 +1058,15 @@ impl WasmPrimadb {
         let receiver = change_subscription.receiver();
         let change_state = state.clone();
         spawn_local(async move {
-            while let Ok(event) = receiver.recv().await {
+            while let Ok(mut event) = receiver.recv().await {
+                while let Ok(next) = receiver.try_recv() {
+                    event.merge(next);
+                }
                 if event.pending_ops > 0 {
                     let _ = flush_mesh_pending_state(&change_state);
                 }
                 if event.data_changed {
-                    let _ = emit_incoming_mesh_watch_updates_state(&change_state);
+                    let _ = emit_incoming_mesh_watch_updates_state(&change_state, &event);
                 }
             }
         });
@@ -2467,11 +2480,13 @@ fn handle_watch_request_state(
                         "too many active remote watches (limit {limit})"
                     )));
                 }
+                let interest_path = request_kind.interest_path();
                 borrowed.incoming_watches.insert(
                     request.watch_id.clone(),
                     IncomingWatch {
                         target_peer_id: from.to_owned(),
                         request_kind,
+                        interest_path,
                         next_sequence: 0,
                         last_hash: None,
                     },
@@ -2563,13 +2578,16 @@ fn accept_watch_event_state(
 
 fn emit_incoming_watch_updates_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
+    event: &crate::ChangeEvent,
 ) -> std::result::Result<usize, JsValue> {
     let watch_ids = {
         let borrowed = state.borrow();
         borrowed
             .incoming_watches
-            .keys()
-            .cloned()
+            .iter()
+            .filter_map(|(watch_id, watch)| {
+                incoming_watch_overlaps_event(watch, event).then_some(watch_id.clone())
+            })
             .collect::<Vec<_>>()
     };
     let mut emitted = 0;
@@ -2769,11 +2787,13 @@ fn handle_mesh_watch_request_state(
                         "too many active remote watches (limit {limit})"
                     )));
                 }
+                let interest_path = request_kind.interest_path();
                 borrowed.incoming_watches.insert(
                     request.watch_id.clone(),
                     IncomingWatch {
                         target_peer_id: remote_peer.to_owned(),
                         request_kind,
+                        interest_path,
                         next_sequence: 0,
                         last_hash: None,
                     },
@@ -2865,13 +2885,16 @@ fn accept_mesh_watch_event_state(
 
 fn emit_incoming_mesh_watch_updates_state(
     state: &Rc<RefCell<WebRtcMeshState>>,
+    event: &crate::ChangeEvent,
 ) -> std::result::Result<usize, JsValue> {
     let watch_ids = {
         let borrowed = state.borrow();
         borrowed
             .incoming_watches
-            .keys()
-            .cloned()
+            .iter()
+            .filter_map(|(watch_id, watch)| {
+                incoming_watch_overlaps_event(watch, event).then_some(watch_id.clone())
+            })
             .collect::<Vec<_>>()
     };
     let mut emitted = 0;
@@ -3322,6 +3345,26 @@ fn handle_mesh_signaling_websocket_message(
         }
     }
     Ok(())
+}
+
+fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEvent) -> bool {
+    event.full_refresh
+        || watch.interest_path.as_ref().map_or(true, |path| {
+            event
+                .touched_paths
+                .iter()
+                .any(|changed| paths_overlap(path, changed))
+        })
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn handle_mesh_signal_state(

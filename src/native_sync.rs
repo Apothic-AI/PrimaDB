@@ -51,6 +51,7 @@ struct PendingWatchSequence {
 struct IncomingWatch {
     target_peer_id: String,
     request_kind: crate::PullRequestKind,
+    interest_path: Option<String>,
     next_sequence: u64,
     last_hash: Option<String>,
 }
@@ -225,12 +226,15 @@ impl NativeWebSocketSync {
         let change_receiver = change_subscription.receiver();
         let change_state = state.clone();
         let change_task = tokio::spawn(async move {
-            while let Ok(event) = change_receiver.recv().await {
+            while let Ok(mut event) = change_receiver.recv().await {
+                while let Ok(next) = change_receiver.try_recv() {
+                    event.merge(next);
+                }
                 if event.pending_ops > 0 {
                     let _ = flush_pending_state(&change_state).await;
                 }
                 if event.data_changed {
-                    let _ = emit_incoming_watch_updates(&change_state).await;
+                    let _ = emit_incoming_watch_updates(&change_state, &event).await;
                 }
             }
         });
@@ -931,11 +935,13 @@ fn handle_watch_request(
                 if watches.len() >= limit && !watches.contains_key(&request.watch_id) {
                     return Err(PrimadbError::TooManyRemoteWatches { limit });
                 }
+                let interest_path = request_kind.interest_path();
                 watches.insert(
                     request.watch_id.clone(),
                     IncomingWatch {
                         target_peer_id: from.to_owned(),
                         request_kind,
+                        interest_path,
                         next_sequence: 0,
                         last_hash: None,
                     },
@@ -1023,10 +1029,18 @@ fn accept_watch_event(state: &Arc<NativeWebSocketSyncState>, event: WatchEvent) 
     Ok(())
 }
 
-async fn emit_incoming_watch_updates(state: &Arc<NativeWebSocketSyncState>) -> Result<usize> {
+async fn emit_incoming_watch_updates(
+    state: &Arc<NativeWebSocketSyncState>,
+    event: &crate::ChangeEvent,
+) -> Result<usize> {
     let watch_ids = {
         let watches = state.incoming_watches.lock().unwrap();
-        watches.keys().cloned().collect::<Vec<_>>()
+        watches
+            .iter()
+            .filter_map(|(watch_id, watch)| {
+                incoming_watch_overlaps_event(watch, event).then_some(watch_id.clone())
+            })
+            .collect::<Vec<_>>()
     };
     let mut emitted = 0;
     for watch_id in watch_ids {
@@ -1093,6 +1107,26 @@ fn fail_outgoing_watches(state: &Arc<NativeWebSocketSyncState>, message: &str) {
 
 fn clear_incoming_watches(state: &Arc<NativeWebSocketSyncState>) {
     state.incoming_watches.lock().unwrap().clear();
+}
+
+fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEvent) -> bool {
+    event.full_refresh
+        || watch.interest_path.as_ref().map_or(true, |path| {
+            event
+                .touched_paths
+                .iter()
+                .any(|changed| paths_overlap(path, changed))
+        })
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn store_peer_recommendations(
