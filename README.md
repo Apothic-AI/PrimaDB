@@ -12,8 +12,8 @@ Run it locally with:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/website
-npm install
-npm run start
+pnpm install
+pnpm run start
 ```
 
 The earlier planning notes were moved out of `docs/` and are temporarily parked under
@@ -241,8 +241,8 @@ Build it from the repo with:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 That package exposes three browser-facing entrypoints:
@@ -299,8 +299,8 @@ Build it with:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 Example usage:
@@ -436,8 +436,8 @@ Automation:
 - [release.yml](/home/bitnom/Code/gunport/primadb/.github/workflows/release.yml) creates a GitHub release when a `v*.*.*` tag is pushed and that tagged commit is on `master`.
   It also attaches release artifacts for:
   `primadb-<version>.crate`,
-  the browser npm package tarball,
-  the Linux x64 GNU `primadb-node` npm package tarball,
+  the browser package tarball,
+  the Linux x64 GNU `primadb-node` package tarball,
   the `primadb-python` wheel and source distribution,
   and a `SHA256SUMS.txt` checksum file.
 
@@ -487,7 +487,7 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's relay client API, automatic IndexedDB persistence, and the included relay server.
 - [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Default browser mesh board using Primadb's shared `connectMesh(...)` facade, relay-backed signaling by default, optional `BroadcastChannel` fallback, and browser/native smoke coverage.
 - [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, the DAM relay, and a browser runtime smoke test for `load/not/map/back`.
-- [examples/browser-package-notes-vite/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite/README.md): Vite browser app that installs the local `primadb` npm package, exercises IndexedDB-backed persistence, and can optionally join the relay-signaled mesh through query params.
+- [examples/browser-package-notes-vite/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite/README.md): Vite browser app that installs the local `primadb` package with `pnpm`, exercises IndexedDB-backed persistence, and can optionally join the relay-signaled mesh through query params.
 - [packages/primadb/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/README.md): package-local browser demos for the default and threaded npm entrypoints.
 - [packages/primadb-node/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/README.md): package-local native Node demos for durable local storage and relay-signaled mesh peers.
 - [packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md): package-local native Python demos for durable local storage and relay-signaled mesh peers.
@@ -521,12 +521,12 @@ cd /home/bitnom/Code/gunport/primadb
 ./build-wasm-threads.sh
 ```
 
-Vite browser app consuming the npm package:
+Vite browser app consuming the local package:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 Open:
@@ -673,7 +673,7 @@ Package browser smoke:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
-npm run smoke
+pnpm run smoke
 ```
 
 ## Query Layer

@@ -23,8 +23,8 @@ cargo run --example ws_relay_server -- 127.0.0.1:9010
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb
-npm install
-npm run build
+pnpm install
+pnpm run build
 ./examples/serve.sh
 ```
 

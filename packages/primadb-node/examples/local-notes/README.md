@@ -7,7 +7,7 @@ package-local data directory.
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
-npm install
-npm run build
+pnpm install
+pnpm run build
 node ./examples/local-notes/index.mjs
 ```

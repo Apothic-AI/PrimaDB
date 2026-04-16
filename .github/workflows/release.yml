@@ -33,6 +33,11 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -87,6 +92,11 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -100,18 +110,17 @@ jobs:
 
       - name: Install browser package dependencies
         working-directory: packages/primadb
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build browser package
         working-directory: packages/primadb
-        run: npm run build
+        run: pnpm run build
 
       - name: Pack browser package
         working-directory: packages/primadb
         run: |
           mkdir -p ../../release-assets
-          TARBALL="$(npm pack --silent)"
-          mv "$TARBALL" "../../release-assets/$TARBALL"
+          pnpm pack --pack-destination ../../release-assets
 
       - name: Upload browser package asset
         uses: actions/upload-artifact@v4
@@ -131,6 +140,11 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -139,18 +153,19 @@ jobs:
 
       - name: Install Node package dependencies
         working-directory: packages/primadb-node
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build Node package
         working-directory: packages/primadb-node
-        run: npm run build
+        run: pnpm run build
 
       - name: Pack Node package
         working-directory: packages/primadb-node
         run: |
           mkdir -p ../../release-assets
-          TARBALL="$(npm pack --silent)"
-          mv "$TARBALL" "../../release-assets/primadb-node-${{ needs.validate.outputs.version }}-linux-x64-gnu.tgz"
+          pnpm pack --pack-destination ../../release-assets
+          mv "../../release-assets/primadb-node-${{ needs.validate.outputs.version }}.tgz" \
+            "../../release-assets/primadb-node-${{ needs.validate.outputs.version }}-linux-x64-gnu.tgz"
 
       - name: Upload Node package asset
         uses: actions/upload-artifact@v4

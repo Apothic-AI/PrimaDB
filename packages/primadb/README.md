@@ -37,8 +37,8 @@ From the repo root:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 That build:
@@ -155,8 +155,8 @@ const gun = Gun({
 Useful repo-local checks:
 
 ```bash
-npm run build
-npm run typecheck
-npm run smoke
-npm run pack:check
+pnpm run build
+pnpm run typecheck
+pnpm run smoke
+pnpm run pack:check
 ```

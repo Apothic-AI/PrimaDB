@@ -1,12 +1,12 @@
 # Browser Package Notes Vite Example
 
-`browser-package-notes-vite` is a real browser app that consumes the in-repo npm package in
+`browser-package-notes-vite` is a real browser app that consumes the in-repo package in
 [packages/primadb](/home/bitnom/Code/gunport/primadb/packages/primadb) through Vite instead of
 importing raw generated WASM bindings directly.
 
 It demonstrates:
 
-- `npm install` against the local `primadb` package
+- `pnpm install` against the local `primadb` package
 - `Primadb` and `initPrimadb()` imports from the package entrypoint
 - IndexedDB segment persistence through `openDurableStorage(...)`
 - live note rendering through package-level chain subscriptions
@@ -16,8 +16,8 @@ It demonstrates:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 Open:
@@ -36,7 +36,7 @@ http://127.0.0.1:4182/?room=demo-room&signal=relay&relay=ws://127.0.0.1:9010
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
-npm run smoke
+pnpm run smoke
 ```
 
 The smoke test builds the Vite app, starts `vite preview`, opens Chromium through

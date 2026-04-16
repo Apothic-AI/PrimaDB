@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Docusaurus site for PrimaDB.",
+  "packageManager": "pnpm@10.29.3",
   "license": "Apache-2.0",
   "scripts": {
     "start": "docusaurus start",
@@ -11,13 +12,15 @@
     "clear": "docusaurus clear"
   },
   "dependencies": {
-    "@docusaurus/core": "^3.8.1",
-    "@docusaurus/preset-classic": "^3.8.1",
-    "@mdx-js/react": "^3.0.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "@docusaurus/core": "3.10.0",
+    "@docusaurus/preset-classic": "3.10.0",
+    "@mdx-js/react": "3.1.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
-  "overrides": {
-    "webpack": "5.105.0"
+  "pnpm": {
+    "overrides": {
+      "webpack": "5.105.0"
+    }
   }
 }

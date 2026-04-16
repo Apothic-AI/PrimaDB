@@ -72,8 +72,8 @@ http://127.0.0.1:4175/examples/browser-threaded-mesh-notes/
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 Open:

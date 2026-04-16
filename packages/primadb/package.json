@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "TypeScript package for Primadb's browser WASM runtime.",
   "type": "module",
+  "packageManager": "pnpm@10.29.3",
   "license": "Apache-2.0",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -34,7 +35,7 @@
     "build": "node ./scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "node ./scripts/smoke.mjs",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "pnpm pack --dry-run"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

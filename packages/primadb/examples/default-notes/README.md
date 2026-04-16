@@ -15,8 +15,8 @@ It demonstrates:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb
-npm install
-npm run build
+pnpm install
+pnpm run build
 ./examples/serve.sh
 ```
 

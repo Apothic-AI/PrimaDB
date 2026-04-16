@@ -60,8 +60,8 @@ Use this only when you want the opt-in `wasm-threads` build. It has stricter req
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 This packages the browser WASM build into a browser-first npm surface.
@@ -70,8 +70,8 @@ This packages the browser WASM build into a browser-first npm surface.
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 This builds the native addon-backed Node surface.
@@ -93,6 +93,6 @@ directory.
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/website
-npm install
-npm run start
+pnpm install
+pnpm run start
 ```

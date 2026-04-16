@@ -2,8 +2,9 @@
   "name": "primadb-browser-package-notes-vite",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.29.3",
   "scripts": {
-    "preinstall": "npm --prefix ../../packages/primadb install && npm --prefix ../../packages/primadb run build",
+    "preinstall": "pnpm --dir ../../packages/primadb install --frozen-lockfile && pnpm --dir ../../packages/primadb run build",
     "dev": "vite --host 127.0.0.1 --port 4182 --strictPort",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4182 --strictPort",

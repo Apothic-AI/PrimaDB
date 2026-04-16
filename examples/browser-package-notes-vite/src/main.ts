@@ -95,7 +95,7 @@ function renderNotes() {
 
   app.count.textContent = String(entries.length);
   app.status.textContent = entries.length
-    ? `${entries.length} note${entries.length === 1 ? "" : "s"} stored through the npm package`
+    ? `${entries.length} note${entries.length === 1 ? "" : "s"} stored through the package build`
     : "No notes yet. Add one below.";
 
   app.list.innerHTML = entries

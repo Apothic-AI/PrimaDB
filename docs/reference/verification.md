@@ -34,18 +34,18 @@ Browser package:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb
-npm install
-npm run build
-npm run typecheck
-npm run smoke
+pnpm install
+pnpm run build
+pnpm run typecheck
+pnpm run smoke
 ```
 
 Node package:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
-npm install
-npm run smoke
+pnpm install
+pnpm run smoke
 ```
 
 Python package:

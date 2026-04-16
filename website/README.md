@@ -4,21 +4,21 @@ This directory contains the Docusaurus site for PrimaDB.
 
 Authored docs content lives in the repo’s top-level
 [docs/](https://github.com/Apothic-AI/PrimaDB/tree/master/docs) directory. The `website/` folder is
-only the site shell, theme config, and npm toolchain.
+only the site shell, theme config, and pnpm-managed toolchain.
 
 ## Local Development
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/website
-npm install
-npm run start
+pnpm install
+pnpm run start
 ```
 
 ## Production Build
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/website
-npm run build
+pnpm run build
 ```
 
 ## Notes

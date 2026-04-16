@@ -27,8 +27,8 @@ Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 ## Example
@@ -74,8 +74,8 @@ db.setNetworkHooks({
 ## Smoke Tests
 
 ```bash
-npm run smoke:core
-npm run smoke:hooks
-npm run smoke:relay
-npm run smoke:mesh
+pnpm run smoke:core
+pnpm run smoke:hooks
+pnpm run smoke:relay
+pnpm run smoke:mesh
 ```

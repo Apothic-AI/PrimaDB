@@ -23,8 +23,8 @@ cargo run --example ws_relay_server -- 127.0.0.1:9010
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
-npm install
-npm run build
+pnpm install
+pnpm run build
 node ./examples/mesh-peer/index.mjs --room package-mesh --name node-a --message "hello from node"
 ```
 

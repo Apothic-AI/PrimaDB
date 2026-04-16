@@ -6,8 +6,8 @@ Build the package first:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 Start the package example server:

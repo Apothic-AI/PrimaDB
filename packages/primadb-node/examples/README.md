@@ -6,8 +6,8 @@ Build the addon first:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 Available projects:
