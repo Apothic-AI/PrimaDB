@@ -1,0 +1,8 @@
+{
+  "label": "Getting Started",
+  "position": 2,
+  "link": {
+    "type": "generated-index",
+    "description": "Build PrimaDB, choose the right target, and get a local-first graph running quickly."
+  }
+}

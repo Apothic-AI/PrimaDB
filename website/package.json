@@ -1,0 +1,23 @@
+{
+  "name": "primadb-docs",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Docusaurus site for PrimaDB.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "start": "docusaurus start",
+    "build": "docusaurus build",
+    "serve": "docusaurus serve",
+    "clear": "docusaurus clear"
+  },
+  "dependencies": {
+    "@docusaurus/core": "^3.8.1",
+    "@docusaurus/preset-classic": "^3.8.1",
+    "@mdx-js/react": "^3.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "overrides": {
+    "webpack": "5.105.0"
+  }
+}

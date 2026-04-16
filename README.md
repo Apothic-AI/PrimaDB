@@ -2,6 +2,23 @@
 
 `primadb` is a Rust-native, local-first graph database inspired by Gun, but built around explicit versioned operations instead of Gun's implicit event mesh. The current codebase focuses on deterministic merge behavior, browser compatibility, and a clean replication boundary that can be driven by WebSockets, WebRTC, service workers, or any other transport you want to layer on top.
 
+## Documentation
+
+PrimaDB now has a Docusaurus docs site in
+[website/](/home/bitnom/Code/gunport/primadb/website), with authored content living under
+[docs/](/home/bitnom/Code/gunport/primadb/docs).
+
+Run it locally with:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/website
+npm install
+npm run start
+```
+
+The earlier planning notes were moved out of `docs/` and are temporarily parked under
+[tmp/planning-docs/README.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/README.md).
+
 ## Current Capabilities
 
 - Graph-shaped documents with nested object writes.
@@ -60,11 +77,12 @@ This is intentionally not a 1:1 port of Gun internals.
 
 That gives the project a more inspectable merge model and makes it easier to test and evolve without carrying over Gun's event-routing bugs.
 
-## Planning
+## Temporary Planning Notes
 
-- [docs/scale-and-storage-maturity-plan.md](/home/bitnom/Code/gunport/primadb/docs/scale-and-storage-maturity-plan.md): Storage-boundary redesign plan for incremental reads, page/segment persistence, query pushdown, browser/native backends, compaction, and scale-oriented testing.
-- [docs/cross-platform-parity-plan.md](/home/bitnom/Code/gunport/primadb/docs/cross-platform-parity-plan.md): Cross-platform parity plan for shared relay, durable storage, and browser/native WebRTC mesh.
-- [docs/watch-index-storage-plan.md](/home/bitnom/Code/gunport/primadb/docs/watch-index-storage-plan.md): Implementation plan for narrowed watch invalidation, broader index pushdown, and explicit storage vacuum/GC.
+Planning notes are temporarily parked under
+[tmp/planning-docs/README.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/README.md)
+so [docs/](/home/bitnom/Code/gunport/primadb/docs) can become the canonical site-content
+directory.
 
 ## Rust Example
 

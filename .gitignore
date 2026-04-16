@@ -9,6 +9,8 @@
 **/dist/
 **/vendor/
 **/target/
+website/.docusaurus/
+website/build/
 *.node
 *.whl
 *.tar.gz
