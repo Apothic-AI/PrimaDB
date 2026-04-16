@@ -2,6 +2,7 @@ import "./globals.js";
 import initWasm, { Primadb, initThreadPool } from "./vendor/threads/primadb.js";
 
 export * from "./vendor/threads/primadb.js";
+export * from "./hooks.js";
 
 export type PrimadbThreadsInitInput = Parameters<typeof initWasm>[0];
 export type PrimadbThreadsInitOutput = Awaited<ReturnType<typeof initWasm>>;

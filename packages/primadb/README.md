@@ -17,6 +17,20 @@ The browser bindings also expose live remote watch helpers on relay and mesh tra
 - `watchRemoteLex(...)`
 - `watchRemoteSnapshot(...)`
 
+They also now expose typed network-boundary hook helpers through:
+
+- `setNetworkHooks(db, hooks)`
+- `clearNetworkHooks(db)`
+
+Those wrap the underlying browser binding methods and give TypeScript apps typed callback
+signatures for:
+
+- `onConnect(...)`
+- `onJoinRoom(...)`
+- `onPull(...)`
+- `onWatch(...)`
+- `onServeResult(...)`
+
 ## Build From The Repo
 
 From the repo root:
@@ -58,11 +72,19 @@ cd /home/bitnom/Code/gunport/primadb/packages/primadb
 ## Default Build
 
 ```ts
-import { Primadb, initPrimadb } from "primadb";
+import { Primadb, initPrimadb, setNetworkHooks } from "primadb";
 
 await initPrimadb();
 
 const db = new Primadb("browser-a");
+setNetworkHooks(db, {
+  onPull(context) {
+    if (context.request.kind === "get" && context.request.path.anchor === "private") {
+      return "private root denied";
+    }
+    return undefined;
+  },
+});
 const relay = db.connectRelay({
   url: "ws://127.0.0.1:9010",
   retryIntervalMs: 1500,
@@ -86,6 +108,7 @@ await db
 import {
   Primadb,
   bootstrapPrimadbThreads,
+  setNetworkHooks,
   parallelEnabled,
   parallelThreadCount,
 } from "primadb/threads";
@@ -93,6 +116,11 @@ import {
 await bootstrapPrimadbThreads({ threads: 4 });
 
 const db = new Primadb("threaded-browser");
+setNetworkHooks(db, {
+  onServeResult(_context, result) {
+    return result;
+  },
+});
 const mesh = db.connectMesh({
   room: "demo-room",
   relayUrl: "ws://127.0.0.1:9010",

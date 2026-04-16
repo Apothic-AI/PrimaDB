@@ -236,11 +236,18 @@ That package exposes three browser-facing entrypoints:
 Example usage:
 
 ```ts
-import { Primadb, initPrimadb } from "primadb";
+import { Primadb, initPrimadb, setNetworkHooks } from "primadb";
 
 await initPrimadb();
 
 const db = new Primadb("browser-a");
+setNetworkHooks(db, {
+  onPull(context) {
+    if (context.request.kind === "get" && context.request.path.anchor === "private") {
+      return "private root denied";
+    }
+  },
+});
 const mesh = db.connectMesh({
   room: "demo-room",
   relayUrl: "ws://127.0.0.1:9010",
@@ -299,6 +306,9 @@ db.chain("notes").field("items").set({
 See [packages/primadb-node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/README.md)
 for the full package-specific flow.
 
+The browser package exposes typed JS callback hooks directly. The native Node package does not yet
+expose callback registration for network hooks, even though the Rust core supports them.
+
 For runnable package-local Node examples, see
 [packages/primadb-node/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/README.md).
 
@@ -349,6 +359,9 @@ uv run python scripts/pack_check.py
 
 See [packages/primadb-python/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/README.md)
 for the package-specific flow.
+
+Like the Node package, the Python package does not yet expose callback registration for network
+hooks, even though the Rust core supports them.
 
 For runnable package-local Python examples, see
 [packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md).

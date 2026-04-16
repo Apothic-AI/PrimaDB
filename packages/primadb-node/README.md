@@ -15,6 +15,11 @@ Current surface:
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
 
+The core Rust crate also supports optional network-boundary hooks. The browser TypeScript package
+exposes those directly as JS callbacks. The Node addon does not expose callback registration yet,
+because those hooks may fire on background runtime threads and need a separate Node-safe callback
+bridge.
+
 ## Package Examples
 
 Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples):

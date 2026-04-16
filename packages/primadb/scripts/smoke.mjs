@@ -16,11 +16,15 @@ const report = {
     initPrimadb: typeof base.initPrimadb === "function",
     createPrimadb: typeof base.createPrimadb === "function",
     Primadb: typeof base.Primadb === "function",
+    setNetworkHooks: typeof base.setNetworkHooks === "function",
+    clearNetworkHooks: typeof base.clearNetworkHooks === "function",
   },
   threads: {
     initPrimadbThreads: typeof threads.initPrimadbThreads === "function",
     bootstrapPrimadbThreads: typeof threads.bootstrapPrimadbThreads === "function",
     initThreadPool: typeof threads.initThreadPool === "function",
+    setNetworkHooks: typeof threads.setNetworkHooks === "function",
+    clearNetworkHooks: typeof threads.clearNetworkHooks === "function",
   },
   gun: {
     initPrimadbGun: typeof gun.initPrimadbGun === "function",

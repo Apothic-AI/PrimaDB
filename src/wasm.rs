@@ -1,14 +1,15 @@
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
 use crate::{
-    BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription,
+    BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext,
     DurableStorageBinding, DurableStorageConfig, HookTransport, HybridClock, IceServerConfig,
     LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, Operation,
     PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody,
-    QuerySpec, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage, RouteBatchItem,
-    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, Subscription, SyncEnvelope,
-    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, build_storage_metadata,
-    build_storage_transaction, encode_component, error_pull_response, error_watch_event,
+    QuerySpec, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage, RoomHookContext,
+    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig,
+    ServeRequestContext, ServeResultContext, Subscription, SyncEnvelope, SyncFrame, WatchEvent,
+    WatchRequest, WatchRequestKind, build_storage_metadata, build_storage_transaction,
+    encode_component, error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
@@ -16,6 +17,7 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
@@ -232,6 +234,22 @@ struct WebRtcMeshState {
     next_message_seq: u64,
 }
 
+#[derive(Clone)]
+struct WasmNetworkHookCallbacks {
+    on_connect: Option<js_sys::Function>,
+    on_join_room: Option<js_sys::Function>,
+    on_pull: Option<js_sys::Function>,
+    on_watch: Option<js_sys::Function>,
+    on_serve_result: Option<js_sys::Function>,
+}
+
+struct WasmNetworkHooks {
+    callbacks: WasmNetworkHookCallbacks,
+}
+
+unsafe impl Send for WasmNetworkHooks {}
+unsafe impl Sync for WasmNetworkHooks {}
+
 #[wasm_bindgen(js_name = WebRtcMesh)]
 pub struct WasmWebRtcMesh {
     state: Rc<RefCell<WebRtcMeshState>>,
@@ -242,6 +260,65 @@ pub struct WasmWebRtcMesh {
     relay_onerror: Option<Closure<dyn FnMut(web_sys::Event)>>,
     retry_callback: Option<Closure<dyn FnMut()>>,
     retry_interval_id: Option<i32>,
+}
+
+impl crate::NetworkHooks for WasmNetworkHooks {
+    fn on_connect(&self, context: &ConnectHookContext) -> crate::HookDecision<()> {
+        match &self.callbacks.on_connect {
+            Some(function) => parse_void_hook_decision(
+                call_hook1(function, context),
+                "connection denied by network hook",
+            ),
+            None => crate::HookDecision::allow(()),
+        }
+    }
+
+    fn on_join_room(&self, context: &RoomHookContext) -> crate::HookDecision<()> {
+        match &self.callbacks.on_join_room {
+            Some(function) => parse_void_hook_decision(
+                call_hook1(function, context),
+                "room denied by network hook",
+            ),
+            None => crate::HookDecision::allow(()),
+        }
+    }
+
+    fn on_pull(&self, context: &ServeRequestContext) -> crate::HookDecision<PullRequestKind> {
+        match &self.callbacks.on_pull {
+            Some(function) => parse_request_hook_decision(
+                call_hook1(function, context),
+                &context.request,
+                "pull denied by network hook",
+            ),
+            None => crate::HookDecision::allow(context.request.clone()),
+        }
+    }
+
+    fn on_watch(&self, context: &ServeRequestContext) -> crate::HookDecision<PullRequestKind> {
+        match &self.callbacks.on_watch {
+            Some(function) => parse_request_hook_decision(
+                call_hook1(function, context),
+                &context.request,
+                "watch denied by network hook",
+            ),
+            None => crate::HookDecision::allow(context.request.clone()),
+        }
+    }
+
+    fn on_serve_result(
+        &self,
+        context: &ServeResultContext,
+        result: RemoteResult,
+    ) -> crate::HookDecision<RemoteResult> {
+        match &self.callbacks.on_serve_result {
+            Some(function) => parse_result_hook_decision(
+                call_hook2(function, context, &result),
+                result,
+                "served result denied by network hook",
+            ),
+            None => crate::HookDecision::allow(result),
+        }
+    }
 }
 
 #[wasm_bindgen(js_class = Primadb)]
@@ -545,6 +622,23 @@ impl WasmPrimadb {
                 write_block,
             )
             .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = setNetworkHooks)]
+    pub fn set_network_hooks(&self, hooks: JsValue) -> std::result::Result<(), JsValue> {
+        if hooks.is_null() || hooks.is_undefined() {
+            self.inner.clear_network_hooks();
+            return Ok(());
+        }
+        let callbacks = parse_wasm_network_hook_callbacks(hooks)?;
+        self.inner
+            .set_network_hooks(Arc::new(WasmNetworkHooks { callbacks }));
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = clearNetworkHooks)]
+    pub fn clear_network_hooks(&self) {
+        self.inner.clear_network_hooks();
     }
 
     #[wasm_bindgen(js_name = saveIndexedDb)]
@@ -4753,6 +4847,232 @@ fn browser_window() -> std::result::Result<web_sys::Window, JsValue> {
 
 fn js_to_json(value: JsValue) -> std::result::Result<JsonValue, JsValue> {
     serde_wasm_bindgen::from_value(value).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn parse_wasm_network_hook_callbacks(
+    hooks: JsValue,
+) -> std::result::Result<WasmNetworkHookCallbacks, JsValue> {
+    if !hooks.is_object() {
+        return Err(JsValue::from_str(
+            "network hooks must be an object with optional callback functions",
+        ));
+    }
+    Ok(WasmNetworkHookCallbacks {
+        on_connect: js_function_property(&hooks, "onConnect")?,
+        on_join_room: js_function_property(&hooks, "onJoinRoom")?,
+        on_pull: js_function_property(&hooks, "onPull")?,
+        on_watch: js_function_property(&hooks, "onWatch")?,
+        on_serve_result: js_function_property(&hooks, "onServeResult")?,
+    })
+}
+
+fn js_function_property(
+    object: &JsValue,
+    key: &str,
+) -> std::result::Result<Option<js_sys::Function>, JsValue> {
+    let value = js_sys::Reflect::get(object, &JsValue::from_str(key))?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    value
+        .dyn_into::<js_sys::Function>()
+        .map(Some)
+        .map_err(|_| JsValue::from_str(&format!("network hook `{key}` must be a function")))
+}
+
+fn call_hook1<T: Serialize>(
+    function: &js_sys::Function,
+    arg: &T,
+) -> std::result::Result<JsValue, String> {
+    let arg = serde_wasm_bindgen::to_value(arg).map_err(|error| error.to_string())?;
+    function
+        .call1(&JsValue::NULL, &arg)
+        .map_err(js_hook_error_string)
+}
+
+fn call_hook2<A: Serialize, B: Serialize>(
+    function: &js_sys::Function,
+    arg_a: &A,
+    arg_b: &B,
+) -> std::result::Result<JsValue, String> {
+    let arg_a = serde_wasm_bindgen::to_value(arg_a).map_err(|error| error.to_string())?;
+    let arg_b = serde_wasm_bindgen::to_value(arg_b).map_err(|error| error.to_string())?;
+    function
+        .call2(&JsValue::NULL, &arg_a, &arg_b)
+        .map_err(js_hook_error_string)
+}
+
+fn parse_void_hook_decision(
+    response: std::result::Result<JsValue, String>,
+    default_message: &str,
+) -> crate::HookDecision<()> {
+    match response {
+        Ok(value) => {
+            if value.is_null() || value.is_undefined() {
+                return crate::HookDecision::allow(());
+            }
+            if let Some(flag) = value.as_bool() {
+                return if flag {
+                    crate::HookDecision::allow(())
+                } else {
+                    crate::HookDecision::deny(default_message)
+                };
+            }
+            if let Some(message) = value.as_string() {
+                return crate::HookDecision::deny(message);
+            }
+            if has_hook_wrapper_fields(&value) {
+                let allow = js_bool_prop(&value, "allow").unwrap_or(true);
+                if allow {
+                    crate::HookDecision::allow(())
+                } else {
+                    crate::HookDecision::deny(
+                        js_string_prop(&value, "message")
+                            .unwrap_or_else(|| default_message.to_owned()),
+                    )
+                }
+            } else {
+                crate::HookDecision::deny(format!(
+                    "invalid network hook return value: expected boolean, string, or decision object"
+                ))
+            }
+        }
+        Err(message) => crate::HookDecision::deny(message),
+    }
+}
+
+fn parse_request_hook_decision(
+    response: std::result::Result<JsValue, String>,
+    default_request: &PullRequestKind,
+    default_message: &str,
+) -> crate::HookDecision<PullRequestKind> {
+    match response {
+        Ok(value) => {
+            if value.is_null() || value.is_undefined() {
+                return crate::HookDecision::allow(default_request.clone());
+            }
+            if let Some(flag) = value.as_bool() {
+                return if flag {
+                    crate::HookDecision::allow(default_request.clone())
+                } else {
+                    crate::HookDecision::deny(default_message)
+                };
+            }
+            if let Some(message) = value.as_string() {
+                return crate::HookDecision::deny(message);
+            }
+            if has_hook_wrapper_fields(&value) {
+                let allow = js_bool_prop(&value, "allow").unwrap_or(true);
+                if !allow {
+                    return crate::HookDecision::deny(
+                        js_string_prop(&value, "message")
+                            .unwrap_or_else(|| default_message.to_owned()),
+                    );
+                }
+                if let Some(request) = js_value_prop(&value, "request")
+                    && !request.is_null()
+                    && !request.is_undefined()
+                {
+                    return match serde_wasm_bindgen::from_value::<PullRequestKind>(request) {
+                        Ok(request) => crate::HookDecision::allow(request),
+                        Err(error) => crate::HookDecision::deny(error.to_string()),
+                    };
+                }
+                return crate::HookDecision::allow(default_request.clone());
+            }
+            match serde_wasm_bindgen::from_value::<PullRequestKind>(value) {
+                Ok(request) => crate::HookDecision::allow(request),
+                Err(error) => crate::HookDecision::deny(error.to_string()),
+            }
+        }
+        Err(message) => crate::HookDecision::deny(message),
+    }
+}
+
+fn parse_result_hook_decision(
+    response: std::result::Result<JsValue, String>,
+    default_result: RemoteResult,
+    default_message: &str,
+) -> crate::HookDecision<RemoteResult> {
+    match response {
+        Ok(value) => {
+            if value.is_null() || value.is_undefined() {
+                return crate::HookDecision::allow(default_result);
+            }
+            if let Some(flag) = value.as_bool() {
+                return if flag {
+                    crate::HookDecision::allow(default_result)
+                } else {
+                    crate::HookDecision::deny(default_message)
+                };
+            }
+            if let Some(message) = value.as_string() {
+                return crate::HookDecision::deny(message);
+            }
+            if has_hook_wrapper_fields(&value) {
+                let allow = js_bool_prop(&value, "allow").unwrap_or(true);
+                if !allow {
+                    return crate::HookDecision::deny(
+                        js_string_prop(&value, "message")
+                            .unwrap_or_else(|| default_message.to_owned()),
+                    );
+                }
+                if let Some(result) = js_value_prop(&value, "result")
+                    && !result.is_null()
+                    && !result.is_undefined()
+                {
+                    return match serde_wasm_bindgen::from_value::<RemoteResult>(result) {
+                        Ok(result) => crate::HookDecision::allow(result),
+                        Err(error) => crate::HookDecision::deny(error.to_string()),
+                    };
+                }
+                return crate::HookDecision::allow(default_result);
+            }
+            match serde_wasm_bindgen::from_value::<RemoteResult>(value) {
+                Ok(result) => crate::HookDecision::allow(result),
+                Err(error) => crate::HookDecision::deny(error.to_string()),
+            }
+        }
+        Err(message) => crate::HookDecision::deny(message),
+    }
+}
+
+fn has_hook_wrapper_fields(value: &JsValue) -> bool {
+    ["allow", "message", "request", "result"]
+        .into_iter()
+        .any(|key| js_sys::Reflect::has(value, &JsValue::from_str(key)).unwrap_or(false))
+}
+
+fn js_bool_prop(value: &JsValue, key: &str) -> Option<bool> {
+    js_value_prop(value, key)?.as_bool()
+}
+
+fn js_string_prop(value: &JsValue, key: &str) -> Option<String> {
+    js_value_prop(value, key)?.as_string()
+}
+
+fn js_value_prop(value: &JsValue, key: &str) -> Option<JsValue> {
+    let value = js_sys::Reflect::get(value, &JsValue::from_str(key)).ok()?;
+    if value.is_null() || value.is_undefined() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn js_hook_error_string(error: JsValue) -> String {
+    if let Some(message) = error.as_string() {
+        return message;
+    }
+    if let Ok(message) = js_sys::Reflect::get(&error, &JsValue::from_str("message"))
+        && let Some(message) = message.as_string()
+    {
+        return message;
+    }
+    js_sys::JSON::stringify(&error)
+        .ok()
+        .and_then(|value| value.as_string())
+        .unwrap_or_else(|| "javascript network hook threw".to_owned())
 }
 
 fn js_to_supported_json(value: JsValue) -> std::result::Result<JsonValue, JsValue> {

@@ -2,6 +2,7 @@ import "./globals.js";
 import initWasm, { Primadb } from "./vendor/default/primadb.js";
 
 export * from "./vendor/default/primadb.js";
+export * from "./hooks.js";
 
 export type PrimadbInitInput = Parameters<typeof initWasm>[0];
 export type PrimadbInitOutput = Awaited<ReturnType<typeof initWasm>>;
