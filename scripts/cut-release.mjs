@@ -36,6 +36,13 @@ function runStreaming(command, args) {
   });
 }
 
+function runQuiet(command, args) {
+  execFileSync(command, args, {
+    cwd: repoRoot,
+    stdio: ["inherit", "ignore", "inherit"],
+  });
+}
+
 function ensureCleanWorktree() {
   const status = run("git", ["status", "--porcelain"]);
   if (status.length > 0) {
@@ -77,9 +84,11 @@ function main() {
 
   if (before !== version) {
     runStreaming("node", ["./scripts/version-sync.mjs", "set", version]);
+    runQuiet("cargo", ["metadata", "--format-version", "1", "--no-deps"]);
     runStreaming("git", [
       "add",
       "Cargo.toml",
+      "Cargo.lock",
       "packages/primadb/package.json",
       "packages/primadb-node/package.json",
       "packages/primadb-python/pyproject.toml",

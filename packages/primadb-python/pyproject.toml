@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "primadb-python"
-version = "0.1.0"
+version = "0.1.1"
 description = "Native Python bindings for Primadb."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -31,3 +31,4 @@ classifiers = [
 python-source = "python"
 module-name = "primadb._native"
 features = ["pyo3/extension-module"]
+

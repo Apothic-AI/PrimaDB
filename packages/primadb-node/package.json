@@ -1,6 +1,6 @@
 {
   "name": "primadb-node",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Native Node.js package for Primadb.",
   "type": "module",
   "packageManager": "pnpm@10.29.3",

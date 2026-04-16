@@ -1,6 +1,6 @@
 [package]
 name = "primadb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A Rust-native local-first graph database inspired by Gun."
 license = "Apache-2.0"
@@ -103,3 +103,4 @@ web-sys = { version = "0.3", features = [
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+

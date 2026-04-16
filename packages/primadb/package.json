@@ -1,6 +1,6 @@
 {
   "name": "primadb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript package for Primadb's browser WASM runtime.",
   "type": "module",
   "packageManager": "pnpm@10.29.3",
