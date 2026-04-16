@@ -8,6 +8,10 @@ PrimaDB now has a Docusaurus docs site in
 [website/](/home/bitnom/Code/gunport/primadb/website), with authored content living under
 [docs/](/home/bitnom/Code/gunport/primadb/docs).
 
+The published site target is GitHub Pages:
+
+- `https://apothic-ai.github.io/PrimaDB/`
+
 Run it locally with:
 
 ```bash

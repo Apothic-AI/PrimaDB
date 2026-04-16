@@ -21,6 +21,15 @@ cd /home/bitnom/Code/gunport/primadb/website
 pnpm run build
 ```
 
+## GitHub Pages
+
+The docs site is configured for GitHub Pages at:
+
+- `https://apothic-ai.github.io/PrimaDB/`
+
+The Pages deploy runs from [.github/workflows/docs.yml](https://github.com/Apothic-AI/PrimaDB/tree/master/.github/workflows/docs.yml).
+Pull requests still build the site for validation, but only pushes to `master` publish it.
+
 ## Notes
 
 - `docs/` is the canonical location for Markdown and MDX docs pages.
