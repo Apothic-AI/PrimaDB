@@ -19,6 +19,14 @@ cd /home/bitnom/Code/gunport/primadb
 node ./scripts/version-sync.mjs check
 node ./scripts/version-sync.mjs sync
 node ./scripts/version-sync.mjs set 0.1.1
+node ./scripts/cut-release.mjs 0.1.1
+```
+
+`cut-release.mjs` creates the release commit and matching annotated `v*.*.*` tag locally. Push the
+result with:
+
+```bash
+git push --follow-tags origin master
 ```
 
 ## GitHub Automation

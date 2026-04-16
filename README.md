@@ -428,6 +428,9 @@ node ./scripts/version-sync.mjs sync
 
 # bump Cargo.toml and every package manifest together
 node ./scripts/version-sync.mjs set 0.1.1
+
+# create the release commit and matching annotated tag
+node ./scripts/cut-release.mjs 0.1.1
 ```
 
 Automation:
@@ -445,10 +448,8 @@ Typical release flow:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb
-node ./scripts/version-sync.mjs set 0.1.1
-git commit -am "Release 0.1.1"
-git tag v0.1.1
-git push origin master --tags
+node ./scripts/cut-release.mjs 0.1.1
+git push --follow-tags origin master
 ```
 
 ## Replication Contract
