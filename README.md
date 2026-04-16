@@ -30,6 +30,7 @@
 - Optional native WebSocket sync adapter behind the `native-websocket` feature, with disconnected startup and background relay retry on native.
 - Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.
 - Data-level auth in the core database for signed user-owned fields, certificate-authorized delegated writes, and read-time signature verification/unwrapping.
+- Optional network-boundary hooks for connection gating, mesh room gating, pull/watch request rewriting or denial, and served-result redaction without turning the core graph into an ACL engine.
 - Gun-compatible browser runtime in [js/primadb-gun.js](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
 - SEA-style browser crypto surface with pair generation, password work, sign/verify, encrypt/decrypt, shared-secret derivation, and certificates.
@@ -741,6 +742,41 @@ cargo run --features native-webrtc --example native_mesh_probe -- \
   --room demo \
   --ice-server stun:stun1.l.google.com:19302 \
   --ice-server '{"urls":"turn:turn.example.com:3478","username":"user","credential":"pass"}'
+```
+
+## Optional Network Hooks
+
+Primadb now exposes optional Rust-side network hooks through `NetworkHooks` and
+`set_network_hooks(...)`. They are intentionally scoped to the network boundary:
+
+- `on_connect(...)` can ignore discovered peers before they enter recommendation/peer caches.
+- `on_join_room(...)` can ignore mesh peers or signaling for specific rooms.
+- `on_pull(...)` and `on_watch(...)` can deny or rewrite served remote requests.
+- `on_serve_result(...)` can redact or reshape outgoing pull/watch results.
+
+When no hooks are installed, behavior is unchanged.
+
+```rust
+use primadb::{
+    HookDecision, NetworkHooks, Primadb, PullRequestKind, ServeRequestContext,
+};
+use std::sync::Arc;
+
+struct PrivateDocsHooks;
+
+impl NetworkHooks for PrivateDocsHooks {
+    fn on_pull(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+        match &context.request {
+            PullRequestKind::Get { path } if path.anchor == "private" => {
+                HookDecision::deny("private root denied")
+            }
+            _ => HookDecision::allow(context.request.clone()),
+        }
+    }
+}
+
+let db = Primadb::with_replica_id("server-a");
+db.set_network_hooks(Arc::new(PrivateDocsHooks));
 ```
 
 ## Storage Adapters

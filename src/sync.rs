@@ -233,3 +233,32 @@ where
     }
     Some(format!("{hash:016x}"))
 }
+
+pub fn error_pull_response(request_id: &str, message: impl Into<String>) -> PullResponse {
+    PullResponse {
+        request_id: request_id.to_owned(),
+        chunk: PullChunk { index: 0, total: 1 },
+        done: true,
+        result: PullResponseBody::Error {
+            message: message.into(),
+        },
+    }
+}
+
+pub fn error_watch_event(
+    watch_id: &str,
+    sequence: u64,
+    initial: bool,
+    message: impl Into<String>,
+) -> WatchEvent {
+    WatchEvent {
+        watch_id: watch_id.to_owned(),
+        sequence,
+        initial,
+        chunk: PullChunk { index: 0, total: 1 },
+        done: true,
+        result: PullResponseBody::Error {
+            message: message.into(),
+        },
+    }
+}

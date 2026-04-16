@@ -11,6 +11,7 @@ mod durable;
 mod engine;
 mod error;
 mod hardening;
+mod hooks;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
 mod native_mesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
@@ -64,6 +65,10 @@ pub use engine::{
 };
 pub use error::{PrimadbError, Result};
 pub use hardening::{PrimadbLimits, PrimadbStats};
+pub use hooks::{
+    ConnectHookContext, HookDecision, HookTransport, NetworkHooks, RoomHookContext,
+    ServeRequestContext, ServeResultContext,
+};
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
 pub use native_mesh::NativeWebRtcMesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
@@ -85,6 +90,6 @@ pub use storage::{RadiskFileAdapter, SnapshotFileAdapter};
 pub use sync::{
     PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
     RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, SyncEnvelope, SyncFrame, WatchEvent,
-    WatchRequest, WatchRequestKind, stable_content_hash,
+    WatchRequest, WatchRequestKind, error_pull_response, error_watch_event, stable_content_hash,
 };
 pub use value::{FieldState, FieldValue, NodeId, NodeState, SetState};

@@ -217,6 +217,10 @@ impl Router {
         self.inner.lock().unwrap().peers.values().cloned().collect()
     }
 
+    pub fn forget_peer(&self, peer_id: &str) {
+        self.inner.lock().unwrap().peers.remove(peer_id);
+    }
+
     pub fn stats(&self) -> RouterStats {
         let inner = self.inner.lock().unwrap();
         RouterStats {

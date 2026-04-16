@@ -1,10 +1,11 @@
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
 use crate::{
-    ChangeSubscription, HybridClock, LexEntry, MapEntry, Operation, PeerRecommendation, Primadb,
-    PrimadbError, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage,
-    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
-    Router, RouterConfig, SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
+    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, Operation,
+    PeerRecommendation, Primadb, PrimadbError, RelayClientConfig, RemotePath, RemoteResult,
+    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
+    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, WatchEvent,
+    WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
@@ -642,6 +643,20 @@ async fn handle_route_payload(
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
+                let relay_url = peer.metadata.get("relay_url").cloned();
+                let connect_allowed = state
+                    .db
+                    .allow_peer_connection(&crate::ConnectHookContext {
+                        peer: peer.clone(),
+                        transport: HookTransport::Relay,
+                        relay_url,
+                    })
+                    .into_result();
+                if let Err(_) = connect_allowed {
+                    state.router.forget_peer(&peer.peer_id);
+                    state.recommendations.lock().unwrap().remove(&peer.peer_id);
+                    continue;
+                }
                 let recommendation = peer_recommendation_from_presence(&peer);
                 let peer_id = recommendation.peer.peer_id.clone();
                 store_peer_recommendations(state, vec![recommendation]);
@@ -649,12 +664,25 @@ async fn handle_route_payload(
             }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
-                let response = state.router.snapshot_response(
-                    root,
-                    state.db.snapshot(),
-                    RouteTarget::Peer(from.clone()),
-                );
-                send_route(state, &response)?;
+                match state.db.serve_pull_request_for_peer(
+                    &from,
+                    HookTransport::Relay,
+                    &format!("snapshot:{route_id}"),
+                    &crate::PullRequestKind::Snapshot { root: root.clone() },
+                )? {
+                    crate::HookDecision::Allow {
+                        value: crate::RemoteResult::Snapshot { snapshot },
+                    } => {
+                        let response = state.router.snapshot_response(
+                            root,
+                            snapshot,
+                            RouteTarget::Peer(from.clone()),
+                        );
+                        send_route(state, &response)?;
+                    }
+                    crate::HookDecision::Allow { .. } => {}
+                    crate::HookDecision::Deny { .. } => {}
+                }
             }
             RoutePayload::SnapshotResponse { snapshot, .. } => {
                 state.db.load_snapshot(snapshot)?;
@@ -664,13 +692,24 @@ async fn handle_route_payload(
                 handle_sync_frame(state, frame, Some(from.clone())).await?;
             }
             RoutePayload::PullRequest { request } => {
-                let result = state.db.execute_pull_request(&request)?;
-                let items = state
-                    .db
-                    .chunk_remote_result(&request.request_id, result)
-                    .into_iter()
-                    .map(|response| RouteBatchItem::PullResponse { response })
-                    .collect::<Vec<_>>();
+                let items = match state.db.serve_pull_request_for_peer(
+                    &from,
+                    HookTransport::Relay,
+                    &request.request_id,
+                    &request.request,
+                )? {
+                    crate::HookDecision::Allow { value } => state
+                        .db
+                        .chunk_remote_result(&request.request_id, value)
+                        .into_iter()
+                        .map(|response| RouteBatchItem::PullResponse { response })
+                        .collect::<Vec<_>>(),
+                    crate::HookDecision::Deny { message } => {
+                        vec![RouteBatchItem::PullResponse {
+                            response: error_pull_response(&request.request_id, message),
+                        }]
+                    }
+                };
                 for route in pack_batch_routes(
                     &state.router,
                     RouteTarget::Peer(from.clone()),
@@ -692,6 +731,24 @@ async fn handle_route_payload(
             }
             RoutePayload::PeerExchange { peers } => {
                 for recommendation in peers {
+                    let relay_url = recommendation.relay_urls.first().cloned();
+                    let connect_allowed = state
+                        .db
+                        .allow_peer_connection(&crate::ConnectHookContext {
+                            peer: recommendation.peer.clone(),
+                            transport: HookTransport::Relay,
+                            relay_url,
+                        })
+                        .into_result();
+                    if connect_allowed.is_err() {
+                        state.router.forget_peer(&recommendation.peer.peer_id);
+                        state
+                            .recommendations
+                            .lock()
+                            .unwrap()
+                            .remove(&recommendation.peer.peer_id);
+                        continue;
+                    }
                     let peer_id = recommendation.peer.peer_id.clone();
                     store_peer_recommendations(state, vec![recommendation]);
                     let _ = replay_outgoing_watches_for_peer(state, &peer_id);
@@ -927,8 +984,29 @@ fn handle_watch_request(
 ) -> Result<()> {
     match request.request {
         WatchRequestKind::Subscribe {
-            request: request_kind,
+            request: incoming_request_kind,
         } => {
+            let request_kind = match state
+                .db
+                .authorize_watch_request_for_peer(
+                    from,
+                    HookTransport::Relay,
+                    &request.watch_id,
+                    &incoming_request_kind,
+                )
+                .into_result()
+            {
+                Ok(request_kind) => request_kind,
+                Err(message) => {
+                    let route = state.router.wrap_watch_event(
+                        error_watch_event(&request.watch_id, 0, true, message),
+                        RouteTarget::Peer(from.to_owned()),
+                        None,
+                    );
+                    send_route(state, &route)?;
+                    return Ok(());
+                }
+            };
             let limit = state.db.limits().max_active_remote_watches.max(1);
             {
                 let mut watches = state.incoming_watches.lock().unwrap();
@@ -1066,8 +1144,34 @@ fn emit_single_incoming_watch_update(
         return Ok(false);
     };
 
-    let result = state.db.execute_pull_request_kind(&watch.request_kind)?;
-    let content_hash = crate::stable_content_hash(&result);
+    let decision = state.db.serve_watch_result_for_peer(
+        &watch.target_peer_id,
+        HookTransport::Relay,
+        watch_id,
+        &watch.request_kind,
+        initial,
+    )?;
+    let (result, content_hash, denied_message) = match decision {
+        crate::HookDecision::Allow { value } => {
+            let content_hash = crate::stable_content_hash(&value);
+            (value, content_hash, None)
+        }
+        crate::HookDecision::Deny { message } => (
+            crate::RemoteResult::Get { value: None },
+            None,
+            Some(message),
+        ),
+    };
+    if let Some(message) = denied_message {
+        let route = state.router.wrap_watch_event(
+            error_watch_event(watch_id, watch.next_sequence, initial, message),
+            RouteTarget::Peer(watch.target_peer_id.clone()),
+            None,
+        );
+        send_route(state, &route)?;
+        state.incoming_watches.lock().unwrap().remove(watch_id);
+        return Ok(true);
+    }
     if !initial && content_hash == watch.last_hash {
         return Ok(false);
     }

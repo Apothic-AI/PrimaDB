@@ -13,6 +13,10 @@ use crate::engine::{
 };
 use crate::error::{PrimadbError, Result};
 use crate::hardening::{PrimadbLimits, PrimadbStats};
+use crate::hooks::{
+    ConnectHookContext, HookDecision, HookTransport, NetworkHooks, RoomHookContext,
+    ServeRequestContext, ServeResultContext,
+};
 use crate::operation::{Operation, OperationAction, OperationValue};
 use crate::persistence::{PersistenceTarget, load_snapshot_payload, store_snapshot_payload};
 use crate::query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QuerySpec};
@@ -63,7 +67,7 @@ pub struct ChangeEvent {
     pub touched_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Primadb {
     inner: Arc<Mutex<Inner>>,
 }
@@ -114,7 +118,6 @@ struct ChangeSubscriptionInner {
     receiver: Receiver<ChangeEvent>,
 }
 
-#[derive(Debug)]
 struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
@@ -132,6 +135,7 @@ struct Inner {
     missing_nodes: BTreeSet<NodeId>,
     next_storage_tx_id: u64,
     limits: PrimadbLimits,
+    network_hooks: Option<Arc<dyn NetworkHooks>>,
     #[cfg(feature = "crypto")]
     security: SecurityState,
 }
@@ -223,6 +227,14 @@ enum SetMember {
     Object(Map<String, JsonValue>),
 }
 
+impl std::fmt::Debug for Primadb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Primadb")
+            .field("replica_id", &self.replica_id())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Primadb {
     pub fn with_replica_id(replica_id: impl Into<String>) -> Self {
         Self {
@@ -243,6 +255,7 @@ impl Primadb {
                 missing_nodes: BTreeSet::new(),
                 next_storage_tx_id: 1,
                 limits: PrimadbLimits::default(),
+                network_hooks: None,
                 #[cfg(feature = "crypto")]
                 security: SecurityState::default(),
             })),
@@ -610,6 +623,139 @@ impl Primadb {
         self.execute_pull_request_kind(&request.request)
     }
 
+    pub(crate) fn allow_peer_connection(&self, context: &ConnectHookContext) -> HookDecision<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .network_hooks
+            .clone()
+            .map(|hooks| hooks.on_connect(context))
+            .unwrap_or_else(|| HookDecision::allow(()))
+    }
+
+    pub(crate) fn allow_room_join(&self, context: &RoomHookContext) -> HookDecision<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .network_hooks
+            .clone()
+            .map(|hooks| hooks.on_join_room(context))
+            .unwrap_or_else(|| HookDecision::allow(()))
+    }
+
+    pub(crate) fn authorize_pull_request_for_peer(
+        &self,
+        peer_id: &str,
+        transport: HookTransport,
+        request_id: Option<&str>,
+        request: &PullRequestKind,
+    ) -> HookDecision<PullRequestKind> {
+        let hooks = self.inner.lock().unwrap().network_hooks.clone();
+        let Some(hooks) = hooks else {
+            return HookDecision::allow(request.clone());
+        };
+        hooks.on_pull(&ServeRequestContext {
+            peer_id: peer_id.to_owned(),
+            transport,
+            request_id: request_id.map(str::to_owned),
+            watch_id: None,
+            request: request.clone(),
+        })
+    }
+
+    pub(crate) fn authorize_watch_request_for_peer(
+        &self,
+        peer_id: &str,
+        transport: HookTransport,
+        watch_id: &str,
+        request: &PullRequestKind,
+    ) -> HookDecision<PullRequestKind> {
+        let hooks = self.inner.lock().unwrap().network_hooks.clone();
+        let Some(hooks) = hooks else {
+            return HookDecision::allow(request.clone());
+        };
+        hooks.on_watch(&ServeRequestContext {
+            peer_id: peer_id.to_owned(),
+            transport,
+            request_id: None,
+            watch_id: Some(watch_id.to_owned()),
+            request: request.clone(),
+        })
+    }
+
+    pub(crate) fn filter_served_result_for_peer(
+        &self,
+        peer_id: &str,
+        transport: HookTransport,
+        request_id: Option<&str>,
+        watch_id: Option<&str>,
+        request: &PullRequestKind,
+        initial: bool,
+        result: RemoteResult,
+    ) -> HookDecision<RemoteResult> {
+        let hooks = self.inner.lock().unwrap().network_hooks.clone();
+        let Some(hooks) = hooks else {
+            return HookDecision::allow(result);
+        };
+        hooks.on_serve_result(
+            &ServeResultContext {
+                peer_id: peer_id.to_owned(),
+                transport,
+                request_id: request_id.map(str::to_owned),
+                watch_id: watch_id.map(str::to_owned),
+                request: request.clone(),
+                initial,
+            },
+            result,
+        )
+    }
+
+    pub(crate) fn serve_pull_request_for_peer(
+        &self,
+        peer_id: &str,
+        transport: HookTransport,
+        request_id: &str,
+        request: &PullRequestKind,
+    ) -> Result<HookDecision<RemoteResult>> {
+        let request = match self
+            .authorize_pull_request_for_peer(peer_id, transport, Some(request_id), request)
+            .into_result()
+        {
+            Ok(request) => request,
+            Err(message) => return Ok(HookDecision::deny(message)),
+        };
+        let result = self.execute_pull_request_kind(&request)?;
+        Ok(self.filter_served_result_for_peer(
+            peer_id,
+            transport,
+            Some(request_id),
+            None,
+            &request,
+            true,
+            result,
+        ))
+    }
+
+    pub(crate) fn serve_watch_result_for_peer(
+        &self,
+        peer_id: &str,
+        transport: HookTransport,
+        watch_id: &str,
+        request: &PullRequestKind,
+        initial: bool,
+    ) -> Result<HookDecision<RemoteResult>> {
+        let result = self.execute_pull_request_kind(request)?;
+        Ok(self.filter_served_result_for_peer(
+            peer_id,
+            transport,
+            None,
+            Some(watch_id),
+            request,
+            initial,
+            result,
+        ))
+    }
+
     pub fn chunk_remote_result(&self, request_id: &str, result: RemoteResult) -> Vec<PullResponse> {
         build_pull_responses(request_id, result, &self.limits())
     }
@@ -683,6 +829,14 @@ impl Primadb {
 
     pub fn set_limits(&self, limits: PrimadbLimits) {
         self.inner.lock().unwrap().limits = limits;
+    }
+
+    pub fn set_network_hooks(&self, hooks: Arc<dyn NetworkHooks>) {
+        self.inner.lock().unwrap().network_hooks = Some(hooks);
+    }
+
+    pub fn clear_network_hooks(&self) {
+        self.inner.lock().unwrap().network_hooks = None;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3958,10 +4112,12 @@ fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
 mod tests {
     use super::Primadb;
     use crate::{
-        PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec,
-        RemotePath, Result,
+        ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PullRequest,
+        PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec, RemotePath,
+        Result, RoomHookContext, ServeRequestContext, ServeResultContext,
     };
     use serde_json::json;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -4705,6 +4861,233 @@ mod tests {
             })
             .sum::<usize>();
         assert!(snapshot_nodes >= 90);
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct TestHooks;
+
+    impl NetworkHooks for TestHooks {
+        fn on_connect(&self, context: &ConnectHookContext) -> HookDecision<()> {
+            if context
+                .peer
+                .metadata
+                .get("deny_connect")
+                .is_some_and(|value| value == "true")
+            {
+                HookDecision::deny("peer denied by connect hook")
+            } else {
+                HookDecision::allow(())
+            }
+        }
+
+        fn on_join_room(&self, context: &RoomHookContext) -> HookDecision<()> {
+            if context.room == "private-room" {
+                HookDecision::deny("room denied by room hook")
+            } else {
+                HookDecision::allow(())
+            }
+        }
+
+        fn on_pull(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+            match &context.request {
+                PullRequestKind::Get { path } if path.anchor == "private" => {
+                    HookDecision::deny("private root denied")
+                }
+                PullRequestKind::Query { path, spec } if path.anchor == "rooms" => {
+                    let mut spec = spec.clone();
+                    spec.limit = Some(1);
+                    HookDecision::allow(PullRequestKind::Query {
+                        path: path.clone(),
+                        spec,
+                    })
+                }
+                _ => HookDecision::allow(context.request.clone()),
+            }
+        }
+
+        fn on_watch(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+            match &context.request {
+                PullRequestKind::Get { path } if path.anchor == "private" => {
+                    HookDecision::deny("private watch denied")
+                }
+                _ => HookDecision::allow(context.request.clone()),
+            }
+        }
+
+        fn on_serve_result(
+            &self,
+            _context: &ServeResultContext,
+            result: crate::RemoteResult,
+        ) -> HookDecision<crate::RemoteResult> {
+            match result {
+                crate::RemoteResult::Get { .. } => HookDecision::allow(crate::RemoteResult::Get {
+                    value: Some(json!({"masked": true})),
+                }),
+                other => HookDecision::allow(other),
+            }
+        }
+    }
+
+    #[test]
+    fn network_hooks_can_gate_peer_discovery_and_room_joins() {
+        let db = Primadb::with_replica_id("hooks-a");
+        db.set_network_hooks(Arc::new(TestHooks));
+
+        let denied_peer = PeerPresence {
+            peer_id: "peer-denied".to_owned(),
+            replica_id: "peer-denied".to_owned(),
+            transport: "websocket".to_owned(),
+            capabilities: Vec::new(),
+            topics: Vec::new(),
+            metadata: [("deny_connect".to_owned(), "true".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        assert!(matches!(
+            db.allow_peer_connection(&ConnectHookContext {
+                peer: denied_peer,
+                transport: HookTransport::Relay,
+                relay_url: Some("ws://127.0.0.1:9010".to_owned()),
+            }),
+            HookDecision::Deny { .. }
+        ));
+
+        assert!(matches!(
+            db.allow_room_join(&RoomHookContext {
+                peer_id: "peer-1".to_owned(),
+                room: "private-room".to_owned(),
+                transport: HookTransport::Mesh,
+                peer: None,
+            }),
+            HookDecision::Deny { .. }
+        ));
+
+        db.clear_network_hooks();
+        let allowed_peer = PeerPresence {
+            peer_id: "peer-ok".to_owned(),
+            replica_id: "peer-ok".to_owned(),
+            transport: "websocket".to_owned(),
+            capabilities: Vec::new(),
+            topics: Vec::new(),
+            metadata: Default::default(),
+        };
+        assert!(matches!(
+            db.allow_peer_connection(&ConnectHookContext {
+                peer: allowed_peer,
+                transport: HookTransport::Relay,
+                relay_url: None,
+            }),
+            HookDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn network_hooks_can_rewrite_pull_requests_and_redact_results() -> Result<()> {
+        let db = Primadb::with_replica_id("hooks-b");
+        db.set_network_hooks(Arc::new(TestHooks));
+
+        let notes = db.root("rooms").field("lobby").field("notes");
+        for index in 0..3 {
+            notes.set(json!({
+                "title": format!("Note {index}"),
+                "created_at": index,
+            }))?;
+        }
+        db.root("docs").field("secret").put(json!("top-secret"))?;
+
+        let query = db.serve_pull_request_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "query-1",
+            &PullRequestKind::Query {
+                path: RemotePath::new("rooms", vec!["lobby".to_owned(), "notes".to_owned()]),
+                spec: QuerySpec {
+                    filters: Vec::new(),
+                    order: Some(crate::QueryOrder {
+                        path: "created_at".to_owned(),
+                        direction: QueryDirection::Asc,
+                    }),
+                    limit: None,
+                    offset: 0,
+                },
+            },
+        )?;
+        match query {
+            HookDecision::Allow {
+                value: crate::RemoteResult::Query { entries },
+            } => assert_eq!(entries.len(), 1),
+            other => panic!("unexpected query result: {other:?}"),
+        }
+
+        let redacted = db.serve_pull_request_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "get-1",
+            &PullRequestKind::Get {
+                path: RemotePath::new("docs", vec!["secret".to_owned()]),
+            },
+        )?;
+        match redacted {
+            HookDecision::Allow {
+                value: crate::RemoteResult::Get { value },
+            } => assert_eq!(value, Some(json!({"masked": true}))),
+            other => panic!("unexpected get result: {other:?}"),
+        }
+
+        let denied = db.serve_pull_request_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "get-2",
+            &PullRequestKind::Get {
+                path: RemotePath::new("private", vec!["secret".to_owned()]),
+            },
+        )?;
+        assert!(matches!(denied, HookDecision::Deny { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn network_hooks_can_gate_watch_requests_and_redact_watch_results() -> Result<()> {
+        let db = Primadb::with_replica_id("hooks-c");
+        db.set_network_hooks(Arc::new(TestHooks));
+        db.root("docs").field("public").put(json!("visible"))?;
+
+        let denied = db.authorize_watch_request_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "watch-1",
+            &PullRequestKind::Get {
+                path: RemotePath::new("private", vec!["secret".to_owned()]),
+            },
+        );
+        assert!(matches!(denied, HookDecision::Deny { .. }));
+
+        let allowed = db.authorize_watch_request_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "watch-2",
+            &PullRequestKind::Get {
+                path: RemotePath::new("docs", vec!["public".to_owned()]),
+            },
+        );
+        assert!(matches!(allowed, HookDecision::Allow { .. }));
+
+        let result = db.serve_watch_result_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "watch-2",
+            &PullRequestKind::Get {
+                path: RemotePath::new("docs", vec!["public".to_owned()]),
+            },
+            true,
+        )?;
+        match result {
+            HookDecision::Allow {
+                value: crate::RemoteResult::Get { value },
+            } => assert_eq!(value, Some(json!({"masked": true}))),
+            other => panic!("unexpected watch result: {other:?}"),
+        }
         Ok(())
     }
 }
