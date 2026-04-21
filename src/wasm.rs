@@ -4540,75 +4540,113 @@ fn segment_namespace_prefix(namespace: &str) -> String {
     format!("segment/{namespace}/")
 }
 
+fn indexed_db_prefix_upper_bound(prefix: &str) -> String {
+    format!("{prefix}\u{10ffff}")
+}
+
+fn indexed_db_prefix_range(prefix: &str) -> std::result::Result<web_sys::IdbKeyRange, JsValue> {
+    web_sys::IdbKeyRange::bound(
+        &JsValue::from_str(prefix),
+        &JsValue::from_str(&indexed_db_prefix_upper_bound(prefix)),
+    )
+}
+
+async fn list_indexed_db_keys_with_prefix(
+    database_name: &str,
+    store_name: &str,
+    prefix: &str,
+) -> std::result::Result<Vec<String>, JsValue> {
+    let db = open_indexed_db(database_name, store_name).await?;
+    let tx = db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readonly)?;
+    let store = tx.object_store(store_name)?;
+    let range = indexed_db_prefix_range(prefix)?;
+    let request = store.get_all_keys_with_key(&range)?;
+    let keys_value = await_idb_request(request.unchecked_ref()).await?;
+    await_idb_transaction(&tx).await?;
+    let keys_array = js_sys::Array::from(&keys_value);
+    let mut keys = Vec::with_capacity(keys_array.length() as usize);
+    for value in keys_array.iter() {
+        let key = value
+            .as_string()
+            .ok_or_else(|| JsValue::from_str("IndexedDB key is not a string"))?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn build_segment_transaction_entries(
+    namespace: &str,
+    transaction: &crate::StorageTransaction,
+) -> std::result::Result<Vec<(String, JsValue)>, JsValue> {
+    let prefix = segment_namespace_prefix(namespace);
+    let mut entries = Vec::with_capacity(
+        1 + transaction.nodes.len()
+            + transaction.auth_meta.len()
+            + transaction.node_indexes.len()
+            + transaction.direct_indexes.len(),
+    );
+
+    entries.push((
+        format!("{prefix}meta"),
+        serde_wasm_bindgen::to_value(&transaction.metadata)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?,
+    ));
+
+    for (node_id, node_state) in &transaction.nodes {
+        entries.push((
+            format!("{prefix}node/{}", encode_component(node_id)),
+            serde_wasm_bindgen::to_value(node_state)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+        ));
+    }
+
+    for (node_id, auth_meta) in &transaction.auth_meta {
+        entries.push((
+            format!("{prefix}auth/{}", encode_component(node_id)),
+            serde_wasm_bindgen::to_value(auth_meta)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+        ));
+    }
+
+    for (node_id, manifest) in &transaction.node_indexes {
+        entries.push((
+            format!("{prefix}node_index/{}", encode_component(node_id)),
+            serde_wasm_bindgen::to_value(manifest)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+        ));
+    }
+
+    for (key, entry) in &transaction.direct_indexes {
+        entries.push((
+            format!("{prefix}index/{key}"),
+            serde_wasm_bindgen::to_value(entry)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+        ));
+    }
+
+    Ok(entries)
+}
+
 async fn save_segment_transaction_indexed_db(
     database_name: &str,
     store_name: &str,
     namespace: &str,
     transaction: &crate::StorageTransaction,
 ) -> std::result::Result<(), JsValue> {
+    let prefix = segment_namespace_prefix(namespace);
+    let stale_keys = list_indexed_db_keys_with_prefix(database_name, store_name, &prefix).await?;
+    let entries = build_segment_transaction_entries(namespace, transaction)?;
     let db = open_indexed_db(database_name, store_name).await?;
     let tx =
         db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readwrite)?;
     let store = tx.object_store(store_name)?;
-    let _ = await_idb_request(store.clear()?.unchecked_ref()).await?;
 
-    let prefix = segment_namespace_prefix(namespace);
-    let metadata_key = format!("{prefix}meta");
-    let metadata_value = serde_wasm_bindgen::to_value(&transaction.metadata)
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let _ = await_idb_request(
-        store
-            .put_with_key(&metadata_value, &JsValue::from_str(&metadata_key))?
-            .unchecked_ref(),
-    )
-    .await?;
-
-    for (node_id, node_state) in &transaction.nodes {
-        let key = format!("{prefix}node/{}", encode_component(node_id));
-        let value = serde_wasm_bindgen::to_value(node_state)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        let _ = await_idb_request(
-            store
-                .put_with_key(&value, &JsValue::from_str(&key))?
-                .unchecked_ref(),
-        )
-        .await?;
+    for key in stale_keys {
+        let _ = store.delete(&JsValue::from_str(&key))?;
     }
 
-    for (node_id, auth_meta) in &transaction.auth_meta {
-        let key = format!("{prefix}auth/{}", encode_component(node_id));
-        let value = serde_wasm_bindgen::to_value(auth_meta)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        let _ = await_idb_request(
-            store
-                .put_with_key(&value, &JsValue::from_str(&key))?
-                .unchecked_ref(),
-        )
-        .await?;
-    }
-
-    for (node_id, manifest) in &transaction.node_indexes {
-        let key = format!("{prefix}node_index/{}", encode_component(node_id));
-        let value = serde_wasm_bindgen::to_value(manifest)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        let _ = await_idb_request(
-            store
-                .put_with_key(&value, &JsValue::from_str(&key))?
-                .unchecked_ref(),
-        )
-        .await?;
-    }
-
-    for (key, entry) in &transaction.direct_indexes {
-        let full_key = format!("{prefix}index/{key}");
-        let value = serde_wasm_bindgen::to_value(entry)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        let _ = await_idb_request(
-            store
-                .put_with_key(&value, &JsValue::from_str(&full_key))?
-                .unchecked_ref(),
-        )
-        .await?;
+    for (key, value) in entries {
+        let _ = store.put_with_key(&value, &JsValue::from_str(&key))?;
     }
 
     await_idb_transaction(&tx).await?;
@@ -4623,37 +4661,45 @@ async fn load_segment_snapshot_indexed_db(
     let db = open_indexed_db(database_name, store_name).await?;
     let tx = db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readonly)?;
     let store = tx.object_store(store_name)?;
-    let request = store.open_cursor()?;
     let prefix = segment_namespace_prefix(namespace);
+    let range = indexed_db_prefix_range(&prefix)?;
+    let keys_request = store.get_all_keys_with_key(&range)?;
+    let values_request = store.get_all_with_key(&range)?;
     let node_prefix = format!("{prefix}node/");
     let mut metadata: Option<crate::StorageMetadata> = None;
     let mut nodes = BTreeMap::new();
 
-    let mut cursor = await_idb_request(request.unchecked_ref()).await?;
-    while !cursor.is_null() && !cursor.is_undefined() {
-        let current: web_sys::IdbCursorWithValue = cursor.dyn_into()?;
-        let key = current
-            .key()?
+    let keys_value = await_idb_request(keys_request.unchecked_ref()).await?;
+    let values_value = await_idb_request(values_request.unchecked_ref()).await?;
+    await_idb_transaction(&tx).await?;
+
+    let keys_array = js_sys::Array::from(&keys_value);
+    let values_array = js_sys::Array::from(&values_value);
+    if keys_array.length() != values_array.length() {
+        return Err(JsValue::from_str(
+            "IndexedDB returned mismatched key/value counts for segment snapshot",
+        ));
+    }
+
+    for index in 0..keys_array.length() {
+        let key = keys_array
+            .get(index)
             .as_string()
-            .ok_or_else(|| JsValue::from_str("IndexedDB cursor key is not a string"))?;
+            .ok_or_else(|| JsValue::from_str("IndexedDB key is not a string"))?;
+        let value = values_array.get(index);
 
         if key == format!("{prefix}meta") {
             metadata = Some(
-                serde_wasm_bindgen::from_value(current.value()?)
+                serde_wasm_bindgen::from_value(value)
                     .map_err(|error| JsValue::from_str(&error.to_string()))?,
             );
         } else if let Some(encoded_node) = key.strip_prefix(&node_prefix) {
             let node_id = crate::engine::decode_component(encoded_node).map_err(to_js_error)?;
-            let node_state: crate::NodeState = serde_wasm_bindgen::from_value(current.value()?)
+            let node_state: crate::NodeState = serde_wasm_bindgen::from_value(value)
                 .map_err(|error| JsValue::from_str(&error.to_string()))?;
             nodes.insert(node_id, node_state);
         }
-
-        current.continue_()?;
-        cursor = await_idb_request(request.unchecked_ref()).await?;
     }
-
-    await_idb_transaction(&tx).await?;
 
     Ok(metadata.map(|metadata| crate::DatabaseSnapshot {
         clock: metadata.clock,

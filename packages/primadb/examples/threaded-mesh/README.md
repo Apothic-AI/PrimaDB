@@ -57,6 +57,16 @@ against the current live objects:
 Use `Ctrl+Enter` or `Cmd+Enter` to execute the editor contents. If your script returns a value, it
 is appended to the log panel automatically.
 
+## Smoke Test
+
+The example includes a browser smoke that verifies the threaded build boots, opens IndexedDB
+segment persistence successfully, and reloads persisted cards:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/packages/primadb
+bash ./examples/threaded-mesh/test-smoke.sh
+```
+
 This example uses `stun:stun.cloudflare.com:3478` by default. To override it from the URL, repeat
 `ice=` with either a bare STUN/TURN URL or an encoded JSON object:
 
