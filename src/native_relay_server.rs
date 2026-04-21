@@ -202,6 +202,7 @@ async fn handle_connection(
     }
 
     eprintln!("client {client_id} connected from {peer_addr}");
+    let mut terminal_error = None;
 
     loop {
         tokio::select! {
@@ -234,9 +235,10 @@ async fn handle_connection(
                     Some(Ok(Message::Close(_))) => break,
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
                     Some(Err(error)) => {
-                        return Err(PrimadbError::Message(format!(
+                        terminal_error = Some(PrimadbError::Message(format!(
                             "websocket receive failed: {error}"
-                        )))
+                        )));
+                        break;
                     }
                     None => break,
                 }
@@ -246,6 +248,9 @@ async fn handle_connection(
 
     disconnect_client(state, metrics, client_id).await?;
     eprintln!("client {client_id} disconnected");
+    if let Some(error) = terminal_error {
+        return Err(error);
+    }
     Ok(())
 }
 

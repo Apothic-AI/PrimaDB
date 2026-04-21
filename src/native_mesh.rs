@@ -114,6 +114,7 @@ struct NativeWebRtcMeshState {
     rtc_configuration: RTCConfiguration,
     closed: AtomicBool,
     relay_connected: AtomicBool,
+    relay_connecting: AtomicBool,
     next_message_seq: AtomicU64,
     relay: Mutex<MeshRelayState>,
     peers: Mutex<BTreeMap<String, NativeMeshPeer>>,
@@ -162,6 +163,7 @@ impl NativeWebRtcMesh {
             rtc_configuration,
             closed: AtomicBool::new(false),
             relay_connected: AtomicBool::new(false),
+            relay_connecting: AtomicBool::new(false),
             next_message_seq: AtomicU64::new(0),
             relay: Mutex::new(MeshRelayState::default()),
             peers: Mutex::new(BTreeMap::new()),
@@ -191,9 +193,8 @@ impl NativeWebRtcMesh {
         let retry_interval = Duration::from_millis(config.retry_interval_ms.max(1));
         let retry_state = state.clone();
         let retry_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(retry_interval);
             loop {
-                interval.tick().await;
+                tokio::time::sleep(retry_interval).await;
                 if retry_state.closed.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1596,10 +1597,29 @@ async fn send_mesh_route_to_peer(
 }
 
 async fn connect_mesh_relay_state(state: &Arc<NativeWebRtcMeshState>) -> Result<bool> {
+    struct ConnectAttemptGuard<'a> {
+        flag: &'a AtomicBool,
+    }
+
+    impl Drop for ConnectAttemptGuard<'_> {
+        fn drop(&mut self) {
+            self.flag.store(false, Ordering::SeqCst);
+        }
+    }
+
     if state.closed.load(Ordering::SeqCst) {
         return Ok(false);
     }
     if state.relay_connected.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    if state.relay_connecting.swap(true, Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let _attempt_guard = ConnectAttemptGuard {
+        flag: &state.relay_connecting,
+    };
+    if state.closed.load(Ordering::SeqCst) || state.relay_connected.load(Ordering::SeqCst) {
         return Ok(false);
     }
 
