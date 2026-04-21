@@ -63,6 +63,45 @@
         </div>
         <ul id="cards-list" class="cards"></ul>
       </section>
+
+      <section class="panel repl-panel">
+        <div class="panel-header">
+          <div>
+            <h2>Mesh REPL</h2>
+            <p class="panel-copy">
+              Execute JavaScript against the live threaded mesh peer. `db`, `cards`, `mesh`,
+              `session`, `log`, and `clearLogs` are available.
+            </p>
+          </div>
+          <p id="repl-status">idle</p>
+        </div>
+        <div class="editor-shell">
+          <pre id="repl-highlight" class="editor-highlight" aria-hidden="true"></pre>
+          <textarea
+            id="repl-input"
+            class="editor-input"
+            spellcheck="false"
+            autocapitalize="off"
+            autocomplete="off"
+            autocorrect="off"
+          ></textarea>
+        </div>
+        <div class="repl-actions">
+          <button id="run-repl" type="button">Run Code</button>
+          <button id="clear-logs" type="button" class="secondary-button">Clear Logs</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>REPL Logs</h2>
+            <p class="panel-copy">Use `log(...)` or `threadedPackageDemo.log(...)` from the editor.</p>
+          </div>
+          <p id="log-count">0</p>
+        </div>
+        <div id="repl-logs" class="log-list"></div>
+      </section>
     </main>
 
     <script type="module" src="./app.js"></script>
