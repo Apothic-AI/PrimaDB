@@ -1,8 +1,9 @@
-from ._native import Chain, Primadb, RemoteWatch, Subscription, WebRtcMesh, WebSocketSync
+from ._native import Chain, Primadb, RelayServer, RemoteWatch, Subscription, WebRtcMesh, WebSocketSync
 
 __all__ = [
     "Chain",
     "Primadb",
+    "RelayServer",
     "RemoteWatch",
     "Subscription",
     "WebRtcMesh",

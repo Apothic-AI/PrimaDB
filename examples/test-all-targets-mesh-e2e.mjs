@@ -213,7 +213,7 @@ async function ensureRelay() {
   if (await isPortOpen(relayPort)) {
     return { process: null, started: false };
   }
-  const child = spawn("cargo", ["run", "--example", "ws_relay_server", "--", PORTS.relayAddr], {
+  const child = spawn("cargo", ["run", "--features", "native-websocket", "--example", "ws_relay_server", "--", PORTS.relayAddr], {
     cwd: ROOT,
     stdio: "ignore",
     detached: true,

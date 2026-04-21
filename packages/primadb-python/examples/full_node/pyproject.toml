@@ -1,0 +1,9 @@
+[project]
+name = "primadb-python-full-node-example"
+version = "0.1.0"
+description = "uv-managed full-node example for primadb-python"
+requires-python = ">=3.9"
+dependencies = ["primadb-python"]
+
+[tool.uv.sources]
+primadb-python = { path = "../..", editable = true }

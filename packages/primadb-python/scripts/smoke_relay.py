@@ -3,68 +3,21 @@ from __future__ import annotations
 
 import json
 import os
-import signal
-import socket
-import subprocess
 import sys
 import time
 
-from primadb import Primadb
+from primadb import Primadb, RelayServer
 
-
-ROOT = os.environ.get("PRIMADB_ROOT", "/home/bitnom/Code/gunport/primadb")
-RELAY_ADDR = os.environ.get("PRIMADB_PYTHON_RELAY_ADDR", "127.0.0.1:9010")
-RELAY_URL = os.environ.get("PRIMADB_PYTHON_RELAY_URL", f"ws://{RELAY_ADDR}")
+RELAY_ADDR = "127.0.0.1:9010"
+RELAY_URL = f"ws://{RELAY_ADDR}"
 TITLE = os.environ.get("PRIMADB_PYTHON_RELAY_TITLE", f"Python relay smoke {int(time.time() * 1000)}")
-PORT = int(RELAY_ADDR.rsplit(":", 1)[-1])
 
 
 def wait(ms: int) -> None:
     time.sleep(ms / 1000)
 
-
-def is_port_open(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        try:
-            sock.connect(("127.0.0.1", port))
-        except OSError:
-            return False
-        return True
-
-
-def ensure_relay() -> tuple[subprocess.Popen[bytes] | None, bool]:
-    if is_port_open(PORT):
-        return None, False
-
-    child = subprocess.Popen(
-        ["cargo", "run", "--example", "ws_relay_server", "--", RELAY_ADDR],
-        cwd=ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if is_port_open(PORT):
-            return child, True
-        wait(200)
-
-    raise RuntimeError(f"Timed out waiting for relay on {RELAY_ADDR}")
-
-
-def close_detached(child: subprocess.Popen[bytes] | None) -> None:
-    if child is None:
-        return
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except OSError:
-        pass
-
-
 def main() -> None:
-    relay_proc, started = ensure_relay()
+    relay = RelayServer.listen({"bind": RELAY_ADDR})
     try:
         waiter_db = Primadb("python-relay-waiter")
         writer_db = Primadb("python-relay-writer")
@@ -166,8 +119,7 @@ def main() -> None:
         waiter.close()
         writer.close()
     finally:
-        if started:
-            close_detached(relay_proc)
+        relay.close()
 
 
 if __name__ == "__main__":

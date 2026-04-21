@@ -7,8 +7,9 @@ use primadb::{
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
     ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
     HookDecision, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
-    PullRequestKind, QuerySpec, RelayClientConfig, RemotePath,
+    PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
     RemoteResult as CoreRemoteResult, RoomHookContext, ServeRequestContext, ServeResultContext,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
     Subscription as CoreSubscription, parse_request_hook_json, parse_result_hook_json,
@@ -271,6 +272,11 @@ pub struct Subscription {
 #[napi]
 pub struct WebSocketSync {
     inner: Arc<Mutex<Option<CoreWebSocketSync>>>,
+}
+
+#[napi]
+pub struct RelayServer {
+    inner: Arc<Mutex<Option<CoreRelayServer>>>,
 }
 
 #[napi]
@@ -606,6 +612,58 @@ impl Subscription {
     #[napi]
     pub fn close(&self) {
         let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[napi]
+impl RelayServer {
+    #[napi(factory, js_name = "listen")]
+    pub async fn listen(config: JsonValue) -> Result<RelayServer> {
+        let config: RelayServerConfig = from_json(config)?;
+        let server = CoreRelayServer::bind_with_config(config)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(RelayServer {
+            inner: Arc::new(Mutex::new(Some(server))),
+        })
+    }
+
+    #[napi(js_name = "bindAddr")]
+    pub fn bind_addr(&self) -> Result<String> {
+        let guard = self.inner.lock().unwrap();
+        let server = guard.as_ref().ok_or_else(|| closed_error("relay server"))?;
+        Ok(server.bind_addr().to_string())
+    }
+
+    #[napi]
+    pub fn url(&self) -> Result<String> {
+        let guard = self.inner.lock().unwrap();
+        let server = guard.as_ref().ok_or_else(|| closed_error("relay server"))?;
+        Ok(server.url())
+    }
+
+    #[napi(js_name = "clientCount")]
+    pub fn client_count(&self) -> Result<u32> {
+        let guard = self.inner.lock().unwrap();
+        let server = guard.as_ref().ok_or_else(|| closed_error("relay server"))?;
+        u32::try_from(server.client_count()).map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "peerCount")]
+    pub fn peer_count(&self) -> Result<u32> {
+        let guard = self.inner.lock().unwrap();
+        let server = guard.as_ref().ok_or_else(|| closed_error("relay server"))?;
+        u32::try_from(server.peer_count()).map_err(to_napi_error)
+    }
+
+    #[napi]
+    pub async fn close(&self) -> Result<()> {
+        let server = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("relay server"))?
+        };
+        server.close().await;
+        Ok(())
     }
 }
 

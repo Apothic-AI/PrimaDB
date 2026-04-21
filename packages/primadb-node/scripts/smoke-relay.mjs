@@ -1,38 +1,9 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
-import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { Primadb } from "../index.js";
+import { Primadb, RelayServer } from "../index.js";
 
 const relayAddress = "127.0.0.1:9021";
 const relayUrl = `ws://${relayAddress}`;
-const relay = spawn("cargo", ["run", "--example", "ws_relay_server", "--", relayAddress], {
-  cwd: "/home/bitnom/Code/gunport/primadb",
-  stdio: "pipe",
-  env: process.env,
-});
-
-async function waitForRelay(timeoutMs = 20_000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const connected = await new Promise((resolve) => {
-      const socket = net.connect({ host: "127.0.0.1", port: 9021 });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("error", () => {
-        socket.destroy();
-        resolve(false);
-      });
-    });
-    if (connected) {
-      return;
-    }
-    await delay(200);
-  }
-  throw new Error(`Timed out waiting for relay on ${relayAddress}`);
-}
 
 async function waitFor(predicate, timeoutMs = 20_000) {
   const started = Date.now();
@@ -46,9 +17,9 @@ async function waitFor(predicate, timeoutMs = 20_000) {
   throw new Error("Timed out waiting for relay replication");
 }
 
-try {
-  await waitForRelay();
+const relay = await RelayServer.listen({ bind: relayAddress });
 
+try {
   const dbA = new Primadb("node-relay-a");
   const dbB = new Primadb("node-relay-b");
   const syncA = await dbA.connectRelay({ url: relayUrl, retryIntervalMs: 500 });
@@ -108,8 +79,5 @@ try {
     ),
   );
 } finally {
-  if (relay.exitCode == null && !relay.killed) {
-    relay.kill("SIGTERM");
-    await delay(200);
-  }
+  await relay.close();
 }

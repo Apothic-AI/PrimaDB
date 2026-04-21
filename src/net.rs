@@ -75,6 +75,18 @@ impl RelayClientConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct RelayServerConfig {
+    pub bind: String,
+}
+
+impl RelayServerConfig {
+    pub fn new(bind: impl Into<String>) -> Self {
+        Self { bind: bind.into() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct MeshConfig {
     pub room: String,
     #[serde(default)]

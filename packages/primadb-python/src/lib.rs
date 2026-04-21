@@ -2,8 +2,9 @@ use primadb::{
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
     ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
     HookDecision, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
-    PullRequestKind, QuerySpec, RelayClientConfig, RemotePath,
+    PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
     RemoteResult as CoreRemoteResult, RoomHookContext, ServeRequestContext, ServeResultContext,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
     Subscription as CoreSubscription, parse_request_hook_json, parse_result_hook_json,
@@ -261,6 +262,11 @@ struct Subscription {
 #[pyclass(module = "primadb._native")]
 struct WebSocketSync {
     inner: Arc<Mutex<Option<CoreWebSocketSync>>>,
+}
+
+#[pyclass(module = "primadb._native")]
+struct RelayServer {
+    inner: Arc<Mutex<Option<CoreRelayServer>>>,
 }
 
 #[pyclass(module = "primadb._native")]
@@ -591,6 +597,58 @@ impl Subscription {
 
     fn close(&self) {
         let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[pymethods]
+impl RelayServer {
+    #[staticmethod]
+    fn listen(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<RelayServer> {
+        let config: RelayServerConfig = from_py(config)?;
+        let server = py
+            .detach(|| runtime().block_on(CoreRelayServer::bind_with_config(config)))
+            .map_err(to_py_err)?;
+        Ok(RelayServer {
+            inner: Arc::new(Mutex::new(Some(server))),
+        })
+    }
+
+    fn bind_addr(&self) -> PyResult<String> {
+        let guard = self.inner.lock().unwrap();
+        let server = guard.as_ref().ok_or_else(|| closed_error("relay server"))?;
+        Ok(server.bind_addr().to_string())
+    }
+
+    fn url(&self) -> PyResult<String> {
+        let guard = self.inner.lock().unwrap();
+        let server = guard.as_ref().ok_or_else(|| closed_error("relay server"))?;
+        Ok(server.url())
+    }
+
+    fn client_count(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|server| server.client_count() as u32)
+            .unwrap_or(0)
+    }
+
+    fn peer_count(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|server| server.peer_count() as u32)
+            .unwrap_or(0)
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let server = self.inner.lock().unwrap().take();
+        if let Some(server) = server {
+            py.detach(|| runtime().block_on(server.close()));
+        }
+        Ok(())
     }
 }
 
@@ -1102,6 +1160,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Primadb>()?;
     module.add_class::<Chain>()?;
     module.add_class::<Subscription>()?;
+    module.add_class::<RelayServer>()?;
     module.add_class::<RemoteWatch>()?;
     module.add_class::<WebSocketSync>()?;
     module.add_class::<WebRtcMesh>()?;

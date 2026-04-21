@@ -26,6 +26,10 @@ export interface RelayClientConfig {
   retryIntervalMs?: number;
 }
 
+export interface RelayServerConfig {
+  bind: string;
+}
+
 export type MeshSignalingMode = "relay" | "broadcast_channel";
 
 export interface IceServerConfig {
@@ -225,6 +229,15 @@ export declare class Subscription {
   next(): Promise<SubscriptionMessage>;
   tryNext(): SubscriptionMessage;
   close(): void;
+}
+
+export declare class RelayServer {
+  static listen(config: RelayServerConfig): Promise<RelayServer>;
+  bindAddr(): string;
+  url(): string;
+  clientCount(): number;
+  peerCount(): number;
+  close(): Promise<void>;
 }
 
 export declare class RemoteWatch {

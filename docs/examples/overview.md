@@ -25,6 +25,7 @@ directory name.
 ## Native Examples
 
 - [ws_relay_server.rs](https://github.com/Apothic-AI/PrimaDB/tree/master/examples/ws_relay_server.rs)
+- [full_node.rs](https://github.com/Apothic-AI/PrimaDB/tree/master/examples/full_node.rs)
 - [native_relay_client.rs](https://github.com/Apothic-AI/PrimaDB/tree/master/examples/native_relay_client.rs)
 - [native_relay_probe.rs](https://github.com/Apothic-AI/PrimaDB/tree/master/examples/native_relay_probe.rs)
 - [native_mesh_probe.rs](https://github.com/Apothic-AI/PrimaDB/tree/master/examples/native_mesh_probe.rs)
@@ -35,6 +36,8 @@ directory name.
 - [packages/primadb examples](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples)
 - [packages/primadb-node examples](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples)
 - [packages/primadb-python examples](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-python/examples)
+
+The Node and Python package example sets now also include full-node anchor examples.
 
 ## End-To-End Suites
 

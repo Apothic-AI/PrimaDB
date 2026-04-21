@@ -18,7 +18,8 @@
   - Includes `test-two-page-smoke.sh`, a two-page Playwright smoke test for threaded relay-signaled WebRTC sync, byte-field replication, IndexedDB blob restore, and parallel query execution.
   - Includes `test-browser-native-smoke.sh`, a threaded browser/native mesh smoke test.
   - Includes `test-cross-browser-smoke.sh`, a Chromium + Firefox smoke test for live cross-browser replication over the relay-backed mesh.
-- `ws_relay_server.rs`: Rust DAM relay with peer presence, peer exchange, targeted routing, batch bootstrap, and relay-friendly dedupe hints for browser examples. Run with `cargo run --example ws_relay_server`.
+- `ws_relay_server.rs`: Rust DAM relay with peer presence, peer exchange, targeted routing, batch bootstrap, and relay-friendly dedupe hints for browser examples. Run with `cargo run --features native-websocket --example ws_relay_server`.
+- `full_node.rs`: Rust anchor-node example that runs the relay and a local mesh peer together in one process. Run with `cargo run --features native-webrtc --example full_node -- --relay-bind 127.0.0.1:9010 --room demo`.
 - `native_relay_client.rs`: Native client using Primadb's feature-gated `NativeWebSocketSync` adapter. Run with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
 - `native_relay_probe.rs`: Native relay probe used by the relay smoke tests. Run with `cargo run --features native-websocket --example native_relay_probe -- --relay ws://127.0.0.1:9010 --action status`.
 - `native_mesh_probe.rs`: Native WebRTC mesh probe interoperable with the browser relay-signaled mesh. Run with `cargo run --features native-webrtc --example native_mesh_probe -- --relay ws://127.0.0.1:9010 --room demo --action status`.

@@ -32,7 +32,7 @@ async function ensureRelay() {
 
   const child = spawn(
     "cargo",
-    ["run", "--example", "ws_relay_server", "--", RELAY_ADDR],
+    ["run", "--features", "native-websocket", "--example", "ws_relay_server", "--", RELAY_ADDR],
     {
       cwd: ROOT,
       stdio: "ignore",

@@ -504,11 +504,12 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, the DAM relay, and a browser runtime smoke test for `load/not/map/back`.
 - [examples/browser-package-notes-vite/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite/README.md): Vite browser app that installs the local `primadb` package with `pnpm`, exercises IndexedDB-backed persistence, and can optionally join the relay-signaled mesh through query params.
 - [packages/primadb/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/README.md): package-local browser demos for the default and threaded npm entrypoints.
-- [packages/primadb-node/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/README.md): package-local native Node demos for durable local storage and relay-signaled mesh peers.
-- [packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md): package-local native Python demos for durable local storage and relay-signaled mesh peers.
+- [packages/primadb-node/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/README.md): package-local native Node demos for durable local storage, relay-signaled mesh peers, and full-node anchor deployments.
+- [packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md): package-local native Python demos for durable local storage, relay-signaled mesh peers, and full-node anchor deployments.
 - [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md): Opt-in `wasm-threads` browser demo that initializes `initThreadPool(...)` and exercises the Rayon-backed query path under COOP/COEP.
 - [examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md): Opt-in `wasm-threads` browser P2P demo using `WebRtcMesh`, relay-backed signaling by default, COOP/COEP serving, configurable ICE servers, and a threaded shared-query workload over WebRTC-synced notes.
-- [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --example ws_relay_server -- 127.0.0.1:9010`.
+- [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010`.
+- [examples/full_node.rs](/home/bitnom/Code/gunport/primadb/examples/full_node.rs): Rust full-node anchor example that runs the relay and a colocated mesh peer together, runnable with `cargo run --features native-webrtc --example full_node -- --relay-bind 127.0.0.1:9010 --room demo`.
 - [examples/native_relay_client.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
 - [examples/native_relay_probe.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_probe.rs): Native relay probe used by the browser/native and native/native relay smoke tests.
 - [examples/native_mesh_probe.rs](/home/bitnom/Code/gunport/primadb/examples/native_mesh_probe.rs): Native WebRTC mesh probe interoperable with the browser relay-signaled mesh.
@@ -575,7 +576,7 @@ Relay-backed browser board:
 ```bash
 cd /home/bitnom/Code/gunport/primadb
 ./examples/browser-relay-notes/build.sh
-cargo run --example ws_relay_server -- 127.0.0.1:9010
+cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 In a second terminal:
@@ -596,7 +597,7 @@ Default relay-signaled WebRTC mesh example:
 ```bash
 cd /home/bitnom/Code/gunport/primadb
 ./examples/browser-mesh-notes/build.sh
-cargo run --example ws_relay_server -- 127.0.0.1:9010
+cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 In a second terminal:
@@ -617,7 +618,7 @@ Gun-style relay example:
 ```bash
 cd /home/bitnom/Code/gunport/primadb
 ./examples/browser-gun-notes/build.sh
-cargo run --example ws_relay_server -- 127.0.0.1:9010
+cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 In a second terminal:
@@ -638,7 +639,7 @@ Threaded relay-signaled WebRTC mesh example:
 ```bash
 cd /home/bitnom/Code/gunport/primadb
 ./examples/browser-threaded-mesh-notes/build.sh
-cargo run --example ws_relay_server -- 127.0.0.1:9010
+cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 In a second terminal:

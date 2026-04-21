@@ -12,6 +12,7 @@ export const {
   Primadb,
   Chain,
   Subscription,
+  RelayServer,
   WebSocketSync,
   WebRtcMesh,
 } = native;

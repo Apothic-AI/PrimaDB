@@ -15,6 +15,8 @@ mod hooks;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
 mod native_mesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
+mod native_relay_server;
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 mod native_sync;
 mod net;
 mod operation;
@@ -73,9 +75,12 @@ pub use hooks::{
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
 pub use native_mesh::NativeWebRtcMesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
+pub use native_relay_server::NativeRelayServer;
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 pub use native_sync::NativeWebSocketSync;
 pub use net::{
     IceServerConfig, IceServerUrls, MeshConfig, MeshSignal, MeshSignalingMode, RelayClientConfig,
+    RelayServerConfig,
 };
 pub use operation::{Operation, OperationAction, OperationValue};
 pub use parallel::{parallel_enabled, parallel_thread_count};

@@ -48,3 +48,4 @@ db.set_network_hooks(
 
 - [local_notes](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-python/examples/local_notes)
 - [mesh_peer](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-python/examples/mesh_peer)
+- [full_node](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-python/examples/full_node)

@@ -11,6 +11,7 @@ Current surface:
 - content-addressed native blob storage through `openBlobStorage(...)`
 - first-class binary helpers through `putBytes()`, `onceBytes()`, `putBlob()`, and `getBlob()`
 - subscriptions
+- native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connectRelay(...)`, including disconnected startup with background relay retry
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
@@ -22,6 +23,7 @@ Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport
 
 - [examples/local-notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/local-notes/README.md)
 - [examples/mesh-peer/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/mesh-peer/README.md)
+- [examples/full-node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/full-node/README.md)
 
 ## Build
 
@@ -76,6 +78,7 @@ db.setNetworkHooks({
 ```bash
 pnpm run smoke:core
 pnpm run smoke:hooks
+pnpm run smoke:relay-server
 pnpm run smoke:relay
 pnpm run smoke:mesh
 ```

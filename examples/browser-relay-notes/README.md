@@ -25,7 +25,7 @@ It demonstrates:
 2. Start the relay server:
 
 ```bash
-cargo run --example ws_relay_server -- 127.0.0.1:9010
+cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 3. Serve the frontend:

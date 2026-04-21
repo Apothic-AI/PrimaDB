@@ -23,7 +23,16 @@ Many relay and mesh examples assume the included relay server:
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb
-cargo run --example ws_relay_server -- 127.0.0.1:9010
+cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
+```
+
+## Rust Full Node
+
+The anchor-node example runs the relay and a local mesh peer together in one process:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb
+cargo run --features native-webrtc --example full_node -- --relay-bind 127.0.0.1:9010 --room demo --message "hello from the anchor node"
 ```
 
 ## Browser Relay Example

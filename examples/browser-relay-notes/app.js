@@ -189,7 +189,7 @@ async function ensureSeedNote() {
   const now = Date.now();
   state.listChain.set({
     title: "Connect a second browser to the relay",
-    body: "Run cargo run --example ws_relay_server and open this page twice.",
+    body: "Run cargo run --features native-websocket --example ws_relay_server and open this page twice.",
     done: false,
     archived: false,
     created_at: now,

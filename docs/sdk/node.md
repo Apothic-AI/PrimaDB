@@ -29,6 +29,7 @@ pnpm run build
 - native blob storage
 - bytes helpers
 - subscriptions
+- native relay server hosting
 - relay transport
 - WebRTC mesh transport
 - remote watches
@@ -58,3 +59,4 @@ db.setNetworkHooks({
 
 - [local-notes](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples/local-notes)
 - [mesh-peer](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples/mesh-peer)
+- [full-node](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples/full-node)

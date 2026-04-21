@@ -11,6 +11,7 @@ Current surface:
 - content-addressed native blob storage through `open_blob_storage(...)`
 - first-class binary helpers through `put_bytes()`, `once_bytes()`, `put_blob()`, and `get_blob()`
 - subscriptions
+- native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connect_relay(...)`, including disconnected startup with background relay retry
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
@@ -22,6 +23,7 @@ Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport
 
 - [examples/local_notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/local_notes/README.md)
 - [examples/mesh_peer/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/mesh_peer/README.md)
+- [examples/full_node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/full_node/README.md)
 
 ## Install
 
@@ -91,6 +93,7 @@ cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
 uv sync
 uv run python scripts/smoke_core.py
 uv run python scripts/smoke_hooks.py
+uv run python scripts/smoke_relay_server.py
 uv run python scripts/smoke_relay.py
 uv run python scripts/smoke_relay_offline.py
 uv run python scripts/smoke_mesh.py

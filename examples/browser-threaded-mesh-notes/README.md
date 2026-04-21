@@ -39,7 +39,7 @@ cd /home/bitnom/Code/gunport/primadb
 
 ```bash
 cd /home/bitnom/Code/gunport/primadb
-cargo run --example ws_relay_server -- 127.0.0.1:9010
+cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 4. Open `http://127.0.0.1:4175/examples/browser-threaded-mesh-notes/` in two browsers or tabs.
