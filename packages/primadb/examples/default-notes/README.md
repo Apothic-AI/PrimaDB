@@ -1,6 +1,6 @@
 # Default Notes
 
-This is a standalone browser project for the default `primadb` package entrypoint.
+This is a Vite browser example for the default `primadb` package entrypoint.
 
 It demonstrates:
 
@@ -14,14 +14,13 @@ It demonstrates:
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
 pnpm install
-pnpm run build
-./examples/serve.sh
+pnpm run dev
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:4181/examples/default-notes/
+http://127.0.0.1:4181/default-notes/
 ```

@@ -2,7 +2,12 @@ import {
   createThreadedPrimadb,
   parallelEnabled,
   parallelThreadCount,
-} from "../../dist/threads.js";
+  wbg_rayon_start_worker,
+} from "primadb/threads";
+
+// Keep the rayon worker bootstrap export in the Vite bundle. The threaded runtime
+// dynamically imports the `primadb/threads` module inside worker contexts.
+globalThis.__primadbRayonWorkerBootstrap = wbg_rayon_start_worker;
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
@@ -106,6 +111,14 @@ const paramsSession = {
 };
 
 const session = paramsSession;
+const durableStorageConfig = {
+  kind: "indexed_db_segments",
+  databaseName: `primadb-package-threaded-${session.room}`,
+  storeName: "segments",
+  namespace: session.room,
+  loadExisting: true,
+  autoPersist: true,
+};
 
 const db = await createThreadedPrimadb(session.replicaId, { threads: session.threads });
 let storageStatus = {
@@ -113,14 +126,7 @@ let storageStatus = {
   error: null,
 };
 try {
-  await db.openDurableStorage({
-    kind: "indexed_db_segments",
-    databaseName: `primadb-package-threaded-${session.room}`,
-    storeName: "segments",
-    namespace: session.room,
-    loadExisting: true,
-    autoPersist: true,
-  });
+  await db.openDurableStorage(durableStorageConfig);
   storageStatus = {
     ready: true,
     error: null,
@@ -144,6 +150,56 @@ const mesh = db.connectMesh({
 
 dom.buildStatus.textContent = `${parallelEnabled() ? "wasm-threads" : "single-thread"} / ${parallelThreadCount()} workers`;
 dom.roomStatus.textContent = `${session.room} / signaling=${session.signal}`;
+
+const threadedPackageDemo = {
+  db,
+  cards,
+  mesh,
+  session,
+  storageStatus,
+  lastPersist: null,
+};
+
+async function persistDurableState(reason = "manual") {
+  if (!storageStatus.ready) {
+    const result = {
+      ok: false,
+      skipped: true,
+      reason,
+      at: Date.now(),
+      error: storageStatus.error ?? "durable storage unavailable",
+    };
+    threadedPackageDemo.lastPersist = result;
+    return result;
+  }
+
+  try {
+    await db.saveIndexedDbSegments(
+      durableStorageConfig.databaseName,
+      durableStorageConfig.storeName,
+      durableStorageConfig.namespace,
+    );
+    const result = {
+      ok: true,
+      skipped: false,
+      reason,
+      at: Date.now(),
+    };
+    threadedPackageDemo.lastPersist = result;
+    return result;
+  } catch (error) {
+    const result = {
+      ok: false,
+      skipped: false,
+      reason,
+      at: Date.now(),
+      error: formatLogValue(error),
+    };
+    threadedPackageDemo.lastPersist = result;
+    appendLog("error", "durable segment flush failed", error);
+    return result;
+  }
+}
 
 function renderCards() {
   const entries = cards.query({
@@ -205,7 +261,7 @@ async function meshSnapshot() {
   };
 }
 
-dom.form.addEventListener("submit", (event) => {
+dom.form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const title = dom.title.value.trim();
@@ -220,6 +276,7 @@ dom.form.addEventListener("submit", (event) => {
     author: db.replicaId(),
     updated_at: Date.now(),
   });
+  await persistDurableState("form_submit");
 
   dom.form.reset();
 });
@@ -256,6 +313,7 @@ const builtinTokens = new Set([
   "clearLogs",
   "renderCards",
   "refreshMeshStatus",
+  "persistNow",
   "threadedPackageDemo",
   "Date",
   "JSON",
@@ -365,7 +423,7 @@ function setReplStatus(text, level = "idle") {
 }
 
 const defaultReplSource = `// Live threaded mesh REPL.
-// Available bindings: db, cards, mesh, session, log, clearLogs, renderCards, refreshMeshStatus, meshSnapshot
+// Available bindings: db, cards, mesh, session, log, clearLogs, renderCards, refreshMeshStatus, meshSnapshot, persistNow
 
 const entries = cards.query({
   order: { path: "updated_at", direction: "desc" },
@@ -374,6 +432,7 @@ const entries = cards.query({
 
 log("latest cards", entries);
 log("mesh status", await meshSnapshot());
+log("last persist", threadedPackageDemo.lastPersist);
 
 return {
   count: entries.length,
@@ -405,6 +464,7 @@ async function runRepl() {
       "renderCards",
       "refreshMeshStatus",
       "meshSnapshot",
+      "persistNow",
       "threadedPackageDemo",
       dom.replInput.value,
     );
@@ -419,7 +479,8 @@ async function runRepl() {
       renderCards,
       refreshMeshStatus,
       meshSnapshot,
-      globalThis.threadedPackageDemo,
+      persistDurableState,
+      threadedPackageDemo,
     );
 
     if (result !== undefined) {
@@ -438,20 +499,16 @@ dom.runRepl.addEventListener("click", () => {
 dom.clearLogs.addEventListener("click", clearLogs);
 
 Object.assign(globalThis, {
-  threadedPackageDemo: {
-    db,
-    cards,
-    mesh,
-    session,
-    storageStatus,
+  threadedPackageDemo: Object.assign(threadedPackageDemo, {
     log: (...values) => appendLog("info", ...values),
     appendLog: (...values) => appendLog("info", ...values),
     clearLogs,
     renderCards,
     refreshMeshStatus,
     meshSnapshot,
+    persistNow: persistDurableState,
     runRepl,
-  },
+  }),
 });
 
 appendLog("info", "threaded mesh demo ready", {

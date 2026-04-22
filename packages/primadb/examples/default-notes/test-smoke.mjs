@@ -13,12 +13,11 @@ const EXAMPLES_ROOT =
 const PACKAGE_ROOT =
   process.env.PRIMADB_PACKAGE_ROOT ?? "/home/bitnom/Code/gunport/primadb/packages/primadb";
 const ROOT_URL =
-  process.env.PRIMADB_PACKAGE_THREADED_MESH_URL ??
-  "http://127.0.0.1:4181/threaded-mesh/";
+  process.env.PRIMADB_PACKAGE_DEFAULT_NOTES_URL ??
+  "http://127.0.0.1:4181/default-notes/";
 const SERVER_PORT = Number(process.env.PRIMADB_PACKAGE_PORT ?? "4181");
 const CHROME_PATH =
   process.env.PLAYWRIGHT_BROWSER_PATH ?? "/usr/bin/google-chrome-stable";
-const ROOM = process.env.PRIMADB_PACKAGE_THREADED_MESH_ROOM ?? `package-threaded-${Date.now()}`;
 
 async function loadPlaywright() {
   const override = process.env.PLAYWRIGHT_MODULE_PATH;
@@ -37,7 +36,7 @@ async function loadPlaywright() {
     }
   }
   throw new Error(
-    "Could not resolve the `playwright` module. Set PLAYWRIGHT_MODULE_PATH or install playwright.",
+    "Could not resolve the `playwright` or `playwright-core` module. Set PLAYWRIGHT_MODULE_PATH or install the examples dependencies.",
   );
 }
 
@@ -59,8 +58,8 @@ async function isPortOpen(port) {
 
 async function ensureBuild() {
   if (
-    existsSync(`${PACKAGE_ROOT}/dist/threads.js`) &&
-    existsSync(`${PACKAGE_ROOT}/dist/vendor/threads/primadb.js`)
+    existsSync(`${PACKAGE_ROOT}/dist/index.js`) &&
+    existsSync(`${PACKAGE_ROOT}/dist/vendor/default/primadb.js`)
   ) {
     return;
   }
@@ -74,7 +73,7 @@ async function ensureBuild() {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`package build failed with exit code ${code}`));
+        reject(new Error(`example build failed with exit code ${code}`));
       }
     });
   });
@@ -137,78 +136,48 @@ async function main() {
   try {
     const context = await browser.newContext();
     const page = await context.newPage();
-    const url = `${ROOT_URL}?room=${encodeURIComponent(ROOM)}`;
-    const title = `Package threaded smoke ${Date.now()}`;
+    const title = `Default notes smoke ${Date.now()}`;
 
     async function waitForReady() {
-      await page.goto(url, { waitUntil: "networkidle" });
+      await page.goto(ROOT_URL, { waitUntil: "networkidle" });
       await page.waitForFunction(() => {
-        const build = document.querySelector("#build-status")?.textContent ?? "";
-        const mesh = document.querySelector("#mesh-status")?.textContent ?? "";
-        const demo = globalThis.threadedPackageDemo;
-        return (
-          build.includes("wasm-threads") &&
-          mesh.length > 0 &&
-          demo != null &&
-          demo.storageStatus?.ready === true &&
-          globalThis.crossOriginIsolated === true
-        );
+        const demo = globalThis.defaultPackageDemo;
+        const storage = document.querySelector("#storage-status")?.textContent ?? "";
+        return demo != null && storage.includes("indexeddb_segments");
       }, { timeout: 30_000 });
     }
 
     await waitForReady();
 
-    const initialLogText = await page.locator("#repl-logs").innerText();
-    if (initialLogText.includes("durable storage init failed")) {
-      throw new Error("threaded package example reported durable storage init failure");
-    }
-
-    await page.locator("#card-title").fill(title);
-    await page.locator("#card-body").fill("IndexedDB segment persistence smoke");
-    await page.getByRole("button", { name: "Add Shared Card" }).click();
+    await page.locator("#note-title").fill(title);
+    await page.locator("#note-body").fill("Persist me through IndexedDB segments");
+    await page.getByRole("button", { name: "Add note" }).click();
 
     await page.waitForFunction(
-      (expectedTitle) => {
-        const demo = globalThis.threadedPackageDemo;
-        return (
-          [...document.querySelectorAll("#cards-list h3")].some(
-            (node) => node.textContent === expectedTitle,
-          ) &&
-          demo?.lastPersist?.ok === true
-        );
-      },
+      (expectedTitle) =>
+        [...document.querySelectorAll("#notes-list h3")].some(
+          (node) => node.textContent === expectedTitle,
+        ),
       title,
       { timeout: 30_000 },
     );
 
     await page.reload({ waitUntil: "networkidle" });
     await page.waitForFunction(
-      (expectedTitle) => {
-        const demo = globalThis.threadedPackageDemo;
-        return (
-          demo?.storageStatus?.ready === true &&
-          [...document.querySelectorAll("#cards-list h3")].some(
-            (node) => node.textContent === expectedTitle,
-          )
-        );
-      },
+      (expectedTitle) =>
+        [...document.querySelectorAll("#notes-list h3")].some(
+          (node) => node.textContent === expectedTitle,
+        ),
       title,
       { timeout: 30_000 },
     );
 
-    const reloadedLogText = await page.locator("#repl-logs").innerText();
-    if (reloadedLogText.includes("durable storage init failed")) {
-      throw new Error("threaded package example reported durable storage init failure after reload");
-    }
-
     const result = await page.evaluate(() => ({
-      build: document.querySelector("#build-status")?.textContent ?? "",
-      mesh: document.querySelector("#mesh-status")?.textContent ?? "",
-      peerStatus: document.querySelector("#peer-status")?.textContent ?? "",
-      cardCount: document.querySelector("#card-count")?.textContent ?? "0",
-      storageStatus: globalThis.threadedPackageDemo?.storageStatus ?? null,
+      replicaId: document.querySelector("#replica-id")?.textContent ?? "",
+      storageStatus: document.querySelector("#storage-status")?.textContent ?? "",
+      noteCount: document.querySelector("#note-count")?.textContent ?? "0",
     }));
-    console.log(JSON.stringify({ url, room: ROOM, title, persisted: true, result }, null, 2));
+    console.log(JSON.stringify({ url: ROOT_URL, title, persisted: true, result }, null, 2));
   } finally {
     await browser.close();
     if (server.started) {

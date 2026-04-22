@@ -1,0 +1,25 @@
+{
+  "name": "primadb-package-examples",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.29.3",
+  "scripts": {
+    "preinstall": "pnpm --dir .. install --frozen-lockfile && pnpm --dir .. run build",
+    "predev": "pnpm --dir .. run build",
+    "prebuild": "pnpm --dir .. run build",
+    "prepreview": "pnpm --dir .. run build",
+    "dev": "vite --host 127.0.0.1 --port 4181 --strictPort",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4181 --strictPort",
+    "smoke:default": "node ./default-notes/test-smoke.mjs",
+    "smoke:threaded": "node ./threaded-mesh/test-smoke.mjs",
+    "smoke": "pnpm run smoke:default && pnpm run smoke:threaded"
+  },
+  "dependencies": {
+    "primadb": "file:.."
+  },
+  "devDependencies": {
+    "playwright-core": "^1.55.0",
+    "vite": "^7.1.0"
+  }
+}

@@ -46,7 +46,7 @@ run(
   repoRoot,
 );
 
-run("npm", ["exec", "--", "tsc", "-p", "tsconfig.json"], packageDir);
+run("pnpm", ["exec", "tsc", "-p", "tsconfig.json"], packageDir);
 
 cpSync(vendorDir, resolve(distDir, "vendor"), { recursive: true });
 copyFileSync(

@@ -1,4 +1,4 @@
-import { createPrimadb } from "../../dist/index.js";
+import { createPrimadb } from "primadb";
 
 const dom = {
   replicaId: document.querySelector("#replica-id"),

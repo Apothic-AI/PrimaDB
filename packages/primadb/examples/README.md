@@ -1,24 +1,32 @@
 # Package Examples
 
-These examples run directly against the local [`primadb` package](/home/bitnom/Code/gunport/primadb/packages/primadb).
+These examples run directly against the local [`primadb` package](/home/bitnom/Code/gunport/primadb/packages/primadb)
+through a small Vite app rooted in this directory.
 
-Build the package first:
+Install and run the examples:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
 pnpm install
-pnpm run build
+pnpm run dev
 ```
 
-Start the package example server:
+That Vite app serves both the default and threaded examples from the same host with the COOP/COEP
+headers required for the threaded build.
+
+Open:
+
+```text
+http://127.0.0.1:4181/
+```
+
+For a production-style static build:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
-./examples/serve.sh
+cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+pnpm run build
+pnpm run preview
 ```
-
-That serves the package root with COOP/COEP headers, which means both default and threaded
-examples work from the same host.
 
 Available projects:
 

@@ -1,6 +1,6 @@
 # Threaded Mesh
 
-This is a standalone browser project for the `primadb/threads` entrypoint.
+This is a Vite browser example for the `primadb/threads` entrypoint.
 
 It demonstrates:
 
@@ -24,22 +24,21 @@ cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:901
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
 pnpm install
-pnpm run build
-./examples/serve.sh
+pnpm run dev
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:4181/examples/threaded-mesh/
+http://127.0.0.1:4181/threaded-mesh/
 ```
 
 Cross-browser relay mode:
 
 ```text
-http://127.0.0.1:4181/examples/threaded-mesh/?signal=relay&relay=ws://127.0.0.1:9010
+http://127.0.0.1:4181/threaded-mesh/?signal=relay&relay=ws://127.0.0.1:9010
 ```
 
 ## REPL Notes
@@ -53,9 +52,11 @@ against the current live objects:
 - `session`
 - `log(...)`
 - `clearLogs()`
+- `persistNow()`
 
 Use `Ctrl+Enter` or `Cmd+Enter` to execute the editor contents. If your script returns a value, it
-is appended to the log panel automatically.
+is appended to the log panel automatically. `persistNow()` forces an immediate IndexedDB segment
+flush for the current room, which is useful if you want to experiment and then reload immediately.
 
 ## Smoke Test
 
@@ -63,13 +64,13 @@ The example includes a browser smoke that verifies the threaded build boots, ope
 segment persistence successfully, and reloads persisted cards:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
-bash ./examples/threaded-mesh/test-smoke.sh
+cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+bash ./threaded-mesh/test-smoke.sh
 ```
 
 This example uses `stun:stun.cloudflare.com:3478` by default. To override it from the URL, repeat
 `ice=` with either a bare STUN/TURN URL or an encoded JSON object:
 
 ```text
-http://127.0.0.1:4181/examples/threaded-mesh/?signal=relay&relay=ws://127.0.0.1:9010&ice=stun:stun.l.google.com:19302
+http://127.0.0.1:4181/threaded-mesh/?signal=relay&relay=ws://127.0.0.1:9010&ice=stun:stun.l.google.com:19302
 ```

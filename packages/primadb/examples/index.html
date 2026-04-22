@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PrimaDB Package Examples</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "IBM Plex Sans", system-ui, sans-serif;
+        background: #f4efe6;
+        color: #172127;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at top, rgba(255, 255, 255, 0.9), rgba(244, 239, 230, 0.76)),
+          linear-gradient(145deg, #f1e7d8 0%, #d9e6e3 100%);
+      }
+
+      main {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 56px 24px 72px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: clamp(2.4rem, 4vw, 4rem);
+      }
+
+      p {
+        line-height: 1.65;
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+        margin-top: 32px;
+      }
+
+      .card {
+        display: block;
+        border-radius: 24px;
+        padding: 22px 24px;
+        text-decoration: none;
+        color: inherit;
+        background: rgba(255, 255, 255, 0.74);
+        border: 1px solid rgba(23, 33, 39, 0.08);
+        box-shadow: 0 18px 40px rgba(31, 58, 67, 0.08);
+      }
+
+      .card h2 {
+        margin: 0 0 8px;
+      }
+
+      .path {
+        margin-top: 14px;
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+        font-size: 0.9rem;
+        color: #50656e;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>primadb package examples</p>
+      <h1>Browser Examples</h1>
+      <p>
+        These Vite-powered examples consume the local <code>primadb</code> package directly. The
+        threaded example is served with the headers required for <code>SharedArrayBuffer</code>.
+      </p>
+      <div class="grid">
+        <a class="card" href="/default-notes/">
+          <h2>Default Notes</h2>
+          <p>
+            Default browser build with IndexedDB segment persistence, byte fields, and blob
+            storage.
+          </p>
+          <div class="path">/default-notes/</div>
+        </a>
+        <a class="card" href="/threaded-mesh/">
+          <h2>Threaded Mesh</h2>
+          <p>
+            Threaded browser build with mesh replication, optional relay signaling, and the in-page
+            REPL console.
+          </p>
+          <div class="path">/threaded-mesh/</div>
+        </a>
+      </div>
+    </main>
+  </body>
+</html>

@@ -90,6 +90,9 @@ PACK_ARGS=(build --target "$TARGET" --out-dir "$OUT_DIR")
 if ((DEV)); then
   PACK_ARGS+=(--dev)
 fi
+if ! command -v wasm-opt >/dev/null 2>&1; then
+  PACK_ARGS+=(--no-opt)
+fi
 
 CARGO_ARGS=()
 THREAD_BUILD_STD=0

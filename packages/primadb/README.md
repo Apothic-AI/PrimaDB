@@ -62,11 +62,12 @@ Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport
 - [examples/default-notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/default-notes/README.md)
 - [examples/threaded-mesh/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/threaded-mesh/README.md)
 
-Serve them with:
+Run them with Vite:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
-./examples/serve.sh
+cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+pnpm install
+pnpm run dev
 ```
 
 ## Default Build

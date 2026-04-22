@@ -6,4 +6,4 @@ cd "$EXAMPLES_DIR"
 
 pnpm run build
 
-node ./threaded-mesh/test-smoke.mjs
+node ./default-notes/test-smoke.mjs
