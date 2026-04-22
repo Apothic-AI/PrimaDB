@@ -3,6 +3,7 @@ import { defineConfig } from "vite";
 
 const host = process.env.PRIMADB_PACKAGE_HOST ?? "127.0.0.1";
 const port = Number(process.env.PRIMADB_PACKAGE_PORT ?? "4181");
+const packageRoot = resolve(import.meta.dirname, "..");
 
 const headers = {
   "Cross-Origin-Opener-Policy": "same-origin",
@@ -13,11 +14,17 @@ const headers = {
 };
 
 export default defineConfig({
+  optimizeDeps: {
+    exclude: ["primadb", "primadb/threads", "primadb/gun"],
+  },
   server: {
     host,
     port,
     strictPort: true,
     headers,
+    fs: {
+      allow: [packageRoot],
+    },
   },
   preview: {
     host,

@@ -8,15 +8,15 @@
     "predev": "pnpm --dir .. run build",
     "prebuild": "pnpm --dir .. run build",
     "prepreview": "pnpm --dir .. run build",
-    "dev": "vite --host 127.0.0.1 --port 4181 --strictPort",
+    "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 4181 --strictPort",
+    "preview": "vite preview",
     "smoke:default": "node ./default-notes/test-smoke.mjs",
     "smoke:threaded": "node ./threaded-mesh/test-smoke.mjs",
     "smoke": "pnpm run smoke:default && pnpm run smoke:threaded"
   },
   "dependencies": {
-    "primadb": "file:.."
+    "primadb": "link:.."
   },
   "devDependencies": {
     "playwright-core": "^1.55.0",
