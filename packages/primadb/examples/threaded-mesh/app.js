@@ -99,7 +99,10 @@ function clearLogs() {
 const paramsSession = {
   room: params.get("room") || "package-threaded-mesh",
   relayUrl: params.get("relay") || "ws://127.0.0.1:9010",
-  signal: params.get("signal") === "relay" ? "relay" : "broadcast_channel",
+  signal:
+    params.get("signal") === "broadcast" || params.get("signal") === "broadcast_channel"
+      ? "broadcast_channel"
+      : "relay",
   threads: Math.max(2, Number.parseInt(params.get("threads") || "", 10) || 4),
   iceServers: (() => {
     const parsed = params.getAll("ice").map(parseIceServerSpec);
@@ -236,8 +239,10 @@ async function refreshMeshStatus() {
     mesh.openPeerCount(),
     mesh.inflightCount(),
   ]);
+  const relayReadyState = mesh.signalingReadyState?.();
+  const relayConnected = relayReadyState === WebSocket.OPEN;
   dom.meshStatus.textContent =
-    session.signal === "relay" ? `relay=${mesh.relayConnected() ? "connected" : "waiting"}` : "broadcast ready";
+    session.signal === "relay" ? `relay=${relayConnected ? "connected" : "waiting"}` : "broadcast ready";
   dom.peerStatus.textContent = `peers=${peerCount} / open=${openPeerCount} / inflight=${inflight}`;
 }
 

@@ -232,6 +232,10 @@ struct WebRtcMeshState {
     outgoing_watches: BTreeMap<String, OutgoingWatch>,
     incoming_watches: BTreeMap<String, IncomingWatch>,
     next_message_seq: u64,
+    relay_onmessage: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
+    relay_onopen: Option<Closure<dyn FnMut(web_sys::Event)>>,
+    relay_onclose: Option<Closure<dyn FnMut(web_sys::CloseEvent)>>,
+    relay_onerror: Option<Closure<dyn FnMut(web_sys::Event)>>,
 }
 
 #[derive(Clone)]
@@ -255,9 +259,6 @@ pub struct WasmWebRtcMesh {
     state: Rc<RefCell<WebRtcMeshState>>,
     change_subscription: Option<ChangeSubscription>,
     signaling_onmessage: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
-    relay_onopen: Option<Closure<dyn FnMut(web_sys::Event)>>,
-    relay_onclose: Option<Closure<dyn FnMut(web_sys::CloseEvent)>>,
-    relay_onerror: Option<Closure<dyn FnMut(web_sys::Event)>>,
     retry_callback: Option<Closure<dyn FnMut()>>,
     retry_interval_id: Option<i32>,
 }
@@ -1101,9 +1102,13 @@ impl WasmPrimadb {
             outgoing_watches: BTreeMap::new(),
             incoming_watches: BTreeMap::new(),
             next_message_seq: 0,
+            relay_onmessage: None,
+            relay_onopen: None,
+            relay_onclose: None,
+            relay_onerror: None,
         }));
-        let (signaling_onmessage, relay_onopen, relay_onclose, relay_onerror) =
-            match state.borrow().signaling.clone() {
+        let signaling = { state.borrow().signaling.clone() };
+        let signaling_onmessage = match signaling {
                 MeshSignalingTransport::BroadcastChannel(signaling) => {
                     let signal_state = state.clone();
                     let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
@@ -1114,37 +1119,12 @@ impl WasmPrimadb {
                         let _ = handle_mesh_signal_state(&signal_state, signal);
                     }) as Box<dyn FnMut(_)>);
                     signaling.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-                    (Some(onmessage), None, None, None)
+                    Some(onmessage)
                 }
                 MeshSignalingTransport::Relay { socket, relay_url } => {
-                    let onmessage_state = state.clone();
-                    let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
-                        if let Some(payload) = event.data().as_string() {
-                            let _ =
-                                handle_mesh_signaling_websocket_message(&onmessage_state, &payload);
-                        }
-                    }) as Box<dyn FnMut(_)>);
-                    socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-
-                    let onopen_state = state.clone();
-                    let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                        let _ = send_mesh_presence_state(&onopen_state, &relay_url);
-                        let _ = announce_mesh_join_state(&onopen_state);
-                        let _ = retry_mesh_inflight_state(&onopen_state);
-                        let _ = flush_mesh_pending_state(&onopen_state);
-                    }) as Box<dyn FnMut(_)>);
-                    socket.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-
-                    let onclose = Closure::wrap(Box::new(move |_event: web_sys::CloseEvent| {
-                        // Existing peer data channels may remain alive after signaling disconnects.
-                    }) as Box<dyn FnMut(_)>);
-                    socket.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-
-                    let onerror = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                        // Keep the current mesh alive for already-open data channels.
-                    }) as Box<dyn FnMut(_)>);
-                    socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-                    (Some(onmessage), Some(onopen), Some(onclose), Some(onerror))
+                    initialize_mesh_relay_callbacks(&state, relay_url);
+                    bind_mesh_relay_socket_callbacks(&state, &socket);
+                    None
                 }
             };
 
@@ -1168,6 +1148,7 @@ impl WasmPrimadb {
         let retry_ms = config.retry_interval_ms.min(i32::MAX as u64) as i32;
         let retry_state = state.clone();
         let retry_callback = Closure::wrap(Box::new(move || {
+            let _ = ensure_mesh_relay_socket_connected_state(&retry_state);
             let _ = announce_mesh_join_state(&retry_state);
             let _ = retry_mesh_inflight_state(&retry_state);
             let _ = flush_mesh_pending_state(&retry_state);
@@ -1188,9 +1169,6 @@ impl WasmPrimadb {
             state,
             change_subscription: Some(change_subscription),
             signaling_onmessage,
-            relay_onopen,
-            relay_onclose,
-            relay_onerror,
             retry_callback: Some(retry_callback),
             retry_interval_id: Some(retry_interval_id),
         })
@@ -2010,6 +1988,13 @@ impl WasmWebRtcMesh {
         }
         {
             let mut state = self.state.borrow_mut();
+            state.relay_onmessage.take();
+            state.relay_onopen.take();
+            state.relay_onclose.take();
+            state.relay_onerror.take();
+        }
+        {
+            let mut state = self.state.borrow_mut();
             for peer in state.peers.values_mut() {
                 peer.connection.set_onicecandidate(None);
                 peer.connection.set_ondatachannel(None);
@@ -2025,9 +2010,6 @@ impl WasmWebRtcMesh {
         }
         self.change_subscription.take();
         self.signaling_onmessage.take();
-        self.relay_onopen.take();
-        self.relay_onclose.take();
-        self.relay_onerror.take();
         self.retry_callback.take();
         fail_outgoing_mesh_watches_state(&self.state, "mesh closed");
         clear_incoming_mesh_watches_state(&self.state);
@@ -3472,6 +3454,96 @@ fn mesh_signal_target(signal: &MeshSignal) -> RouteTarget {
         | MeshSignal::Answer { to, .. }
         | MeshSignal::Ice { to, .. } => RouteTarget::Peer(to.clone()),
     }
+}
+
+fn initialize_mesh_relay_callbacks(state: &Rc<RefCell<WebRtcMeshState>>, relay_url: String) {
+    let onmessage_state = state.clone();
+    let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+        if let Some(payload) = event.data().as_string() {
+            let _ = handle_mesh_signaling_websocket_message(&onmessage_state, &payload);
+        }
+    }) as Box<dyn FnMut(_)>);
+
+    let onopen_state = state.clone();
+    let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+        let _ = send_mesh_presence_state(&onopen_state, &relay_url);
+        let _ = announce_mesh_join_state(&onopen_state);
+        let _ = retry_mesh_inflight_state(&onopen_state);
+        let _ = flush_mesh_pending_state(&onopen_state);
+    }) as Box<dyn FnMut(_)>);
+
+    let onclose = Closure::wrap(Box::new(move |_event: web_sys::CloseEvent| {
+        // Existing peer data channels may remain alive after signaling disconnects.
+    }) as Box<dyn FnMut(_)>);
+
+    let onerror = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+        // Keep the current mesh alive for already-open data channels.
+    }) as Box<dyn FnMut(_)>);
+
+    let mut borrowed = state.borrow_mut();
+    borrowed.relay_onmessage = Some(onmessage);
+    borrowed.relay_onopen = Some(onopen);
+    borrowed.relay_onclose = Some(onclose);
+    borrowed.relay_onerror = Some(onerror);
+}
+
+fn bind_mesh_relay_socket_callbacks(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    socket: &web_sys::WebSocket,
+) {
+    let borrowed = state.borrow();
+    socket.set_onmessage(
+        borrowed
+            .relay_onmessage
+            .as_ref()
+            .map(|callback| callback.as_ref().unchecked_ref()),
+    );
+    socket.set_onopen(
+        borrowed
+            .relay_onopen
+            .as_ref()
+            .map(|callback| callback.as_ref().unchecked_ref()),
+    );
+    socket.set_onclose(
+        borrowed
+            .relay_onclose
+            .as_ref()
+            .map(|callback| callback.as_ref().unchecked_ref()),
+    );
+    socket.set_onerror(
+        borrowed
+            .relay_onerror
+            .as_ref()
+            .map(|callback| callback.as_ref().unchecked_ref()),
+    );
+}
+
+fn ensure_mesh_relay_socket_connected_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+) -> std::result::Result<(), JsValue> {
+    let relay_url = {
+        let borrowed = state.borrow();
+        let MeshSignalingTransport::Relay { socket, relay_url } = &borrowed.signaling else {
+            return Ok(());
+        };
+        if matches!(
+            socket.ready_state(),
+            web_sys::WebSocket::OPEN | web_sys::WebSocket::CONNECTING
+        ) {
+            return Ok(());
+        }
+        socket.set_onmessage(None);
+        socket.set_onopen(None);
+        socket.set_onclose(None);
+        socket.set_onerror(None);
+        relay_url.clone()
+    };
+
+    let socket = web_sys::WebSocket::new(&relay_url)?;
+    socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
+    bind_mesh_relay_socket_callbacks(state, &socket);
+    state.borrow_mut().signaling = MeshSignalingTransport::Relay { socket, relay_url };
+    Ok(())
 }
 
 fn send_mesh_presence_state(
