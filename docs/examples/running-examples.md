@@ -105,7 +105,8 @@ Open:
 http://127.0.0.1:4181/
 ```
 
-The package examples include the binary stream room at `/binary-stream-room/`.
+The package examples include the binary stream room at `/binary-stream-room/` and the text and
+voice chat room at `/text-voice-chat/`.
 
 ## Full Cross-Target End-To-End Suite
 

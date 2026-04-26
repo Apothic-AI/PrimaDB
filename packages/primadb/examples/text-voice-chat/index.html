@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PrimaDB Text + Voice Chat</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="toolbar">
+        <div>
+          <p class="eyebrow">primadb package example</p>
+          <h1>Text + Voice Chat</h1>
+        </div>
+        <div class="status-strip" aria-live="polite">
+          <div>
+            <span>mesh</span>
+            <strong id="mesh-status">booting</strong>
+          </div>
+          <div>
+            <span>room</span>
+            <strong id="room-status">booting</strong>
+          </div>
+          <div>
+            <span>voice</span>
+            <strong id="voice-status">idle</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <article class="chat-panel">
+          <header>
+            <h2>Room Messages</h2>
+            <span id="message-count">0</span>
+          </header>
+          <ol id="message-list" class="message-list"></ol>
+          <form id="message-form" class="composer">
+            <input id="message-input" autocomplete="off" placeholder="Message" />
+            <button type="submit">Send</button>
+          </form>
+        </article>
+
+        <aside class="side-panel">
+          <article>
+            <header>
+              <h2>Identity</h2>
+            </header>
+            <label>
+              Display name
+              <input id="display-name" autocomplete="off" />
+            </label>
+          </article>
+
+          <article>
+            <header>
+              <h2>Voice Transport</h2>
+            </header>
+            <div class="voice-controls">
+              <label>
+                Source
+                <select id="capture-mode">
+                  <option value="microphone">Microphone</option>
+                  <option value="synthetic">Synthetic transport test</option>
+                </select>
+              </label>
+              <label>
+                Chunk ms
+                <input id="chunk-ms" type="number" min="100" step="50" value="350" />
+              </label>
+              <label>
+                Window ms
+                <input id="window-ms" type="number" min="1000" step="500" value="6000" />
+              </label>
+              <button id="start-voice" type="button">Start Voice</button>
+              <button id="stop-voice" type="button" disabled>Stop Voice</button>
+            </div>
+          </article>
+
+          <article>
+            <header>
+              <h2>Participants</h2>
+              <span id="participant-count">0</span>
+            </header>
+            <ul id="participant-list" class="participant-list"></ul>
+          </article>
+
+          <article>
+            <header>
+              <h2>Remote Voice</h2>
+              <span id="remote-count">0</span>
+            </header>
+            <div id="remote-voice-list" class="remote-voice-list"></div>
+          </article>
+
+          <article>
+            <header>
+              <h2>Metrics</h2>
+            </header>
+            <dl class="metrics">
+              <div>
+                <dt>sent chunks</dt>
+                <dd id="sent-chunks">0</dd>
+              </div>
+              <div>
+                <dt>received chunks</dt>
+                <dd id="received-chunks">0</dd>
+              </div>
+              <div>
+                <dt>sent bytes</dt>
+                <dd id="sent-bytes">0 B</dd>
+              </div>
+              <div>
+                <dt>received bytes</dt>
+                <dd id="received-bytes">0 B</dd>
+              </div>
+              <div>
+                <dt>peers</dt>
+                <dd id="peer-status">0 / 0</dd>
+              </div>
+              <div>
+                <dt>local buffer</dt>
+                <dd id="buffer-status">0</dd>
+              </div>
+            </dl>
+          </article>
+        </aside>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

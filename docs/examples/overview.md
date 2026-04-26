@@ -37,9 +37,9 @@ directory name.
 - [packages/primadb-node examples](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples)
 - [packages/primadb-python examples](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-python/examples)
 
-The browser package examples include a binary stream room that sends `MediaRecorder` chunks through
-PrimaDB byte fields. The Node and Python package example sets now also include full-node anchor
-examples.
+The browser package examples include binary media streaming demos that send `MediaRecorder` chunks
+through PrimaDB byte fields, including a text and voice chat room. The Node and Python package
+example sets now also include full-node anchor examples.
 
 ## End-To-End Suites
 

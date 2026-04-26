@@ -58,3 +58,4 @@ Use `primadb/threads` when you want the threaded browser runtime. It still inher
 - [default-notes](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/default-notes)
 - [threaded-mesh](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/threaded-mesh)
 - [binary-stream-room](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/binary-stream-room)
+- [text-voice-chat](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/text-voice-chat)
