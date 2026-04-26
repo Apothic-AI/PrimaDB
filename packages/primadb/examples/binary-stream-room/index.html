@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PrimaDB Binary Stream Room</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">primadb package example</p>
+          <h1>Binary Stream Room</h1>
+        </div>
+        <div class="status-grid" aria-live="polite">
+          <div>
+            <span>mesh</span>
+            <strong id="mesh-status">booting</strong>
+          </div>
+          <div>
+            <span>room</span>
+            <strong id="room-status">booting</strong>
+          </div>
+          <div>
+            <span>storage</span>
+            <strong id="storage-status">booting</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="stage">
+        <article class="publisher">
+          <header>
+            <h2>Local Publisher</h2>
+            <p id="publish-status">idle</p>
+          </header>
+          <video id="local-video" autoplay muted playsinline></video>
+          <div class="controls">
+            <label>
+              Source
+              <select id="capture-mode">
+                <option value="camera">Camera</option>
+                <option value="synthetic">Synthetic</option>
+              </select>
+            </label>
+            <label>
+              Chunk ms
+              <input id="chunk-ms" type="number" min="150" step="50" value="500" />
+            </label>
+            <label>
+              Window ms
+              <input id="window-ms" type="number" min="1000" step="500" value="8000" />
+            </label>
+            <button id="start-button" type="button">Start</button>
+            <button id="stop-button" type="button" disabled>Stop</button>
+          </div>
+        </article>
+
+        <article class="metrics">
+          <h2>Stream Metrics</h2>
+          <dl>
+            <div>
+              <dt>local chunks</dt>
+              <dd id="local-chunks">0</dd>
+            </div>
+            <div>
+              <dt>remote chunks</dt>
+              <dd id="remote-chunks">0</dd>
+            </div>
+            <div>
+              <dt>local bytes</dt>
+              <dd id="local-bytes">0 B</dd>
+            </div>
+            <div>
+              <dt>remote bytes</dt>
+              <dd id="remote-bytes">0 B</dd>
+            </div>
+            <div>
+              <dt>peers</dt>
+              <dd id="peer-status">0 / 0</dd>
+            </div>
+            <div>
+              <dt>buffer window</dt>
+              <dd id="buffer-status">0 chunks</dd>
+            </div>
+          </dl>
+        </article>
+      </section>
+
+      <section class="room-grid">
+        <article>
+          <header>
+            <h2>Participants</h2>
+            <p id="participant-count">0</p>
+          </header>
+          <ul id="participant-list" class="participant-list"></ul>
+        </article>
+
+        <article>
+          <header>
+            <h2>Remote Streams</h2>
+            <p id="remote-count">0</p>
+          </header>
+          <div id="remote-streams" class="remote-streams"></div>
+        </article>
+      </section>
+
+      <section class="log-panel">
+        <header>
+          <h2>Event Log</h2>
+          <button id="clear-log" type="button">Clear</button>
+        </header>
+        <div id="event-log" class="event-log" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

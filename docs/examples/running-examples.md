@@ -91,6 +91,22 @@ Open:
 http://127.0.0.1:4182/
 ```
 
+## Browser Package Examples
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+pnpm install
+pnpm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:4181/
+```
+
+The package examples include the binary stream room at `/binary-stream-room/`.
+
 ## Full Cross-Target End-To-End Suite
 
 ```bash

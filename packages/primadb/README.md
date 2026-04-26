@@ -61,6 +61,7 @@ Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport
 
 - [examples/default-notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/default-notes/README.md)
 - [examples/threaded-mesh/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/threaded-mesh/README.md)
+- [examples/binary-stream-room/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/binary-stream-room/README.md)
 
 Run them with Vite:
 

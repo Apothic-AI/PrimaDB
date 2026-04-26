@@ -37,6 +37,7 @@ export default defineConfig({
       preserveEntrySignatures: "strict",
       input: {
         index: resolve(import.meta.dirname, "index.html"),
+        binaryStreamRoom: resolve(import.meta.dirname, "binary-stream-room/index.html"),
         defaultNotes: resolve(import.meta.dirname, "default-notes/index.html"),
         threadedMesh: resolve(import.meta.dirname, "threaded-mesh/index.html"),
       },

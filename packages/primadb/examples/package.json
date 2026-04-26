@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "smoke:default": "node ./default-notes/test-smoke.mjs",
     "smoke:threaded": "node ./threaded-mesh/test-smoke.mjs",
-    "smoke": "pnpm run smoke:default && pnpm run smoke:threaded"
+    "smoke:stream": "node ./binary-stream-room/test-smoke.mjs",
+    "smoke": "pnpm run smoke:default && pnpm run smoke:threaded && pnpm run smoke:stream"
   },
   "dependencies": {
     "primadb": "link:.."

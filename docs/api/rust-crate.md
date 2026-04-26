@@ -135,6 +135,10 @@ This page covers the public Rust crate surface. The site also serves the full bu
 
 - `NativeWebRtcMesh`
 
+### `native_relay_server`
+
+- `NativeRelayServer`
+
 ### `native_sync`
 
 - `NativeWebSocketSync`
@@ -147,6 +151,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `MeshSignal`
 - `MeshSignalingMode`
 - `RelayClientConfig`
+- `RelayServerConfig`
 
 ### `operation`
 

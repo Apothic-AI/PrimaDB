@@ -74,6 +74,16 @@ export interface RelayClientConfig {
 }
 ```
 
+#### `RelayServerConfig`
+
+Kind: interface
+
+```ts
+export interface RelayServerConfig {
+    bind: string;
+}
+```
+
 #### `MeshSignalingMode`
 
 Kind: type alias
@@ -457,6 +467,21 @@ export declare class Subscription {
     next(): Promise<SubscriptionMessage>;
     tryNext(): SubscriptionMessage;
     close(): void;
+}
+```
+
+#### `RelayServer`
+
+Kind: class
+
+```ts
+export declare class RelayServer {
+    static listen(config: RelayServerConfig): Promise<RelayServer>;
+    bindAddr(): string;
+    url(): string;
+    clientCount(): number;
+    peerCount(): number;
+    close(): Promise<void>;
 }
 ```
 
