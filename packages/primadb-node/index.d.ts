@@ -198,6 +198,7 @@ export declare class Primadb {
   exportPendingOperationsJson(): string;
   drainPendingOperations(): JsonValue;
   drainPendingEnvelope(): JsonValue;
+  drainPendingEnvelopeJson(): string;
   applyOperations(operations: JsonValue): number;
   applyEnvelope(envelope: JsonValue): number;
   applyOperationsJson(payload: string): number;

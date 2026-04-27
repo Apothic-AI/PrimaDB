@@ -105,8 +105,8 @@ Open:
 http://127.0.0.1:4181/
 ```
 
-The package examples include the binary stream room at `/binary-stream-room/` and the text and
-voice chat room at `/text-voice-chat/`.
+The package examples include the binary stream room at `/binary-stream-room/`, the text and
+voice chat room at `/text-voice-chat/`, and the MoQ sync smoke at `/moq-sync/`.
 
 ## Full Cross-Target End-To-End Suite
 

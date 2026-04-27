@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PrimaDB MoQ Sync</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">primadb package example</p>
+      <h1>MoQ Sync Loopback</h1>
+      <p class="lede">
+        Publishes PrimaDB sync envelopes over a MoQ track and applies them to a second replica.
+      </p>
+      <section class="grid">
+        <article>
+          <h2>Publisher</h2>
+          <pre id="publisher">booting</pre>
+        </article>
+        <article>
+          <h2>Subscriber</h2>
+          <pre id="subscriber">booting</pre>
+        </article>
+        <article>
+          <h2>MoQ</h2>
+          <pre id="moq">booting</pre>
+        </article>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -3,7 +3,7 @@ title: Browser TypeScript Package API
 sidebar_position: 2
 ---
 
-This page covers the public `primadb` browser package entrypoint and its hook helper surface. The re-exported runtime classes and transport bindings are documented on the browser runtime API page.
+This page covers the public `primadb` browser package entrypoint, hook helpers, and MoQ helpers. The re-exported runtime classes and transport bindings are documented on the browser runtime API page.
 
 > This page is generated from the current package source declarations.
 
@@ -61,6 +61,148 @@ export { initWasm };
 
 ```ts
 export default initPrimadb;
+```
+
+## `packages/primadb/moq.ts`
+
+Experimental `primadb/moq` helper entrypoint.
+
+### Direct exports
+
+#### `PrimadbLike`
+
+Kind: interface
+
+```ts
+export interface PrimadbLike {
+    replicaId(): string;
+    pendingEnvelope(): unknown;
+    drainPendingEnvelope(): unknown;
+    drainPendingEnvelopeJson?(): string;
+    drainPendingOperationsJson?(): string;
+    applyEnvelope(envelope: unknown): number;
+    applyOperationsJson?(payload: string): number;
+}
+```
+
+#### `PrimadbMoqSyncPayload`
+
+Kind: interface
+
+```ts
+export interface PrimadbMoqSyncPayload {
+    type: "primadb.sync.v1";
+    from: string;
+    sentAt: number;
+    envelope?: unknown;
+    envelopeJson?: string;
+}
+```
+
+#### `PrimadbMoqSessionOptions`
+
+Kind: interface
+
+```ts
+export interface PrimadbMoqSessionOptions {
+    path: string;
+    track?: string;
+    intervalMs?: number;
+    publish?: boolean;
+    subscribe?: string[];
+    closeConnection?: boolean;
+}
+```
+
+#### `ConnectPrimadbMoqOptions`
+
+Kind: interface
+
+```ts
+export interface ConnectPrimadbMoqOptions extends PrimadbMoqSessionOptions {
+    url: string | URL;
+    websocketUrl?: string | URL;
+    websocket?: boolean;
+    webtransport?: WebTransportOptions;
+    transport?: WebTransport;
+}
+```
+
+#### `PrimadbMoqLoopbackOptions`
+
+Kind: interface
+
+```ts
+export interface PrimadbMoqLoopbackOptions {
+    publisherDb: PrimadbLike;
+    subscriberDb: PrimadbLike;
+    path: string;
+    track?: string;
+    intervalMs?: number;
+    url?: string | URL;
+    protocol?: string;
+}
+```
+
+#### `PrimadbMoqLoopback`
+
+Kind: interface
+
+```ts
+export interface PrimadbMoqLoopback {
+    publisher: PrimadbMoqSession;
+    subscriber: PrimadbMoqSession;
+    flush(): Promise<number>;
+    close(): void;
+}
+```
+
+#### `moqRuntimeSupport`
+
+Kind: function
+
+```ts
+export declare function moqRuntimeSupport(): {
+  webTransport: boolean;
+  webSocket: boolean;
+  websocketFallback: boolean;
+};
+```
+
+#### `connectPrimadbMoq`
+
+Kind: function
+
+```ts
+export declare function connectPrimadbMoq(db: PrimadbLike, options: ConnectPrimadbMoqOptions): Promise<PrimadbMoqSession>;
+```
+
+#### `PrimadbMoqSession`
+
+Kind: class
+
+```ts
+export declare class PrimadbMoqSession {
+    readonly db: PrimadbLike;
+    readonly connection: MoqConnection;
+    readonly path: string;
+    readonly track: string;
+    readonly intervalMs: number;
+    constructor(db: PrimadbLike, connection: MoqConnection, options: PrimadbMoqSessionOptions);
+    publish(): MoqBroadcast;
+    subscribe(path?: string): MoqTrack;
+    startAutoFlush(): void;
+    flushPending(): Promise<number>;
+    close(): void;
+}
+```
+
+#### `createPrimadbMoqLoopback`
+
+Kind: function
+
+```ts
+export declare function createPrimadbMoqLoopback(options: PrimadbMoqLoopbackOptions): Promise<PrimadbMoqLoopback>;
 ```
 
 ## `packages/primadb/hooks.ts`

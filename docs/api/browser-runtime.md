@@ -83,6 +83,7 @@ class Primadb {
   drainPendingOperations(): any;
   drainPendingEnvelope(): any;
   drainPendingOperationsJson(): string;
+  drainPendingEnvelopeJson(): string;
   applyOperations(operations: any): number;
   applyEnvelope(envelope: any): number;
   applyOperationsJson(payload: string): number;

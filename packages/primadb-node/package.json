@@ -7,9 +7,22 @@
   "license": "Apache-2.0",
   "main": "./index.js",
   "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./moq": {
+      "types": "./moq.d.ts",
+      "default": "./moq.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "index.js",
     "index.d.ts",
+    "moq.js",
+    "moq.d.ts",
     "binding-name.js",
     "README.md",
     "*.node"
@@ -21,10 +34,12 @@
     "smoke:relay-server": "pnpm run build && node ./scripts/smoke-relay-server.mjs",
     "smoke:relay": "pnpm run build && node ./scripts/smoke-relay.mjs",
     "smoke:mesh": "pnpm run build && node ./scripts/smoke-mesh.mjs",
-    "smoke": "pnpm run smoke:core && pnpm run smoke:hooks && pnpm run smoke:relay-server && pnpm run smoke:relay && pnpm run smoke:mesh",
+    "smoke:moq": "pnpm run build && node ./examples/moq-sync/index.mjs",
+    "smoke": "pnpm run smoke:core && pnpm run smoke:hooks && pnpm run smoke:relay-server && pnpm run smoke:relay && pnpm run smoke:mesh && pnpm run smoke:moq",
     "pack:check": "pnpm pack --dry-run"
   },
   "dependencies": {
+    "@moq/lite": "^0.2.2",
     "detect-libc": "^2.1.2"
   }
 }

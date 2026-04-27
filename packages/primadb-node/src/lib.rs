@@ -363,6 +363,13 @@ impl Primadb {
         to_json(self.inner.drain_sync_envelope().map_err(to_napi_error)?)
     }
 
+    #[napi(js_name = "drainPendingEnvelopeJson")]
+    pub fn drain_pending_envelope_json(&self) -> Result<String> {
+        self.inner
+            .drain_pending_envelope_json()
+            .map_err(to_napi_error)
+    }
+
     #[napi(js_name = "applyOperations")]
     pub fn apply_operations(&self, operations: JsonValue) -> Result<u32> {
         let operations: Vec<Operation> = from_json(operations)?;

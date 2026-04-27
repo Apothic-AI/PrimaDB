@@ -21,6 +21,10 @@
       "types": "./dist/gun.d.ts",
       "default": "./dist/gun.js"
     },
+    "./moq": {
+      "types": "./dist/moq.d.ts",
+      "default": "./dist/moq.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -36,6 +40,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "node ./scripts/smoke.mjs",
     "pack:check": "pnpm pack --dry-run"
+  },
+  "dependencies": {
+    "@moq/lite": "^0.2.2"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

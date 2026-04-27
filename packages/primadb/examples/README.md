@@ -34,3 +34,4 @@ Available projects:
 - [examples/threaded-mesh/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/threaded-mesh/README.md): threaded browser build using `primadb/threads`, shared room replication over mesh, and optional relay signaling for cross-browser peers.
 - [examples/binary-stream-room/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/binary-stream-room/README.md): browser media chunks streamed through PrimaDB byte fields with a rolling graph buffer and mesh replication.
 - [examples/text-voice-chat/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/text-voice-chat/README.md): text messages and voice chunks transported through PrimaDB over the mesh.
+- [examples/moq-sync/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/moq-sync/README.md): sync envelopes published over a MoQ track using the `primadb/moq` helper.

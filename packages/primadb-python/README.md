@@ -16,6 +16,7 @@ Current surface:
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
 - network-boundary hooks through `set_network_hooks(...)` / `clear_network_hooks()`
+- experimental MoQ path/track/frame helpers through `primadb.moq`
 
 ## Package Examples
 
@@ -24,6 +25,7 @@ Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport
 - [examples/local_notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/local_notes/README.md)
 - [examples/mesh_peer/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/mesh_peer/README.md)
 - [examples/full_node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/full_node/README.md)
+- [examples/moq_sync/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/moq_sync/README.md)
 
 ## Install
 

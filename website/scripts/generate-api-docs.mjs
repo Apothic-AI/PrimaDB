@@ -78,37 +78,88 @@ function getNodeName(node) {
 }
 
 function printTsNode(sourceFile, node, printer) {
+  const renderParameter = (parameter) => {
+    const rest = parameter.dotDotDotToken ? "..." : "";
+    const paramName = parameter.name.getText(sourceFile);
+    const optional = parameter.questionToken || parameter.initializer ? "?" : "";
+    let type = "unknown";
+    if (parameter.type) {
+      type = parameter.type.getText(sourceFile);
+    } else if (parameter.initializer) {
+      if (ts.isNumericLiteral(parameter.initializer)) {
+        type = "number";
+      } else if (
+        parameter.initializer.kind === ts.SyntaxKind.TrueKeyword ||
+        parameter.initializer.kind === ts.SyntaxKind.FalseKeyword
+      ) {
+        type = "boolean";
+      } else if (ts.isStringLiteral(parameter.initializer)) {
+        type = "string";
+      }
+    }
+    return `${rest}${paramName}${optional}: ${type}`;
+  };
+
   if (ts.isFunctionDeclaration(node)) {
     const name = node.name?.getText(sourceFile) ?? "default";
     const typeParameters = node.typeParameters?.length
       ? `<${node.typeParameters.map((parameter) => parameter.getText(sourceFile)).join(", ")}>`
       : "";
-    const parameters = node.parameters
-      .map((parameter) => {
-        const rest = parameter.dotDotDotToken ? "..." : "";
-        const paramName = parameter.name.getText(sourceFile);
-        const optional = parameter.questionToken || parameter.initializer ? "?" : "";
-        let type = "unknown";
-        if (parameter.type) {
-          type = parameter.type.getText(sourceFile);
-        } else if (parameter.initializer) {
-          if (ts.isNumericLiteral(parameter.initializer)) {
-            type = "number";
-          } else if (
-            parameter.initializer.kind === ts.SyntaxKind.TrueKeyword ||
-            parameter.initializer.kind === ts.SyntaxKind.FalseKeyword
-          ) {
-            type = "boolean";
-          } else if (ts.isStringLiteral(parameter.initializer)) {
-            type = "string";
-          }
-        }
-        return `${rest}${paramName}${optional}: ${type}`;
-      })
-      .join(", ");
+    const parameters = node.parameters.map(renderParameter).join(", ");
     const returnType = node.type ? `: ${node.type.getText(sourceFile)}` : "";
     return `export declare function ${name}${typeParameters}(${parameters})${returnType};`;
   }
+
+  if (ts.isClassDeclaration(node)) {
+    const name = node.name?.getText(sourceFile) ?? "default";
+    const typeParameters = node.typeParameters?.length
+      ? `<${node.typeParameters.map((parameter) => parameter.getText(sourceFile)).join(", ")}>`
+      : "";
+    const heritage = node.heritageClauses?.length
+      ? ` ${node.heritageClauses.map((clause) => clause.getText(sourceFile)).join(" ")}`
+      : "";
+    const members = [];
+
+    for (const member of node.members) {
+      if (member.name && ts.isPrivateIdentifier(member.name)) {
+        continue;
+      }
+      const modifiers = ts.getModifiers(member) ?? [];
+      if (modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword)) {
+        continue;
+      }
+      const prefix = modifiers
+        .filter((modifier) =>
+          [ts.SyntaxKind.PublicKeyword, ts.SyntaxKind.ProtectedKeyword, ts.SyntaxKind.StaticKeyword, ts.SyntaxKind.ReadonlyKeyword].includes(
+            modifier.kind,
+          ),
+        )
+        .map((modifier) => modifier.getText(sourceFile))
+        .join(" ");
+      const prefixText = prefix ? `${prefix} ` : "";
+
+      if (ts.isConstructorDeclaration(member)) {
+        members.push(`    constructor(${member.parameters.map(renderParameter).join(", ")});`);
+      } else if (ts.isMethodDeclaration(member) && member.name) {
+        const methodName = member.name.getText(sourceFile);
+        const optional = member.questionToken ? "?" : "";
+        const typeParametersText = member.typeParameters?.length
+          ? `<${member.typeParameters.map((parameter) => parameter.getText(sourceFile)).join(", ")}>`
+          : "";
+        const parameters = member.parameters.map(renderParameter).join(", ");
+        const returnType = member.type ? member.type.getText(sourceFile) : "unknown";
+        members.push(`    ${prefixText}${methodName}${optional}${typeParametersText}(${parameters}): ${returnType};`);
+      } else if (ts.isPropertyDeclaration(member) && member.name) {
+        const propertyName = member.name.getText(sourceFile);
+        const optional = member.questionToken ? "?" : "";
+        const type = member.type ? member.type.getText(sourceFile) : "unknown";
+        members.push(`    ${prefixText}${propertyName}${optional}: ${type};`);
+      }
+    }
+
+    return [`export declare class ${name}${typeParameters}${heritage} {`, ...members, "}"].join("\n");
+  }
+
   return printer.printNode(ts.EmitHint.Unspecified, node, sourceFile);
 }
 
@@ -700,11 +751,15 @@ function generateApiDocs() {
       title: "Browser TypeScript Package API",
       sidebarPosition: 2,
       intro:
-        "This page covers the public `primadb` browser package entrypoint and its hook helper surface. The re-exported runtime classes and transport bindings are documented on the browser runtime API page.",
+        "This page covers the public `primadb` browser package entrypoint, hook helpers, and MoQ helpers. The re-exported runtime classes and transport bindings are documented on the browser runtime API page.",
       sources: [
         {
           path: resolve(repoRoot, "packages", "primadb", "index.ts"),
           note: "Primary `primadb` entrypoint.",
+        },
+        {
+          path: resolve(repoRoot, "packages", "primadb", "moq.ts"),
+          note: "Experimental `primadb/moq` helper entrypoint.",
         },
         {
           path: resolve(repoRoot, "packages", "primadb", "hooks.ts"),
@@ -788,11 +843,15 @@ function generateApiDocs() {
       title: "Node Package API",
       sidebarPosition: 6,
       intro:
-        "This page covers the `primadb-node` native package surface. It is generated directly from the shipped TypeScript declaration file.",
+        "This page covers the `primadb-node` native package surface. It is generated directly from the shipped TypeScript declaration files.",
       sources: [
         {
           path: resolve(repoRoot, "packages", "primadb-node", "index.d.ts"),
           note: "Published Node package declarations.",
+        },
+        {
+          path: resolve(repoRoot, "packages", "primadb-node", "moq.d.ts"),
+          note: "Experimental `primadb-node/moq` helper declarations.",
         },
       ],
     }),

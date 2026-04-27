@@ -34,6 +34,7 @@ pnpm run build
 - WebRTC mesh transport
 - remote watches
 - network hooks
+- experimental MoQ sync helpers through `primadb-node/moq`
 
 ## Example
 
@@ -60,3 +61,4 @@ db.setNetworkHooks({
 - [local-notes](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples/local-notes)
 - [mesh-peer](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples/mesh-peer)
 - [full-node](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples/full-node)
+- [moq-sync](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-node/examples/moq-sync)

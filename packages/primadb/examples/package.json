@@ -15,7 +15,8 @@
     "smoke:threaded": "node ./threaded-mesh/test-smoke.mjs",
     "smoke:stream": "node ./binary-stream-room/test-smoke.mjs",
     "smoke:chat": "node ./text-voice-chat/test-smoke.mjs",
-    "smoke": "pnpm run smoke:default && pnpm run smoke:threaded && pnpm run smoke:stream && pnpm run smoke:chat"
+    "smoke:moq": "node ./moq-sync/test-smoke.mjs",
+    "smoke": "pnpm run smoke:default && pnpm run smoke:threaded && pnpm run smoke:stream && pnpm run smoke:chat && pnpm run smoke:moq"
   },
   "dependencies": {
     "primadb": "link:.."

@@ -103,6 +103,7 @@ class Primadb:
     def export_pending_operations_json(self) -> str: ...
     def drain_pending_operations(self) -> Any: ...
     def drain_pending_envelope(self) -> Any: ...
+    def drain_pending_envelope_json(self) -> str: ...
     def apply_operations(self, operations: Any) -> int: ...
     def apply_envelope(self, envelope: Any) -> int: ...
     def apply_operations_json(self, payload: str) -> int: ...
@@ -112,6 +113,64 @@ class Primadb:
     def connect_mesh(self, config: Any) -> WebRtcMesh: ...
     def set_network_hooks(self, hooks: NetworkHooks | dict[str, Any] | object | None) -> None: ...
     def clear_network_hooks(self) -> None: ...
+
+@dataclass
+```
+
+## `PrimadbMoqFrame`
+
+Kind: class
+
+```py
+class PrimadbMoqFrame:
+    path: str
+    track: str
+    sequence: int
+    payload: bytes
+    def json(self) -> Any: ...
+```
+
+## `PrimadbMoqSession`
+
+Kind: class
+
+```py
+class PrimadbMoqSession:
+    db: Any
+    path: str
+    track: str
+    def __init__(self, db: Any, *, path: str, track: str = ...) -> None: ...
+    def subscribe_from(self, publisher: PrimadbMoqSession) -> None: ...
+    def flush_pending(self) -> int: ...
+    def receive_frame(self, frame: PrimadbMoqFrame) -> int: ...
+    def close(self) -> None: ...
+```
+
+## `PrimadbMoqLoopback`
+
+Kind: class
+
+```py
+class PrimadbMoqLoopback:
+    publisher: PrimadbMoqSession
+    subscriber: PrimadbMoqSession
+    def __init__(self, publisher: PrimadbMoqSession, subscriber: PrimadbMoqSession) -> None: ...
+    def flush(self) -> int: ...
+    def close(self) -> None: ...
+```
+
+## `create_primadb_moq_loopback`
+
+Kind: function
+
+```py
+def create_primadb_moq_loopback(
+    *,
+    publisher_db: Any,
+    subscriber_db: Any,
+    path: str,
+    track: str = ...,
+) -> PrimadbMoqLoopback: ...
 ```
 
 ## `Chain`

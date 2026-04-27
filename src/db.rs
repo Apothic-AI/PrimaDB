@@ -453,6 +453,10 @@ impl Primadb {
         Ok(serde_json::to_string(&self.drain_sync_envelope()?)?)
     }
 
+    pub fn drain_pending_envelope_json(&self) -> Result<String> {
+        self.drain_pending_operations_json()
+    }
+
     pub fn apply_operation(&self, op: Operation) -> Result<bool> {
         self.apply_operations(std::iter::once(op))
             .map(|count| count == 1)

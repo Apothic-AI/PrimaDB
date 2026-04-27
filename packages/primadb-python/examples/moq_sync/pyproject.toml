@@ -1,0 +1,9 @@
+[project]
+name = "primadb-python-moq-sync-example"
+version = "0.1.0"
+description = "uv-managed MoQ sync example for primadb-python"
+requires-python = ">=3.9"
+dependencies = ["primadb-python"]
+
+[tool.uv.sources]
+primadb-python = { path = "../..", editable = true }

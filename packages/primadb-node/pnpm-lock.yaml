@@ -8,16 +8,73 @@ importers:
 
   .:
     dependencies:
+      '@moq/lite':
+        specifier: ^0.2.2
+        version: 0.2.2(zod@4.3.6)
       detect-libc:
         specifier: ^2.1.2
         version: 2.1.2
 
 packages:
 
+  '@moq/lite@0.2.2':
+    resolution: {integrity: sha512-o5X4qQlfhO8xWcWwpYsEEWWHr66SIPQKFY++ZxgMYhU+77rTfe1vWgomYjqoQcCZT3flRY2iTRLJriHgyDX/gA==}
+    peerDependencies:
+      zod: ^4.0.0
+
+  '@moq/qmux@0.0.6':
+    resolution: {integrity: sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ==}
+
+  '@moq/signals@0.1.6':
+    resolution: {integrity: sha512-ic7ttiz6dHXOPoVAfhz4K6LGT2LWdDGTi1x2u8sYSGZ5nOKGWfqDkwYcGvCPlcVQetn3PaeXYSPFiMAC6RO3tQ==}
+    peerDependencies:
+      '@types/react': ^19.1.8
+      react: ^19.0.0
+      solid-js: ^1.9.7
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
+      react:
+        optional: true
+      solid-js:
+        optional: true
+
+  async-mutex@0.5.0:
+    resolution: {integrity: sha512-1A94B18jkJ3DYq284ohPxoXbfTA5HsQ7/Mf4DEhcyLx3Bz27Rh59iScbB6EPiP+B+joue6YCxcMXSbFC1tZKwA==}
+
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
+  tslib@2.8.1:
+    resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
+
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
+
 snapshots:
 
+  '@moq/lite@0.2.2(zod@4.3.6)':
+    dependencies:
+      '@moq/qmux': 0.0.6
+      '@moq/signals': 0.1.6
+      async-mutex: 0.5.0
+      zod: 4.3.6
+    transitivePeerDependencies:
+      - '@types/react'
+      - react
+      - solid-js
+
+  '@moq/qmux@0.0.6': {}
+
+  '@moq/signals@0.1.6': {}
+
+  async-mutex@0.5.0:
+    dependencies:
+      tslib: 2.8.1
+
   detect-libc@2.1.2: {}
+
+  tslib@2.8.1: {}
+
+  zod@4.3.6: {}

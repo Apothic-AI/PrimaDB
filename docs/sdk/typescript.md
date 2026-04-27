@@ -21,6 +21,7 @@ Full API reference:
 - `primadb`
 - `primadb/threads`
 - `primadb/gun`
+- `primadb/moq`
 
 ## Build
 
@@ -59,3 +60,4 @@ Use `primadb/threads` when you want the threaded browser runtime. It still inher
 - [threaded-mesh](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/threaded-mesh)
 - [binary-stream-room](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/binary-stream-room)
 - [text-voice-chat](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/text-voice-chat)
+- [moq-sync](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb/examples/moq-sync)

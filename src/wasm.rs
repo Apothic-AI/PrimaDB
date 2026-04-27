@@ -410,6 +410,13 @@ impl WasmPrimadb {
             .map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = drainPendingEnvelopeJson)]
+    pub fn drain_pending_envelope_json(&self) -> std::result::Result<String, JsValue> {
+        self.inner
+            .drain_pending_envelope_json()
+            .map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = applyOperations)]
     pub fn apply_operations(&self, operations: JsValue) -> std::result::Result<usize, JsValue> {
         let operations: Vec<Operation> = serde_wasm_bindgen::from_value(operations)
@@ -1109,24 +1116,24 @@ impl WasmPrimadb {
         }));
         let signaling = { state.borrow().signaling.clone() };
         let signaling_onmessage = match signaling {
-                MeshSignalingTransport::BroadcastChannel(signaling) => {
-                    let signal_state = state.clone();
-                    let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
-                        let Ok(signal) = serde_wasm_bindgen::from_value::<MeshSignal>(event.data())
-                        else {
-                            return;
-                        };
-                        let _ = handle_mesh_signal_state(&signal_state, signal);
-                    }) as Box<dyn FnMut(_)>);
-                    signaling.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-                    Some(onmessage)
-                }
-                MeshSignalingTransport::Relay { socket, relay_url } => {
-                    initialize_mesh_relay_callbacks(&state, relay_url);
-                    bind_mesh_relay_socket_callbacks(&state, &socket);
-                    None
-                }
-            };
+            MeshSignalingTransport::BroadcastChannel(signaling) => {
+                let signal_state = state.clone();
+                let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+                    let Ok(signal) = serde_wasm_bindgen::from_value::<MeshSignal>(event.data())
+                    else {
+                        return;
+                    };
+                    let _ = handle_mesh_signal_state(&signal_state, signal);
+                }) as Box<dyn FnMut(_)>);
+                signaling.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+                Some(onmessage)
+            }
+            MeshSignalingTransport::Relay { socket, relay_url } => {
+                initialize_mesh_relay_callbacks(&state, relay_url);
+                bind_mesh_relay_socket_callbacks(&state, &socket);
+                None
+            }
+        };
 
         let change_subscription = self.inner.subscribe_changes();
         let receiver = change_subscription.receiver();

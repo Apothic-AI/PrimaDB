@@ -343,6 +343,12 @@ impl Primadb {
         to_py(py, self.inner.drain_sync_envelope().map_err(to_py_err)?)
     }
 
+    fn drain_pending_envelope_json(&self) -> PyResult<String> {
+        self.inner
+            .drain_pending_envelope_json()
+            .map_err(to_py_err)
+    }
+
     fn apply_operations(&self, operations: &Bound<'_, PyAny>) -> PyResult<u32> {
         let operations: Vec<Operation> = from_py(operations)?;
         let applied = self.inner.apply_operations(operations).map_err(to_py_err)?;

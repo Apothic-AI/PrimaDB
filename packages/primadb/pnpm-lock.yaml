@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@moq/lite':
+        specifier: ^0.2.2
+        version: 0.2.2(zod@4.3.6)
     devDependencies:
       typescript:
         specifier: ^5.9.2
@@ -14,11 +18,65 @@ importers:
 
 packages:
 
+  '@moq/lite@0.2.2':
+    resolution: {integrity: sha512-o5X4qQlfhO8xWcWwpYsEEWWHr66SIPQKFY++ZxgMYhU+77rTfe1vWgomYjqoQcCZT3flRY2iTRLJriHgyDX/gA==}
+    peerDependencies:
+      zod: ^4.0.0
+
+  '@moq/qmux@0.0.6':
+    resolution: {integrity: sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ==}
+
+  '@moq/signals@0.1.6':
+    resolution: {integrity: sha512-ic7ttiz6dHXOPoVAfhz4K6LGT2LWdDGTi1x2u8sYSGZ5nOKGWfqDkwYcGvCPlcVQetn3PaeXYSPFiMAC6RO3tQ==}
+    peerDependencies:
+      '@types/react': ^19.1.8
+      react: ^19.0.0
+      solid-js: ^1.9.7
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
+      react:
+        optional: true
+      solid-js:
+        optional: true
+
+  async-mutex@0.5.0:
+    resolution: {integrity: sha512-1A94B18jkJ3DYq284ohPxoXbfTA5HsQ7/Mf4DEhcyLx3Bz27Rh59iScbB6EPiP+B+joue6YCxcMXSbFC1tZKwA==}
+
+  tslib@2.8.1:
+    resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
+
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
+
 snapshots:
 
+  '@moq/lite@0.2.2(zod@4.3.6)':
+    dependencies:
+      '@moq/qmux': 0.0.6
+      '@moq/signals': 0.1.6
+      async-mutex: 0.5.0
+      zod: 4.3.6
+    transitivePeerDependencies:
+      - '@types/react'
+      - react
+      - solid-js
+
+  '@moq/qmux@0.0.6': {}
+
+  '@moq/signals@0.1.6': {}
+
+  async-mutex@0.5.0:
+    dependencies:
+      tslib: 2.8.1
+
+  tslib@2.8.1: {}
+
   typescript@5.9.3: {}
+
+  zod@4.3.6: {}

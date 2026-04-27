@@ -39,6 +39,7 @@ export default defineConfig({
         index: resolve(import.meta.dirname, "index.html"),
         binaryStreamRoom: resolve(import.meta.dirname, "binary-stream-room/index.html"),
         defaultNotes: resolve(import.meta.dirname, "default-notes/index.html"),
+        moqSync: resolve(import.meta.dirname, "moq-sync/index.html"),
         textVoiceChat: resolve(import.meta.dirname, "text-voice-chat/index.html"),
         threadedMesh: resolve(import.meta.dirname, "threaded-mesh/index.html"),
       },
