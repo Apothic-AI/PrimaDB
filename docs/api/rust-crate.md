@@ -74,9 +74,11 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `ChangeSubscription`
 - `LexBuilder`
 - `MapEntry`
+- `NodeFetchScheduler`
 - `Primadb`
 - `QueryBuilder`
 - `Subscription`
+- `TraversalSubscription`
 - `VacuumReport`
 
 ### `durable`
@@ -218,6 +220,16 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `WatchRequest`
 - `WatchRequestKind`
 
+### `traversal`
+
+- `TraversalDirection`
+- `TraversalEdge`
+- `TraversalEdgeKind`
+- `TraversalEntry`
+- `TraversalResult`
+- `TraversalSpec`
+- `TraversalStrategy`
+
 ### `value`
 
 - `FieldState`
@@ -225,3 +237,11 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `NodeId`
 - `NodeState`
 - `SetState`
+
+## Traversal semantics
+
+`Chain::traverse` is local-first and bounded. With active relay or mesh transports, missing linked nodes are scheduled for bounded background fetch.
+
+`Chain::watch_traverse` receives updated results when fetched nodes merge into the local graph.
+
+The `fetched` field on `TraversalResult` is the number of background node fetches scheduled by that evaluation.

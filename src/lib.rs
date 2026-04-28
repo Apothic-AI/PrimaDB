@@ -27,6 +27,7 @@ mod router;
 mod snapshot;
 mod storage;
 mod sync;
+mod traversal;
 mod value;
 
 #[cfg(target_arch = "wasm32")]
@@ -52,8 +53,8 @@ pub use crypto::{
     EncryptedPayload, Identity, PublicIdentity, SeaPair, SecretBoxKey, SignedPayload,
 };
 pub use db::{
-    Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, Primadb, QueryBuilder,
-    Subscription, VacuumReport,
+    Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, NodeFetchScheduler, Primadb,
+    QueryBuilder, Subscription, TraversalSubscription, VacuumReport,
 };
 pub use durable::{DurableStorageBinding, DurableStorageConfig};
 #[cfg(not(target_arch = "wasm32"))]
@@ -97,5 +98,9 @@ pub use sync::{
     PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
     RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, SyncEnvelope, SyncFrame, WatchEvent,
     WatchRequest, WatchRequestKind, error_pull_response, error_watch_event, stable_content_hash,
+};
+pub use traversal::{
+    TraversalDirection, TraversalEdge, TraversalEdgeKind, TraversalEntry, TraversalResult,
+    TraversalSpec, TraversalStrategy,
 };
 pub use value::{FieldState, FieldValue, NodeId, NodeState, SetState};

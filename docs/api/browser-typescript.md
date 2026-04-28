@@ -275,6 +275,9 @@ export type PullRequestKind = {
     };
     spec: Record<string, unknown>;
 } | {
+    kind: "node";
+    id: string;
+} | {
     kind: "snapshot";
     root?: string | null;
 };
@@ -297,6 +300,9 @@ export type RemoteResult = {
 } | {
     kind: "lex";
     entries: unknown[];
+} | {
+    kind: "node";
+    node: unknown | null;
 } | {
     kind: "snapshot";
     snapshot: unknown;
@@ -396,6 +402,12 @@ Kind: function
 ```ts
 export declare function clearNetworkHooks(db: Primadb): void;
 ```
+
+## Traversal semantics
+
+Traversal methods are exported from the generated WASM runtime types.
+
+`traverse(...)` is local-first and bounded. Connected relay or mesh transports schedule missing linked nodes for background fetch, and traversal watches receive updates as those nodes arrive.
 
 ## Related pages
 

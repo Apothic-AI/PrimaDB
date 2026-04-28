@@ -3,13 +3,14 @@ use crate::SecureSyncFrame;
 use crate::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext,
     DurableStorageBinding, DurableStorageConfig, HookTransport, HybridClock, IceServerConfig,
-    LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, Operation,
-    PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody,
-    QuerySpec, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage, RoomHookContext,
-    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig,
-    ServeRequestContext, ServeResultContext, Subscription, SyncEnvelope, SyncFrame, WatchEvent,
-    WatchRequest, WatchRequestKind, build_storage_metadata, build_storage_transaction,
-    encode_component, error_pull_response, error_watch_event,
+    LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler,
+    Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
+    PullResponseBody, QuerySpec, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage,
+    RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
+    RouterConfig, ServeRequestContext, ServeResultContext, Subscription, SyncEnvelope, SyncFrame,
+    TraversalSpec, TraversalSubscription as CoreTraversalSubscription, WatchEvent, WatchRequest,
+    WatchRequestKind, build_storage_metadata, build_storage_transaction, encode_component,
+    error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
@@ -53,6 +54,11 @@ pub struct WasmChain {
 #[wasm_bindgen(js_name = Subscription)]
 pub struct WasmSubscription {
     inner: Option<Subscription>,
+}
+
+#[wasm_bindgen(js_name = TraversalSubscription)]
+pub struct WasmTraversalSubscription {
+    inner: Option<CoreTraversalSubscription>,
 }
 
 #[wasm_bindgen(js_name = RemoteWatch)]
@@ -118,6 +124,10 @@ struct WebSocketSyncState {
     next_message_seq: u64,
 }
 
+struct WasmWebSocketNodeFetchScheduler {
+    state: std::rc::Weak<RefCell<WebSocketSyncState>>,
+}
+
 #[derive(Debug, Clone)]
 struct OutboundSync {
     encoding: String,
@@ -170,6 +180,9 @@ enum PullAccumulator {
     Lex {
         entries: Vec<LexEntry>,
     },
+    Node {
+        node: Option<crate::NodeState>,
+    },
     Snapshot {
         clock: Option<HybridClock>,
         nodes: BTreeMap<String, crate::NodeState>,
@@ -187,6 +200,7 @@ pub struct WasmWebSocketSync {
     onerror: Option<Closure<dyn FnMut(web_sys::Event)>>,
     interval_callback: Option<Closure<dyn FnMut()>>,
     interval_id: Option<i32>,
+    node_fetch_registration: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +252,10 @@ struct WebRtcMeshState {
     relay_onerror: Option<Closure<dyn FnMut(web_sys::Event)>>,
 }
 
+struct WasmWebRtcNodeFetchScheduler {
+    state: std::rc::Weak<RefCell<WebRtcMeshState>>,
+}
+
 #[derive(Clone)]
 struct WasmNetworkHookCallbacks {
     on_connect: Option<js_sys::Function>,
@@ -254,6 +272,106 @@ struct WasmNetworkHooks {
 unsafe impl Send for WasmNetworkHooks {}
 unsafe impl Sync for WasmNetworkHooks {}
 
+impl NodeFetchScheduler for WasmWebSocketNodeFetchScheduler {
+    fn fetch_nodes(&self, nodes: Vec<String>) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        spawn_local(async move {
+            let peer_ids = state
+                .borrow()
+                .router
+                .known_peers()
+                .into_iter()
+                .map(|peer| peer.peer_id)
+                .collect::<Vec<_>>();
+            for node_id in nodes {
+                let mut fetched = false;
+                for peer_id in &peer_ids {
+                    match request_remote_result_state(
+                        &state,
+                        peer_id.clone(),
+                        PullRequestKind::Node {
+                            id: node_id.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(RemoteResult::Node { node: Some(node) }) => {
+                            let db = state.borrow().db.clone();
+                            let _ = db.apply_node_state(node);
+                            fetched = true;
+                            break;
+                        }
+                        Ok(RemoteResult::Node { node: None }) | Err(_) => {}
+                        Ok(_) => {}
+                    }
+                }
+                if !fetched {
+                    let db = state.borrow().db.clone();
+                    db.clear_scheduled_node_fetch(&node_id);
+                }
+            }
+        });
+    }
+}
+
+impl NodeFetchScheduler for WasmWebRtcNodeFetchScheduler {
+    fn fetch_nodes(&self, nodes: Vec<String>) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        spawn_local(async move {
+            let peer_ids = state
+                .borrow()
+                .peers
+                .iter()
+                .filter_map(|(peer_id, peer)| {
+                    peer.channel
+                        .as_ref()
+                        .is_some_and(mesh_channel_is_open)
+                        .then_some(peer_id.clone())
+                })
+                .collect::<Vec<_>>();
+            for node_id in nodes {
+                let mut fetched = false;
+                for peer_id in &peer_ids {
+                    let mut watch = match start_mesh_remote_watch_state(
+                        &state,
+                        peer_id.clone(),
+                        PullRequestKind::Node {
+                            id: node_id.clone(),
+                        },
+                    ) {
+                        Ok(watch) => watch,
+                        Err(_) => continue,
+                    };
+                    let receiver = watch.inner.as_ref().map(|inner| inner.receiver.clone());
+                    let message = match receiver {
+                        Some(receiver) => receiver.recv().await.ok(),
+                        None => None,
+                    };
+                    watch.cancel();
+                    if let Some(Ok(RemoteWatchMessage {
+                        result: RemoteResult::Node { node: Some(node) },
+                        ..
+                    })) = message
+                    {
+                        let db = state.borrow().db.clone();
+                        let _ = db.apply_node_state(node);
+                        fetched = true;
+                        break;
+                    }
+                }
+                if !fetched {
+                    let db = state.borrow().db.clone();
+                    db.clear_scheduled_node_fetch(&node_id);
+                }
+            }
+        });
+    }
+}
+
 #[wasm_bindgen(js_name = WebRtcMesh)]
 pub struct WasmWebRtcMesh {
     state: Rc<RefCell<WebRtcMeshState>>,
@@ -261,6 +379,7 @@ pub struct WasmWebRtcMesh {
     signaling_onmessage: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
     retry_callback: Option<Closure<dyn FnMut()>>,
     retry_interval_id: Option<i32>,
+    node_fetch_registration: Option<u64>,
 }
 
 impl crate::NetworkHooks for WasmNetworkHooks {
@@ -1051,6 +1170,11 @@ impl WasmPrimadb {
                 interval_callback.as_ref().unchecked_ref(),
                 interval_ms,
             )?;
+        let node_fetch_registration =
+            self.inner
+                .register_node_fetch_scheduler(Arc::new(WasmWebSocketNodeFetchScheduler {
+                    state: Rc::downgrade(&state),
+                }));
 
         Ok(WasmWebSocketSync {
             state,
@@ -1061,6 +1185,7 @@ impl WasmPrimadb {
             onerror: Some(onerror),
             interval_callback: Some(interval_callback),
             interval_id: Some(interval_id),
+            node_fetch_registration: Some(node_fetch_registration),
         })
     }
 
@@ -1171,6 +1296,11 @@ impl WasmPrimadb {
         ) {
             announce_mesh_join_state(&state)?;
         }
+        let node_fetch_registration =
+            self.inner
+                .register_node_fetch_scheduler(Arc::new(WasmWebRtcNodeFetchScheduler {
+                    state: Rc::downgrade(&state),
+                }));
 
         Ok(WasmWebRtcMesh {
             state,
@@ -1178,6 +1308,7 @@ impl WasmPrimadb {
             signaling_onmessage,
             retry_callback: Some(retry_callback),
             retry_interval_id: Some(retry_interval_id),
+            node_fetch_registration: Some(node_fetch_registration),
         })
     }
 }
@@ -1355,6 +1486,12 @@ impl WasmChain {
         lex_entries_to_js(&entries)
     }
 
+    pub fn traverse(&self, spec: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let spec: TraversalSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        to_js(&self.inner.traverse(spec).map_err(to_js_error)?)
+    }
+
     #[wasm_bindgen(js_name = firstQuery)]
     pub fn first_query(&self, spec: JsValue) -> std::result::Result<JsValue, JsValue> {
         let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
@@ -1381,6 +1518,30 @@ impl WasmChain {
         });
 
         Ok(WasmSubscription {
+            inner: Some(subscription),
+        })
+    }
+
+    #[wasm_bindgen(js_name = watchTraverse)]
+    pub fn watch_traverse(
+        &self,
+        spec: JsValue,
+        callback: js_sys::Function,
+    ) -> std::result::Result<WasmTraversalSubscription, JsValue> {
+        let spec: TraversalSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let subscription = self.inner.watch_traverse(spec).map_err(to_js_error)?;
+        let receiver = subscription.receiver();
+        let callback = callback.clone();
+
+        spawn_local(async move {
+            while let Ok(result) = receiver.recv().await {
+                let js_value = to_js(&result).unwrap_or(JsValue::NULL);
+                let _ = callback.call1(&JsValue::NULL, &js_value);
+            }
+        });
+
+        Ok(WasmTraversalSubscription {
             inner: Some(subscription),
         })
     }
@@ -1445,12 +1606,20 @@ impl WasmSubscription {
     }
 }
 
+#[wasm_bindgen(js_class = TraversalSubscription)]
+impl WasmTraversalSubscription {
+    pub fn cancel(&mut self) {
+        self.inner.take();
+    }
+}
+
 fn remote_result_kind(result: &RemoteResult) -> &'static str {
     match result {
         RemoteResult::Get { .. } => "get",
         RemoteResult::Map { .. } => "map",
         RemoteResult::Query { .. } => "query",
         RemoteResult::Lex { .. } => "lex",
+        RemoteResult::Node { .. } => "node",
         RemoteResult::Snapshot { .. } => "snapshot",
     }
 }
@@ -1465,6 +1634,7 @@ fn remote_result_to_js(result: &RemoteResult) -> std::result::Result<JsValue, Js
             map_entries_to_js(entries)
         }
         RemoteResult::Lex { entries } => lex_entries_to_js(entries),
+        RemoteResult::Node { node } => to_js(node),
         RemoteResult::Snapshot { snapshot } => to_js(snapshot),
     }
 }
@@ -1709,6 +1879,15 @@ impl WasmWebSocketSync {
         start_remote_watch_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
     }
 
+    #[wasm_bindgen(js_name = watchRemoteNode)]
+    pub fn watch_remote_node(
+        &self,
+        peer_id: String,
+        id: String,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        start_remote_watch_state(&self.state, peer_id, PullRequestKind::Node { id })
+    }
+
     #[wasm_bindgen(js_name = watchRemoteSnapshot)]
     pub fn watch_remote_snapshot(
         &self,
@@ -1785,6 +1964,22 @@ impl WasmWebSocketSync {
         }
     }
 
+    #[wasm_bindgen(js_name = remoteNode)]
+    pub async fn remote_node(
+        &self,
+        peer_id: String,
+        id: String,
+    ) -> std::result::Result<JsValue, JsValue> {
+        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Node { id })
+            .await?
+        {
+            RemoteResult::Node { node } => to_js(&node),
+            other => Err(JsValue::from_str(&format!(
+                "expected node result, received {other:?}"
+            ))),
+        }
+    }
+
     #[wasm_bindgen(js_name = remoteSnapshot)]
     pub async fn remote_snapshot(
         &self,
@@ -1819,6 +2014,9 @@ impl WasmWebSocketSync {
 
 impl WasmWebSocketSync {
     fn teardown(&mut self) {
+        if let Some(id) = self.node_fetch_registration.take() {
+            self.state.borrow().db.unregister_node_fetch_scheduler(id);
+        }
         self.state.borrow().socket.set_onmessage(None);
         self.state.borrow().socket.set_onopen(None);
         self.state.borrow().socket.set_onclose(None);
@@ -1948,6 +2146,15 @@ impl WasmWebRtcMesh {
         start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
     }
 
+    #[wasm_bindgen(js_name = watchRemoteNode)]
+    pub fn watch_remote_node(
+        &self,
+        peer_id: String,
+        id: String,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Node { id })
+    }
+
     #[wasm_bindgen(js_name = watchRemoteSnapshot)]
     pub fn watch_remote_snapshot(
         &self,
@@ -1974,6 +2181,9 @@ impl WasmWebRtcMesh {
 
 impl WasmWebRtcMesh {
     fn teardown(&mut self) -> std::result::Result<(), JsValue> {
+        if let Some(id) = self.node_fetch_registration.take() {
+            self.state.borrow().db.unregister_node_fetch_scheduler(id);
+        }
         let _ = post_mesh_leave_signal_state(&self.state);
         if let Some(interval_id) = self.retry_interval_id.take() {
             browser_window()?.clear_interval_with_handle(interval_id);
@@ -3283,6 +3493,10 @@ fn apply_response_body_state(
             }
             None
         }
+        PullResponseBody::Node { node } => {
+            *accumulator = PullAccumulator::Node { node: node.clone() };
+            None
+        }
         PullResponseBody::Snapshot {
             clock,
             nodes,
@@ -3319,6 +3533,7 @@ impl PullAccumulator {
             PullRequestKind::Lex { .. } => Self::Lex {
                 entries: Vec::new(),
             },
+            PullRequestKind::Node { .. } => Self::Node { node: None },
             PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
                 nodes: BTreeMap::new(),
@@ -3333,6 +3548,7 @@ impl PullAccumulator {
             Self::Map { entries } => Ok(RemoteResult::Map { entries }),
             Self::Query { entries } => Ok(RemoteResult::Query { entries }),
             Self::Lex { entries } => Ok(RemoteResult::Lex { entries }),
+            Self::Node { node } => Ok(RemoteResult::Node { node }),
             Self::Snapshot {
                 clock,
                 nodes,

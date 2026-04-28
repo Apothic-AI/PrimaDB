@@ -26,6 +26,10 @@ use crate::sync::{
     PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
     RemoteResult, SyncEnvelope, SyncFrame,
 };
+use crate::traversal::{
+    TraversalDirection, TraversalEdge, TraversalEdgeKind, TraversalEntry, TraversalResult,
+    TraversalSpec, TraversalStrategy,
+};
 use crate::value::{FieldState, FieldValue, NodeId, NodeState, SetState};
 #[cfg(feature = "crypto")]
 use crate::{
@@ -87,6 +91,20 @@ pub struct ChangeSubscription {
     inner: Arc<ChangeSubscriptionInner>,
 }
 
+pub struct TraversalSubscription {
+    inner: Arc<TraversalSubscriptionInner>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub trait NodeFetchScheduler: Send + Sync {
+    fn fetch_nodes(&self, nodes: Vec<NodeId>);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait NodeFetchScheduler {
+    fn fetch_nodes(&self, nodes: Vec<NodeId>);
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryBuilder {
     chain: Chain,
@@ -118,14 +136,22 @@ struct ChangeSubscriptionInner {
     receiver: Receiver<ChangeEvent>,
 }
 
+struct TraversalSubscriptionInner {
+    id: u64,
+    db: Weak<Mutex<Inner>>,
+    receiver: Receiver<TraversalResult>,
+}
+
 struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
     pending_ops: Vec<Operation>,
     unflushed_ops: Vec<Operation>,
     subscriptions: std::collections::BTreeMap<u64, Watcher>,
+    traversal_subscriptions: std::collections::BTreeMap<u64, TraversalWatcher>,
     change_subscriptions: std::collections::BTreeMap<u64, ChangeWatcher>,
     next_subscription_id: u64,
+    next_traversal_subscription_id: u64,
     next_change_subscription_id: u64,
     change_revision: u64,
     persistence: Option<PersistenceTarget>,
@@ -133,11 +159,60 @@ struct Inner {
     storage_engine: Option<Arc<dyn IncrementalStore>>,
     blob_store: Option<Arc<dyn BlobStore>>,
     missing_nodes: BTreeSet<NodeId>,
+    relationship_index: RelationshipIndex,
+    node_fetch_schedulers: BTreeMap<u64, Arc<dyn NodeFetchScheduler>>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    next_node_fetch_scheduler_id: u64,
+    scheduled_node_fetches: BTreeSet<NodeId>,
     next_storage_tx_id: u64,
     limits: PrimadbLimits,
     network_hooks: Option<Arc<dyn NetworkHooks>>,
     #[cfg(feature = "crypto")]
     security: SecurityState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RelationshipIndex {
+    outbound: BTreeMap<NodeId, BTreeSet<TraversalEdge>>,
+    inbound: BTreeMap<NodeId, BTreeSet<TraversalEdge>>,
+}
+
+#[derive(Debug, Clone)]
+struct TraversalFrame {
+    node: NodeId,
+    depth: usize,
+    path: Vec<NodeId>,
+    via: Option<TraversalEdge>,
+}
+
+impl RelationshipIndex {
+    fn insert(&mut self, edge: TraversalEdge) {
+        self.outbound
+            .entry(edge.source.clone())
+            .or_default()
+            .insert(edge.clone());
+        self.inbound
+            .entry(edge.target.clone())
+            .or_default()
+            .insert(edge);
+    }
+
+    fn remove_source(&mut self, source: &str) {
+        let Some(edges) = self.outbound.remove(source) else {
+            return;
+        };
+        for edge in edges {
+            let remove_target = if let Some(inbound) = self.inbound.get_mut(&edge.target) {
+                inbound.remove(&edge);
+                inbound.is_empty()
+            } else {
+                false
+            };
+            if remove_target {
+                self.inbound.remove(&edge.target);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +227,16 @@ struct Watcher {
 #[derive(Debug, Clone)]
 struct ChangeWatcher {
     sender: Sender<ChangeEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct TraversalWatcher {
+    anchor: NodeId,
+    segments: Vec<String>,
+    spec: TraversalSpec,
+    dependency_paths: BTreeSet<String>,
+    last_hash: Option<String>,
+    sender: Sender<TraversalResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -244,8 +329,10 @@ impl Primadb {
                 pending_ops: Vec::new(),
                 unflushed_ops: Vec::new(),
                 subscriptions: Default::default(),
+                traversal_subscriptions: Default::default(),
                 change_subscriptions: Default::default(),
                 next_subscription_id: 0,
+                next_traversal_subscription_id: 0,
                 next_change_subscription_id: 0,
                 change_revision: 0,
                 persistence: None,
@@ -253,6 +340,10 @@ impl Primadb {
                 storage_engine: None,
                 blob_store: None,
                 missing_nodes: BTreeSet::new(),
+                relationship_index: RelationshipIndex::default(),
+                node_fetch_schedulers: BTreeMap::new(),
+                next_node_fetch_scheduler_id: 0,
+                scheduled_node_fetches: BTreeSet::new(),
                 next_storage_tx_id: 1,
                 limits: PrimadbLimits::default(),
                 network_hooks: None,
@@ -364,6 +455,8 @@ impl Primadb {
             inner.pending_ops = snapshot.pending_ops;
             inner.unflushed_ops.clear();
             inner.missing_nodes.clear();
+            inner.scheduled_node_fetches.clear();
+            inner.rebuild_relationship_index();
         }
         self.finalize_change(ChangeImpact::full_refresh())
     }
@@ -390,6 +483,8 @@ impl Primadb {
             };
             inner.unflushed_ops.clear();
             inner.missing_nodes.clear();
+            inner.scheduled_node_fetches.clear();
+            inner.rebuild_relationship_index();
         }
         self.finalize_change(ChangeImpact::full_refresh())
     }
@@ -557,6 +652,67 @@ impl Primadb {
         self.scan_at(&path.anchor, &path.segments, spec)
     }
 
+    pub fn traverse_path(
+        &self,
+        path: &RemotePath,
+        spec: &TraversalSpec,
+    ) -> Result<TraversalResult> {
+        self.traverse_at(&path.anchor, &path.segments, spec)
+    }
+
+    pub fn node_state(&self, id: &str) -> Result<Option<NodeState>> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.maybe_load_node(id)? {
+            Ok(inner.nodes.get(id).cloned())
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn apply_node_state(&self, node: NodeState) -> Result<bool> {
+        let node_id = node.id.clone();
+        let changed = {
+            let mut inner = self.inner.lock().unwrap();
+            let before = inner.nodes.get(&node_id).cloned();
+            observe_node_state(&mut inner.clock, &node);
+            merge_node_state(&mut inner.nodes, node);
+            inner.missing_nodes.remove(&node_id);
+            inner.scheduled_node_fetches.remove(&node_id);
+            inner.reindex_node_relationships(&node_id);
+            inner.nodes.get(&node_id).cloned() != before
+        };
+        if changed {
+            self.finalize_change(ChangeImpact {
+                data_changed: true,
+                full_refresh: false,
+                touched_paths: vec![node_id],
+            })?;
+        }
+        Ok(changed)
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn register_node_fetch_scheduler(
+        &self,
+        scheduler: Arc<dyn NodeFetchScheduler>,
+    ) -> u64 {
+        let mut inner = self.inner.lock().unwrap();
+        inner.next_node_fetch_scheduler_id = inner.next_node_fetch_scheduler_id.saturating_add(1);
+        let id = inner.next_node_fetch_scheduler_id;
+        inner.node_fetch_schedulers.insert(id, scheduler);
+        id
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn unregister_node_fetch_scheduler(&self, id: u64) {
+        self.inner.lock().unwrap().node_fetch_schedulers.remove(&id);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn clear_scheduled_node_fetch(&self, id: &str) {
+        self.inner.lock().unwrap().scheduled_node_fetches.remove(id);
+    }
+
     pub fn snapshot_for_root(&self, root: Option<&str>) -> DatabaseSnapshot {
         let (engine, clock, pending_ops, loaded_nodes) = {
             let inner = self.inner.lock().unwrap();
@@ -616,6 +772,9 @@ impl Primadb {
             }),
             PullRequestKind::Lex { path, spec } => Ok(RemoteResult::Lex {
                 entries: self.lex_path(path, spec)?,
+            }),
+            PullRequestKind::Node { id } => Ok(RemoteResult::Node {
+                node: self.node_state(id)?,
             }),
             PullRequestKind::Snapshot { root } => Ok(RemoteResult::Snapshot {
                 snapshot: self.snapshot_for_root(root.as_deref()),
@@ -1035,10 +1194,14 @@ impl Primadb {
                 inner.unflushed_ops.clear();
                 inner.nodes.clear();
                 inner.missing_nodes.clear();
+                inner.scheduled_node_fetches.clear();
+                inner.relationship_index = RelationshipIndex::default();
                 inner.next_storage_tx_id = metadata.next_tx_id.max(1);
             } else {
                 inner.next_storage_tx_id = 1;
                 inner.missing_nodes.clear();
+                inner.scheduled_node_fetches.clear();
+                inner.relationship_index = RelationshipIndex::default();
             }
             inner.storage_engine = Some(store);
         }
@@ -1226,6 +1389,7 @@ impl Primadb {
         self.persist_if_needed()?;
         if event.data_changed {
             self.notify_subscribers(&event)?;
+            self.notify_traversal_subscribers(&event)?;
         }
         self.notify_change_subscribers(event)?;
         Ok(())
@@ -1328,6 +1492,47 @@ impl Primadb {
         }
 
         Ok(entries)
+    }
+
+    fn traverse_at(
+        &self,
+        anchor: &str,
+        segments: &[String],
+        spec: &TraversalSpec,
+    ) -> Result<TraversalResult> {
+        let (mut result, fetch_candidates, schedulers) = {
+            let mut inner = self.inner.lock().unwrap();
+            let result = inner.traverse_at(anchor, segments, spec)?;
+            let fetch_candidates = if spec.fetch_missing && spec.max_fetches > 0 {
+                inner.reserve_node_fetches(&result.missing, spec.max_fetches)
+            } else {
+                Vec::new()
+            };
+            let schedulers = if fetch_candidates.is_empty() {
+                Vec::new()
+            } else {
+                inner
+                    .node_fetch_schedulers
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            (result, fetch_candidates, schedulers)
+        };
+
+        if !fetch_candidates.is_empty() && !schedulers.is_empty() {
+            result.fetched = fetch_candidates.len();
+            for scheduler in schedulers {
+                scheduler.fetch_nodes(fetch_candidates.clone());
+            }
+        } else if !fetch_candidates.is_empty() {
+            self.inner
+                .lock()
+                .unwrap()
+                .release_reserved_node_fetches(&fetch_candidates);
+        }
+
+        Ok(result)
     }
 
     fn query_with_storage_indexes(
@@ -1523,6 +1728,46 @@ impl Primadb {
         })
     }
 
+    fn subscribe_to_traversal(
+        &self,
+        anchor: &str,
+        segments: &[String],
+        spec: TraversalSpec,
+    ) -> Result<TraversalSubscription> {
+        let result = self.traverse_at(anchor, segments, &spec)?;
+        let dependency_paths = traversal_dependency_paths(anchor, segments, &result);
+        let last_hash = crate::stable_content_hash(&result);
+
+        let (sender, receiver) = async_channel::unbounded();
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_traversal_subscription_id =
+                inner.next_traversal_subscription_id.saturating_add(1);
+            let id = inner.next_traversal_subscription_id;
+            inner.traversal_subscriptions.insert(
+                id,
+                TraversalWatcher {
+                    anchor: anchor.to_owned(),
+                    segments: segments.to_vec(),
+                    spec,
+                    dependency_paths,
+                    last_hash,
+                    sender: sender.clone(),
+                },
+            );
+            id
+        };
+        let _ = sender.try_send(result);
+
+        Ok(TraversalSubscription {
+            inner: Arc::new(TraversalSubscriptionInner {
+                id,
+                db: Arc::downgrade(&self.inner),
+                receiver,
+            }),
+        })
+    }
+
     fn notify_subscribers(&self, event: &ChangeEvent) -> Result<()> {
         let watchers: Vec<(u64, Watcher)> = {
             let inner = self.inner.lock().unwrap();
@@ -1562,6 +1807,52 @@ impl Primadb {
             }
             for id in stale {
                 inner.subscriptions.remove(&id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn notify_traversal_subscribers(&self, event: &ChangeEvent) -> Result<()> {
+        let watchers: Vec<(u64, TraversalWatcher)> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .traversal_subscriptions
+                .iter()
+                .map(|(id, watcher)| (*id, watcher.clone()))
+                .collect()
+        };
+
+        let mut stale = Vec::new();
+        let mut updates = Vec::new();
+        for (id, watcher) in watchers {
+            if !event.full_refresh && !traversal_watch_change_overlaps(&watcher, event) {
+                continue;
+            }
+            let result = self.traverse_at(&watcher.anchor, &watcher.segments, &watcher.spec)?;
+            let result_hash = crate::stable_content_hash(&result);
+            if result_hash == watcher.last_hash {
+                continue;
+            }
+            let dependency_paths =
+                traversal_dependency_paths(&watcher.anchor, &watcher.segments, &result);
+            if watcher.sender.try_send(result).is_err() {
+                stale.push(id);
+            } else {
+                updates.push((id, result_hash, dependency_paths));
+            }
+        }
+
+        if !stale.is_empty() || !updates.is_empty() {
+            let mut inner = self.inner.lock().unwrap();
+            for (id, hash, dependency_paths) in updates {
+                if let Some(watcher) = inner.traversal_subscriptions.get_mut(&id) {
+                    watcher.last_hash = hash;
+                    watcher.dependency_paths = dependency_paths;
+                }
+            }
+            for id in stale {
+                inner.traversal_subscriptions.remove(&id);
             }
         }
 
@@ -1917,6 +2208,10 @@ impl Chain {
         self.db.query_at(&self.anchor, &self.segments, &spec)
     }
 
+    pub fn traverse(&self, spec: TraversalSpec) -> Result<TraversalResult> {
+        self.db.traverse_at(&self.anchor, &self.segments, &spec)
+    }
+
     pub fn first(&self, spec: QuerySpec) -> Result<Option<MapEntry>> {
         let mut entries = self.query(spec)?;
         Ok(entries.drain(..).next())
@@ -1924,6 +2219,11 @@ impl Chain {
 
     pub fn subscribe(&self) -> Result<Subscription> {
         self.db.subscribe_to(&self.anchor, &self.segments)
+    }
+
+    pub fn watch_traverse(&self, spec: TraversalSpec) -> Result<TraversalSubscription> {
+        self.db
+            .subscribe_to_traversal(&self.anchor, &self.segments, spec)
     }
 }
 
@@ -2123,6 +2423,25 @@ impl ChangeSubscription {
     }
 }
 
+impl TraversalSubscription {
+    pub fn receiver(&self) -> Receiver<TraversalResult> {
+        self.inner.receiver.clone()
+    }
+
+    pub async fn recv(&self) -> Option<TraversalResult> {
+        self.inner.receiver.recv().await.ok()
+    }
+
+    pub fn try_recv(&self) -> Option<TraversalResult> {
+        self.inner.receiver.try_recv().ok()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn recv_blocking(&self) -> Option<TraversalResult> {
+        self.inner.receiver.recv_blocking().ok()
+    }
+}
+
 impl Clone for Subscription {
     fn clone(&self) -> Self {
         Self {
@@ -2132,6 +2451,14 @@ impl Clone for Subscription {
 }
 
 impl Clone for ChangeSubscription {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Clone for TraversalSubscription {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -2159,10 +2486,312 @@ impl Drop for ChangeSubscriptionInner {
     }
 }
 
+impl Drop for TraversalSubscriptionInner {
+    fn drop(&mut self) {
+        if let Some(db) = self.db.upgrade() {
+            if let Ok(mut inner) = db.lock() {
+                inner.traversal_subscriptions.remove(&self.id);
+            }
+        }
+    }
+}
+
 impl Inner {
+    fn traverse_at(
+        &mut self,
+        anchor: &str,
+        segments: &[String],
+        spec: &TraversalSpec,
+    ) -> Result<TraversalResult> {
+        let (starts, mut missing) = self.resolve_traversal_starts(anchor, segments)?;
+        let edge_fields = spec
+            .edge_fields
+            .as_ref()
+            .map(|fields| fields.iter().cloned().collect::<BTreeSet<_>>());
+        let limit = spec.limit.unwrap_or(usize::MAX);
+        let mut frontier = std::collections::VecDeque::new();
+        for start in starts {
+            frontier.push_back(TraversalFrame {
+                node: start.clone(),
+                depth: 0,
+                path: vec![start],
+                via: None,
+            });
+        }
+
+        let mut entries = Vec::new();
+        let mut visited = BTreeSet::new();
+        let mut missing_set = missing.drain(..).collect::<BTreeSet<_>>();
+        let mut depth_limit_reached = false;
+        let mut result_limit_reached = false;
+
+        while let Some(frame) = match spec.strategy {
+            TraversalStrategy::Bfs => frontier.pop_front(),
+            TraversalStrategy::Dfs => frontier.pop_back(),
+        } {
+            if !visited.insert(frame.node.clone()) {
+                continue;
+            }
+
+            if !self.maybe_load_node(&frame.node)? {
+                missing_set.insert(frame.node);
+                continue;
+            }
+
+            let should_emit = frame.depth > 0 || spec.include_start;
+            if should_emit {
+                let (matches, value) = self.traversal_node_match_and_value(&frame.node, spec)?;
+                if matches {
+                    if entries.len() >= limit {
+                        result_limit_reached = true;
+                        break;
+                    }
+                    entries.push(TraversalEntry {
+                        node_id: frame.node.clone(),
+                        depth: frame.depth,
+                        path: frame.path.clone(),
+                        via: frame.via.clone(),
+                        value,
+                    });
+                }
+            }
+
+            let edges = self.traversal_edges(&frame.node, spec, edge_fields.as_ref())?;
+            if frame.depth >= spec.max_depth {
+                if !edges.is_empty() {
+                    depth_limit_reached = true;
+                }
+                continue;
+            }
+
+            for edge in edges {
+                let next = if edge.source == frame.node {
+                    edge.target.clone()
+                } else {
+                    edge.source.clone()
+                };
+                if visited.contains(&next) {
+                    continue;
+                }
+                let mut path = frame.path.clone();
+                path.push(next.clone());
+                frontier.push_back(TraversalFrame {
+                    node: next,
+                    depth: frame.depth + 1,
+                    path,
+                    via: Some(edge),
+                });
+            }
+        }
+
+        let missing = missing_set.into_iter().collect::<Vec<_>>();
+        let complete = missing.is_empty() && !depth_limit_reached && !result_limit_reached;
+        Ok(TraversalResult {
+            entries,
+            complete,
+            timed_out: false,
+            depth_limit_reached,
+            result_limit_reached,
+            fetched: 0,
+            missing,
+            denied: Vec::new(),
+        })
+    }
+
+    fn resolve_traversal_starts(
+        &mut self,
+        anchor: &str,
+        segments: &[String],
+    ) -> Result<(Vec<NodeId>, Vec<NodeId>)> {
+        match self.resolve_cursor(anchor, segments)? {
+            Some(Cursor::Node(node)) => Ok((vec![node], Vec::new())),
+            Some(Cursor::Field { node, field }) => {
+                let Some(value) = self
+                    .nodes
+                    .get(&node)
+                    .and_then(|node_state| node_state.fields.get(&field))
+                    .map(|field_state| field_state.value.clone())
+                else {
+                    return Ok((Vec::new(), Vec::new()));
+                };
+                match value {
+                    FieldValue::Link(target) => Ok((vec![target], Vec::new())),
+                    FieldValue::Set(set) => Ok((set.members.keys().cloned().collect(), Vec::new())),
+                    FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {
+                        Ok((Vec::new(), Vec::new()))
+                    }
+                }
+            }
+            None => Ok((Vec::new(), vec![anchor.to_owned()])),
+        }
+    }
+
+    fn traversal_edges(
+        &mut self,
+        node: &str,
+        spec: &TraversalSpec,
+        edge_fields: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<TraversalEdge>> {
+        let _ = self.maybe_load_node(node)?;
+        let mut edges = Vec::new();
+        if matches!(
+            spec.direction,
+            TraversalDirection::Outbound | TraversalDirection::Both
+        ) {
+            if let Some(outbound) = self.relationship_index.outbound.get(node) {
+                edges.extend(outbound.iter().cloned());
+            }
+        }
+        if matches!(
+            spec.direction,
+            TraversalDirection::Inbound | TraversalDirection::Both
+        ) {
+            if let Some(inbound) = self.relationship_index.inbound.get(node) {
+                edges.extend(inbound.iter().cloned());
+            }
+        }
+        edges.retain(|edge| {
+            edge_fields.is_none_or(|fields| fields.contains(&edge.field))
+                && match edge.kind {
+                    TraversalEdgeKind::Link => spec.follow_links,
+                    TraversalEdgeKind::SetMember => spec.follow_sets,
+                }
+        });
+        edges.sort_unstable();
+        edges.dedup();
+        Ok(edges)
+    }
+
+    fn traversal_node_match_and_value(
+        &mut self,
+        node: &str,
+        spec: &TraversalSpec,
+    ) -> Result<(bool, Option<JsonValue>)> {
+        let needs_value = spec.include_values || !spec.filters.is_empty();
+        if !needs_value {
+            return Ok((true, None));
+        }
+        let Some(value) = self.materialize_node_shallow(node)? else {
+            return Ok((false, None));
+        };
+        let entry = MapEntry {
+            key: node.to_owned(),
+            value: value.clone(),
+        };
+        let matches = spec
+            .filters
+            .iter()
+            .all(|filter| matches_filter(&entry, filter));
+        Ok((matches, spec.include_values.then_some(value)))
+    }
+
+    fn materialize_node_shallow(&mut self, node: &str) -> Result<Option<JsonValue>> {
+        if !self.maybe_load_node(node)? {
+            return Ok(None);
+        }
+        let Some(state) = self.nodes.get(node).cloned() else {
+            return Ok(None);
+        };
+        let mut object = Map::new();
+        object.insert("$id".to_owned(), JsonValue::String(state.id.clone()));
+        for (field, state) in state.fields {
+            object.insert(
+                field.clone(),
+                self.materialize_field_shallow(node, &field, &state.value),
+            );
+        }
+        Ok(Some(JsonValue::Object(object)))
+    }
+
+    fn materialize_field_shallow(&self, node: &str, field: &str, value: &FieldValue) -> JsonValue {
+        let field_path = format!("{node}/{field}");
+        match value {
+            FieldValue::Scalar(value) => self.materialize_scalar(&field_path, value),
+            FieldValue::Bytes(bytes) => bytes_marker_value(bytes),
+            FieldValue::Blob(reference) => blob_marker_value(reference),
+            FieldValue::Link(target) => JsonValue::Object(Map::from_iter([(
+                "$link".to_owned(),
+                JsonValue::String(target.clone()),
+            )])),
+            FieldValue::Set(set) => JsonValue::Object(Map::from_iter([(
+                "$set".to_owned(),
+                JsonValue::Array(
+                    set.members
+                        .keys()
+                        .map(|member| {
+                            JsonValue::Object(Map::from_iter([(
+                                "$link".to_owned(),
+                                JsonValue::String(member.clone()),
+                            )]))
+                        })
+                        .collect(),
+                ),
+            )])),
+        }
+    }
+
+    fn reserve_node_fetches(&mut self, nodes: &[NodeId], max_fetches: usize) -> Vec<NodeId> {
+        let mut reserved = Vec::new();
+        for node in nodes {
+            if reserved.len() >= max_fetches {
+                break;
+            }
+            if self.scheduled_node_fetches.insert(node.clone()) {
+                reserved.push(node.clone());
+            }
+        }
+        reserved
+    }
+
+    fn release_reserved_node_fetches(&mut self, nodes: &[NodeId]) {
+        for node in nodes {
+            self.scheduled_node_fetches.remove(node);
+        }
+    }
+
+    fn rebuild_relationship_index(&mut self) {
+        self.relationship_index = RelationshipIndex::default();
+        let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
+        for node in node_ids {
+            self.reindex_node_relationships(&node);
+        }
+    }
+
+    fn reindex_node_relationships(&mut self, node: &str) {
+        self.relationship_index.remove_source(node);
+        let Some(state) = self.nodes.get(node) else {
+            return;
+        };
+        for (field, field_state) in &state.fields {
+            match &field_state.value {
+                FieldValue::Link(target) => {
+                    self.relationship_index.insert(TraversalEdge {
+                        source: node.to_owned(),
+                        field: field.clone(),
+                        target: target.clone(),
+                        kind: TraversalEdgeKind::Link,
+                    });
+                }
+                FieldValue::Set(set) => {
+                    for target in set.members.keys() {
+                        self.relationship_index.insert(TraversalEdge {
+                            source: node.to_owned(),
+                            field: field.clone(),
+                            target: target.clone(),
+                            kind: TraversalEdgeKind::SetMember,
+                        });
+                    }
+                }
+                FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
+            }
+        }
+    }
+
     fn maybe_load_node(&mut self, node: &str) -> Result<bool> {
-        if self.nodes.contains_key(node) {
-            return Ok(true);
+        if let Some(existing) = self.nodes.get(node) {
+            if !node_state_is_empty(existing) || self.storage_engine.is_none() {
+                return Ok(true);
+            }
         }
         if self.missing_nodes.contains(node) {
             return Ok(false);
@@ -2172,13 +2801,18 @@ impl Inner {
         };
         match engine.get_node(node)? {
             Some(node_state) => {
-                self.nodes.insert(node.to_owned(), node_state);
+                merge_node_state(&mut self.nodes, node_state);
                 self.missing_nodes.remove(node);
+                self.reindex_node_relationships(node);
                 Ok(true)
             }
             None => {
-                self.missing_nodes.insert(node.to_owned());
-                Ok(false)
+                if self.nodes.contains_key(node) {
+                    Ok(true)
+                } else {
+                    self.missing_nodes.insert(node.to_owned());
+                    Ok(false)
+                }
             }
         }
     }
@@ -2372,7 +3006,6 @@ impl Inner {
                 );
             }
             ParsedInput::Link(target) => {
-                self.ensure_node(&target);
                 self.set_field(
                     node.to_owned(),
                     field.to_owned(),
@@ -2401,10 +3034,7 @@ impl Inner {
                 let mut ids = Vec::new();
                 for (index, member) in members.into_iter().enumerate() {
                     match member {
-                        SetMember::Link(target) => {
-                            self.ensure_node(&target);
-                            ids.push(target);
-                        }
+                        SetMember::Link(target) => ids.push(target),
                         SetMember::Object(object) => {
                             let member_id = self.clock.next_node_id(&format!("{field}-member"));
                             self.ensure_node(&member_id);
@@ -2460,7 +3090,6 @@ impl Inner {
                 );
             }
             ParsedInput::Link(target) => {
-                self.ensure_node(&target);
                 self.set_field(
                     node.to_owned(),
                     field.to_owned(),
@@ -2489,10 +3118,7 @@ impl Inner {
                 let mut ids = Vec::new();
                 for member in members {
                     match member {
-                        SetMember::Link(target) => {
-                            self.ensure_node(&target);
-                            ids.push(target);
-                        }
+                        SetMember::Link(target) => ids.push(target),
                         SetMember::Object(object) => {
                             let member_id = self.allocate_member_id_for_path(path, field);
                             self.ensure_node(&member_id);
@@ -2520,10 +3146,7 @@ impl Inner {
         path: &str,
     ) -> Result<String> {
         let member_id = match parsed {
-            ParsedInput::Link(target) => {
-                self.ensure_node(&target);
-                target
-            }
+            ParsedInput::Link(target) => target,
             ParsedInput::Object(object) => {
                 let member_id = self.clock.next_node_id(&format!("{field}-member"));
                 self.ensure_node(&member_id);
@@ -2554,10 +3177,7 @@ impl Inner {
         certificate: Option<&str>,
     ) -> Result<String> {
         let member_id = match parsed {
-            ParsedInput::Link(target) => {
-                self.ensure_node(&target);
-                target
-            }
+            ParsedInput::Link(target) => target,
             ParsedInput::Object(object) => {
                 let member_id = self.allocate_member_id_for_path(path, field);
                 self.ensure_node(&member_id);
@@ -2685,17 +3305,6 @@ impl Inner {
 
         let accepted = match &op.action {
             OperationAction::SetField { node, field, value } => {
-                let links_to_ensure: Vec<NodeId> = match value {
-                    OperationValue::Scalar(_)
-                    | OperationValue::Bytes(_)
-                    | OperationValue::Blob(_) => Vec::new(),
-                    OperationValue::Link(target) => vec![target.clone()],
-                    OperationValue::Set(members) => members.clone(),
-                };
-                for target in &links_to_ensure {
-                    self.ensure_node(target);
-                }
-
                 let state = self
                     .nodes
                     .entry(node.clone())
@@ -2746,7 +3355,6 @@ impl Inner {
                 field,
                 member,
             } => {
-                self.ensure_node(member);
                 let state = self
                     .nodes
                     .entry(node.clone())
@@ -2930,6 +3538,8 @@ impl Inner {
         };
 
         if accepted {
+            let source = operation_source_node(&op).to_owned();
+            self.reindex_node_relationships(&source);
             self.unflushed_ops.push(op.clone());
         }
 
@@ -3183,12 +3793,48 @@ fn watch_change_overlaps(path: &str, event: &ChangeEvent) -> bool {
             .any(|changed| path_overlaps(path, changed))
 }
 
+fn traversal_dependency_paths(
+    anchor: &str,
+    segments: &[String],
+    result: &TraversalResult,
+) -> BTreeSet<String> {
+    let mut paths = BTreeSet::from([watch_path_key(anchor, segments)]);
+    for entry in &result.entries {
+        paths.insert(entry.node_id.clone());
+        if let Some(edge) = &entry.via {
+            paths.insert(edge.source.clone());
+            paths.insert(format!("{}/{}", edge.source, edge.field));
+            paths.insert(edge.target.clone());
+        }
+    }
+    paths.extend(result.missing.iter().cloned());
+    paths.extend(result.denied.iter().cloned());
+    paths
+}
+
+fn traversal_watch_change_overlaps(watcher: &TraversalWatcher, event: &ChangeEvent) -> bool {
+    event.full_refresh
+        || watcher
+            .dependency_paths
+            .iter()
+            .any(|path| watch_change_overlaps(path, event))
+}
+
 fn operation_touched_path(op: &Operation) -> String {
     match &op.action {
         OperationAction::SetField { node, field, .. }
         | OperationAction::AddSetMember { node, field, .. }
         | OperationAction::RemoveSetMember { node, field, .. }
         | OperationAction::DeleteField { node, field } => format!("{node}/{field}"),
+    }
+}
+
+fn operation_source_node(op: &Operation) -> &str {
+    match &op.action {
+        OperationAction::SetField { node, .. }
+        | OperationAction::AddSetMember { node, .. }
+        | OperationAction::RemoveSetMember { node, .. }
+        | OperationAction::DeleteField { node, .. } => node,
     }
 }
 
@@ -3347,6 +3993,8 @@ fn merge_snapshot_into_inner(inner: &mut Inner, snapshot: DatabaseSnapshot) {
         merge_node_state(&mut inner.nodes, node);
     }
     inner.missing_nodes.clear();
+    inner.scheduled_node_fetches.clear();
+    inner.rebuild_relationship_index();
 }
 
 fn observe_node_state(clock: &mut HybridClock, node: &NodeState) {
@@ -3365,6 +4013,10 @@ fn observe_node_state(clock: &mut HybridClock, node: &NodeState) {
             }
         }
     }
+}
+
+fn node_state_is_empty(node: &NodeState) -> bool {
+    node.fields.is_empty() && node.tombstones.is_empty()
 }
 
 fn merge_node_state(nodes: &mut BTreeMap<NodeId, NodeState>, incoming: NodeState) {
@@ -3569,6 +4221,12 @@ fn build_pull_responses(
             entries,
             limits.max_query_entries_per_chunk.max(1),
         ),
+        RemoteResult::Node { node } => vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::Node { node },
+        }],
         RemoteResult::Snapshot { snapshot } => {
             let node_chunks =
                 chunk_btree_map(snapshot.nodes, limits.max_snapshot_nodes_per_chunk.max(1));
@@ -4114,11 +4772,12 @@ fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Primadb;
+    use super::{NodeFetchScheduler, Primadb};
     use crate::{
         ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PullRequest,
         PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec, RemotePath,
-        Result, RoomHookContext, ServeRequestContext, ServeResultContext,
+        Result, RoomHookContext, ServeRequestContext, ServeResultContext, TraversalDirection,
+        TraversalSpec,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -4327,6 +4986,285 @@ mod tests {
         assert_eq!(results[0].value["name"], "Carol");
         assert_eq!(results[1].value["name"], "Alice");
         Ok(())
+    }
+
+    #[test]
+    fn traverse_walks_outbound_links_without_materializing_whole_graph() -> Result<()> {
+        let db = Primadb::with_replica_id("traverse-a");
+        db.root("people").field("alice").put(json!({
+            "name": "Alice",
+            "friend": {"$link": "people/bob"}
+        }))?;
+        db.root("people").field("bob").put(json!({
+            "name": "Bob",
+            "friend": {"$link": "people/alice"}
+        }))?;
+
+        let result = db.root("people").field("alice").traverse(TraversalSpec {
+            max_depth: 2,
+            include_values: true,
+            ..TraversalSpec::default()
+        })?;
+
+        assert!(result.complete);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].node_id, "people/bob");
+        assert_eq!(result.entries[0].depth, 1);
+        assert_eq!(result.entries[0].value.as_ref().unwrap()["name"], "Bob");
+        assert_eq!(
+            result.entries[0].value.as_ref().unwrap()["friend"],
+            json!({"$link": "people/alice"})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn traverse_uses_reverse_relationship_index_for_inbound_edges() -> Result<()> {
+        let db = Primadb::with_replica_id("traverse-b");
+        db.root("people").field("alice").put(json!({
+            "name": "Alice",
+            "friend": {"$link": "people/bob"}
+        }))?;
+        db.root("people").field("bob").put(json!({"name": "Bob"}))?;
+
+        let result = db.root("people").field("bob").traverse(TraversalSpec {
+            direction: TraversalDirection::Inbound,
+            max_depth: 2,
+            include_values: true,
+            ..TraversalSpec::default()
+        })?;
+
+        assert!(result.complete);
+        assert!(result.entries.iter().any(|entry| {
+            entry.node_id == "people/alice" && entry.via.as_ref().unwrap().field == "friend"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn traverse_respects_set_edges_field_filters_and_limits() -> Result<()> {
+        let db = Primadb::with_replica_id("traverse-c");
+        db.root("people")
+            .field("alice")
+            .put(json!({"name": "Alice"}))?;
+        db.root("people").field("bob").put(json!({"name": "Bob"}))?;
+        db.root("rooms").field("lobby").put(json!({
+            "members": {
+                "$set": [
+                    {"$link": "people/alice"},
+                    {"$link": "people/bob"}
+                ]
+            },
+            "owner": {"$link": "people/alice"}
+        }))?;
+
+        let result = db.root("rooms").field("lobby").traverse(TraversalSpec {
+            max_depth: 1,
+            limit: Some(1),
+            edge_fields: Some(vec!["members".to_owned()]),
+            ..TraversalSpec::default()
+        })?;
+
+        assert!(!result.complete);
+        assert!(result.result_limit_reached);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].via.as_ref().unwrap().field, "members");
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct TestFetchScheduler {
+        nodes: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl NodeFetchScheduler for TestFetchScheduler {
+        fn fetch_nodes(&self, nodes: Vec<String>) {
+            self.nodes.lock().unwrap().extend(nodes);
+        }
+    }
+
+    #[test]
+    fn traverse_schedules_lazy_fetch_for_absent_link_targets() -> Result<()> {
+        let db = Primadb::with_replica_id("traverse-d");
+        db.root("people").field("alice").put(json!({
+            "name": "Alice",
+            "friend": {"$link": "people/bob"}
+        }))?;
+        let scheduler = Arc::new(TestFetchScheduler::default());
+        db.register_node_fetch_scheduler(scheduler.clone());
+
+        let result = db.root("people").field("alice").traverse(TraversalSpec {
+            max_depth: 1,
+            ..TraversalSpec::default()
+        })?;
+
+        assert!(!result.complete);
+        assert_eq!(result.missing, vec!["people/bob"]);
+        assert_eq!(result.fetched, 1);
+        assert_eq!(scheduler.nodes.lock().unwrap().as_slice(), ["people/bob"]);
+        Ok(())
+    }
+
+    #[test]
+    fn traverse_treats_explicit_empty_nodes_as_known() -> Result<()> {
+        let db = Primadb::with_replica_id("traverse-empty-node");
+        db.root("people").field("bob").put(json!({}))?;
+        db.root("people").field("alice").put(json!({
+            "friend": {"$link": "people/bob"}
+        }))?;
+
+        let result = db.root("people").field("alice").traverse(TraversalSpec {
+            max_depth: 1,
+            include_values: true,
+            ..TraversalSpec::default()
+        })?;
+
+        assert!(result.complete);
+        assert!(result.missing.is_empty());
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].node_id, "people/bob");
+        assert_eq!(
+            result.entries[0].value.as_ref().unwrap()["$id"],
+            "people/bob"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn watch_traverse_updates_when_dependency_changes() -> Result<()> {
+        let db = Primadb::with_replica_id("traverse-e");
+        db.root("people")
+            .field("alice")
+            .put(json!({"friend": {"$link": "people/bob"}}))?;
+        db.root("people").field("bob").put(json!({"name": "Bob"}))?;
+
+        let watch = db
+            .root("people")
+            .field("alice")
+            .watch_traverse(TraversalSpec {
+                max_depth: 1,
+                include_values: true,
+                ..TraversalSpec::default()
+            })?;
+        let initial = watch.recv_blocking().unwrap();
+        assert_eq!(initial.entries[0].value.as_ref().unwrap()["name"], "Bob");
+
+        db.root("unrelated")
+            .field("item")
+            .put(json!({"name": "Noop"}))?;
+        assert!(watch.try_recv().is_none());
+
+        db.root("people")
+            .field("bob")
+            .put(json!({"name": "Robert"}))?;
+        let updated = watch.recv_blocking().unwrap();
+        assert_eq!(updated.entries[0].value.as_ref().unwrap()["name"], "Robert");
+        Ok(())
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
+    #[tokio::test]
+    async fn watch_traverse_fetches_missing_node_from_relay_peer() -> Result<()> {
+        let relay = crate::NativeRelayServer::bind("127.0.0.1:0").await?;
+        let source_db = Primadb::with_replica_id("traverse-relay-source");
+        source_db
+            .root("people")
+            .field("bob")
+            .put(json!({"name": "Bob"}))?;
+        source_db.drain_pending_operations()?;
+
+        let client_db = Primadb::with_replica_id("traverse-relay-client");
+        client_db.root("people").field("alice").put(json!({
+            "friend": {"$link": "people/bob"}
+        }))?;
+        client_db.drain_pending_operations()?;
+
+        let mut source_sync = source_db
+            .connect_relay(crate::RelayClientConfig {
+                url: relay.url(),
+                retry_interval_ms: 50,
+            })
+            .await?;
+        let mut client_sync = client_db
+            .connect_relay(crate::RelayClientConfig {
+                url: relay.url(),
+                retry_interval_ms: 50,
+            })
+            .await?;
+
+        wait_for_native_relay(
+            || {
+                source_sync.is_connected()
+                    && client_sync.is_connected()
+                    && source_sync.known_peer_count() >= 1
+                    && client_sync.known_peer_count() >= 1
+            },
+            "relay clients to discover each other",
+        )
+        .await?;
+
+        let watch = client_db
+            .root("people")
+            .field("alice")
+            .watch_traverse(TraversalSpec {
+                max_depth: 1,
+                include_values: true,
+                ..TraversalSpec::default()
+            })?;
+        let initial = watch.recv().await.expect("initial traversal result");
+        assert!(!initial.complete);
+        assert_eq!(initial.missing, vec!["people/bob"]);
+        assert_eq!(initial.fetched, 1);
+
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let result = watch.recv().await.ok_or_else(|| {
+                    crate::PrimadbError::Message("traversal watch closed".to_owned())
+                })?;
+                if result.complete
+                    && result.entries.iter().any(|entry| {
+                        entry
+                            .value
+                            .as_ref()
+                            .is_some_and(|value| value["name"] == "Bob")
+                    })
+                {
+                    return Ok::<_, crate::PrimadbError>(result);
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            crate::PrimadbError::Message("timed out waiting for lazy node fetch".to_owned())
+        })??;
+
+        assert!(updated.missing.is_empty());
+        assert_eq!(
+            client_db.node_state("people/bob")?.unwrap().id,
+            "people/bob"
+        );
+
+        source_sync.close();
+        client_sync.close();
+        relay.close().await;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
+    async fn wait_for_native_relay<F>(mut condition: F, description: &str) -> Result<()>
+    where
+        F: FnMut() -> bool,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Err(crate::PrimadbError::Message(format!(
+            "timed out waiting for {description}"
+        )))
     }
 
     #[test]

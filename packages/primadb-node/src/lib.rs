@@ -10,10 +10,11 @@ use primadb::{
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
     PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
-    RemoteResult as CoreRemoteResult, RoomHookContext, ServeRequestContext, ServeResultContext,
-    RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
-    Subscription as CoreSubscription, parse_request_hook_json, parse_result_hook_json,
-    parse_void_hook_json,
+    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
+    RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, ServeRequestContext,
+    ServeResultContext, Subscription as CoreSubscription,
+    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, parse_request_hook_json,
+    parse_result_hook_json, parse_void_hook_json,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,7 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         CoreRemoteResult::Map { entries }
         | CoreRemoteResult::Query { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
     }
 }
@@ -68,6 +70,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Map { .. } => "map",
         CoreRemoteResult::Query { .. } => "query",
         CoreRemoteResult::Lex { .. } => "lex",
+        CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
     };
     json!({
@@ -270,6 +273,11 @@ pub struct Subscription {
 }
 
 #[napi]
+pub struct TraversalSubscription {
+    inner: Arc<Mutex<Option<CoreTraversalSubscription>>>,
+}
+
+#[napi]
 pub struct WebSocketSync {
     inner: Arc<Mutex<Option<CoreWebSocketSync>>>,
 }
@@ -319,6 +327,17 @@ impl Primadb {
     #[napi(js_name = "snapshotForRoot")]
     pub fn snapshot_for_root(&self, root: Option<String>) -> Result<JsonValue> {
         to_json(self.inner.snapshot_for_root(root.as_deref()))
+    }
+
+    #[napi(js_name = "nodeState")]
+    pub fn node_state(&self, id: String) -> Result<JsonValue> {
+        to_json(self.inner.node_state(&id).map_err(to_napi_error)?)
+    }
+
+    #[napi(js_name = "applyNodeState")]
+    pub fn apply_node_state(&self, node: JsonValue) -> Result<bool> {
+        let node: primadb::NodeState = from_json(node)?;
+        self.inner.apply_node_state(node).map_err(to_napi_error)
     }
 
     #[napi(js_name = "exportSnapshotJson")]
@@ -561,9 +580,24 @@ impl Chain {
     }
 
     #[napi]
+    pub fn traverse(&self, spec: JsonValue) -> Result<JsonValue> {
+        let spec: TraversalSpec = from_json(spec)?;
+        to_json(self.inner.traverse(spec).map_err(to_napi_error)?)
+    }
+
+    #[napi]
     pub fn subscribe(&self) -> Result<Subscription> {
         let subscription = self.inner.subscribe().map_err(to_napi_error)?;
         Ok(Subscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
+    }
+
+    #[napi(js_name = "watchTraverse")]
+    pub fn watch_traverse(&self, spec: JsonValue) -> Result<TraversalSubscription> {
+        let spec: TraversalSpec = from_json(spec)?;
+        let subscription = self.inner.watch_traverse(spec).map_err(to_napi_error)?;
+        Ok(TraversalSubscription {
             inner: Arc::new(Mutex::new(Some(subscription))),
         })
     }
@@ -576,6 +610,61 @@ impl Subscription {
         let subscription = {
             let mut guard = self.inner.lock().unwrap();
             guard.take().ok_or_else(|| closed_error("subscription"))?
+        };
+
+        let message = match subscription.recv().await {
+            Some(value) => {
+                self.inner.lock().unwrap().replace(subscription);
+                json!({
+                    "done": false,
+                    "value": value,
+                })
+            }
+            None => json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }),
+        };
+
+        Ok(message)
+    }
+
+    #[napi(js_name = "tryNext")]
+    pub fn try_next(&self) -> Result<JsonValue> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return Ok(json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }));
+        };
+        match subscription.try_recv() {
+            Some(value) => Ok(json!({
+                "done": false,
+                "value": value,
+            })),
+            None => Ok(json!({
+                "done": false,
+                "value": JsonValue::Null,
+            })),
+        }
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[napi]
+impl TraversalSubscription {
+    #[napi]
+    pub async fn next(&self) -> Result<JsonValue> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("traversal subscription"))?
         };
 
         let message = match subscription.recv().await {
@@ -855,6 +944,20 @@ impl WebSocketSync {
         to_json(result?)
     }
 
+    #[napi(js_name = "remoteNode")]
+    pub async fn remote_node(&self, peer_id: String, id: String) -> Result<JsonValue> {
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_node(peer_id, id)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
     #[napi(js_name = "remoteSnapshot")]
     pub async fn remote_snapshot(&self, peer_id: String, root: Option<String>) -> Result<JsonValue> {
         let sync = {
@@ -939,6 +1042,21 @@ impl WebSocketSync {
             .as_ref()
             .ok_or_else(|| closed_error("websocket sync"))?
             .watch_lex(peer_id, path, spec)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchRemoteNode")]
+    pub fn watch_remote_node(&self, peer_id: String, id: String) -> Result<RemoteWatch> {
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_node(peer_id, id)
             .map_err(to_napi_error)?;
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(watch))),
@@ -1140,6 +1258,19 @@ impl WebRtcMesh {
             guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
         };
         let result = mesh.watch_lex(peer_id, path, spec).await.map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchRemoteNode")]
+    pub async fn watch_remote_node(&self, peer_id: String, id: String) -> Result<RemoteWatch> {
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh.watch_node(peer_id, id).await.map_err(to_napi_error);
         self.inner.lock().unwrap().replace(mesh);
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(result?))),

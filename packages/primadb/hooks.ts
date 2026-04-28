@@ -25,6 +25,7 @@ export type PullRequestKind =
   | { kind: "map"; path: { anchor: string; segments?: string[] } }
   | { kind: "query"; path: { anchor: string; segments?: string[] }; spec: Record<string, unknown> }
   | { kind: "lex"; path: { anchor: string; segments?: string[] }; spec: Record<string, unknown> }
+  | { kind: "node"; id: string }
   | { kind: "snapshot"; root?: string | null };
 
 export type RemoteResult =
@@ -32,6 +33,7 @@ export type RemoteResult =
   | { kind: "map"; entries: unknown[] }
   | { kind: "query"; entries: unknown[] }
   | { kind: "lex"; entries: unknown[] }
+  | { kind: "node"; node: unknown | null }
   | { kind: "snapshot"; snapshot: unknown };
 
 export interface ServeRequestContext {

@@ -58,6 +58,7 @@ pub enum PullRequestKind {
     Map { path: RemotePath },
     Query { path: RemotePath, spec: QuerySpec },
     Lex { path: RemotePath, spec: LexSpec },
+    Node { id: NodeId },
     Snapshot { root: Option<String> },
 }
 
@@ -87,6 +88,9 @@ pub enum PullResponseBody {
     },
     Lex {
         entries: Vec<LexEntry>,
+    },
+    Node {
+        node: Option<NodeState>,
     },
     Snapshot {
         #[serde(default)]
@@ -139,6 +143,7 @@ pub enum RemoteResult {
     Map { entries: Vec<MapEntry> },
     Query { entries: Vec<MapEntry> },
     Lex { entries: Vec<LexEntry> },
+    Node { node: Option<NodeState> },
     Snapshot { snapshot: DatabaseSnapshot },
 }
 
@@ -164,6 +169,7 @@ impl PullRequestKind {
             Self::Map { .. } => "map",
             Self::Query { .. } => "query",
             Self::Lex { .. } => "lex",
+            Self::Node { .. } => "node",
             Self::Snapshot { .. } => "snapshot",
         }
     }
@@ -174,6 +180,7 @@ impl PullRequestKind {
             | Self::Map { path }
             | Self::Query { path, .. }
             | Self::Lex { path, .. } => Some(path.path()),
+            Self::Node { id } => Some(id.clone()),
             Self::Snapshot { root } => root.clone(),
         }
     }

@@ -231,6 +231,95 @@ export interface LexSpec {
 }
 ```
 
+#### `TraversalDirection`
+
+Kind: type alias
+
+```ts
+export type TraversalDirection = "outbound" | "inbound" | "both";
+```
+
+#### `TraversalStrategy`
+
+Kind: type alias
+
+```ts
+export type TraversalStrategy = "bfs" | "dfs";
+```
+
+#### `TraversalEdgeKind`
+
+Kind: type alias
+
+```ts
+export type TraversalEdgeKind = "link" | "set_member";
+```
+
+#### `TraversalEdge`
+
+Kind: interface
+
+```ts
+export interface TraversalEdge {
+    source: string;
+    field: string;
+    target: string;
+    kind: TraversalEdgeKind;
+}
+```
+
+#### `TraversalSpec`
+
+Kind: interface
+
+```ts
+export interface TraversalSpec {
+    direction?: TraversalDirection;
+    strategy?: TraversalStrategy;
+    maxDepth?: number;
+    limit?: number | null;
+    edgeFields?: string[] | null;
+    followLinks?: boolean;
+    followSets?: boolean;
+    includeStart?: boolean;
+    includeValues?: boolean;
+    filters?: QueryFilter[];
+    fetchMissing?: boolean;
+    maxFetches?: number;
+}
+```
+
+#### `TraversalEntry`
+
+Kind: interface
+
+```ts
+export interface TraversalEntry {
+    nodeId: string;
+    depth: number;
+    path: string[];
+    via?: TraversalEdge | null;
+    value?: JsonValue | null;
+}
+```
+
+#### `TraversalResult`
+
+Kind: interface
+
+```ts
+export interface TraversalResult {
+    entries: TraversalEntry[];
+    complete: boolean;
+    timedOut: boolean;
+    depthLimitReached: boolean;
+    resultLimitReached: boolean;
+    fetched: number;
+    missing: string[];
+    denied: string[];
+}
+```
+
 #### `RemotePath`
 
 Kind: interface
@@ -274,6 +363,9 @@ export type PullRequestKind = {
     };
     spec: LexSpec;
 } | {
+    kind: "node";
+    id: string;
+} | {
     kind: "snapshot";
     root?: string | null;
 };
@@ -296,6 +388,9 @@ export type RemoteResult = {
 } | {
     kind: "lex";
     entries: JsonValue[];
+} | {
+    kind: "node";
+    node: JsonValue | null;
 } | {
     kind: "snapshot";
     snapshot: JsonValue;
@@ -399,7 +494,7 @@ Kind: interface
 export interface RemoteWatchMessage {
     done: boolean;
     initial?: boolean;
-    kind?: "get" | "map" | "query" | "lex" | "snapshot" | null;
+    kind?: "get" | "map" | "query" | "lex" | "node" | "snapshot" | null;
     value?: JsonValue | null;
     error?: string | null;
 }
@@ -416,6 +511,8 @@ export declare class Primadb {
     chain(root: string): Chain;
     snapshot(): JsonValue;
     snapshotForRoot(root?: string | null): JsonValue;
+    nodeState(id: string): JsonValue | null;
+    applyNodeState(node: JsonValue): boolean;
     exportSnapshotJson(): string;
     importSnapshotJson(payload: string): void;
     mergeSnapshotJson(payload: string): void;
@@ -455,7 +552,9 @@ export declare class Chain {
     query(spec: QuerySpec): JsonValue;
     firstQuery(spec: QuerySpec): JsonValue | null;
     scan(spec: LexSpec): JsonValue;
+    traverse(spec: TraversalSpec): TraversalResult;
     subscribe(): Subscription;
+    watchTraverse(spec: TraversalSpec): TraversalSubscription;
 }
 ```
 
@@ -467,6 +566,18 @@ Kind: class
 export declare class Subscription {
     next(): Promise<SubscriptionMessage>;
     tryNext(): SubscriptionMessage;
+    close(): void;
+}
+```
+
+#### `TraversalSubscription`
+
+Kind: class
+
+```ts
+export declare class TraversalSubscription {
+    next(): Promise<{ done: boolean; value?: TraversalResult | null }>;
+    tryNext(): { done: boolean; value?: TraversalResult | null };
     close(): void;
 }
 ```
@@ -512,11 +623,13 @@ export declare class WebSocketSync {
     remoteGet(peerId: string, path: RemotePath): Promise<JsonValue | null>;
     remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
     remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
+    remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
     remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
     watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
     watchRemoteMap(peerId: string, path: RemotePath): RemoteWatch;
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
     watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): RemoteWatch;
+    watchRemoteNode(peerId: string, id: string): RemoteWatch;
     watchRemoteSnapshot(peerId: string, root?: string | null): RemoteWatch;
     flushPending(): Promise<number>;
     retryInflight(): Promise<number>;
@@ -542,6 +655,7 @@ export declare class WebRtcMesh {
     watchRemoteMap(peerId: string, path: RemotePath): Promise<RemoteWatch>;
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<RemoteWatch>;
     watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<RemoteWatch>;
+    watchRemoteNode(peerId: string, id: string): Promise<RemoteWatch>;
     watchRemoteSnapshot(peerId: string, root?: string | null): Promise<RemoteWatch>;
     flushPending(): Promise<number>;
     retryInflight(): Promise<number>;
@@ -673,3 +787,11 @@ Kind: function
 ```ts
 export declare function createPrimadbMoqLoopback(options: PrimadbMoqLoopbackOptions): Promise<PrimadbMoqLoopback>;
 ```
+
+## Traversal semantics
+
+`Chain.traverse(...)` returns the current local traversal result immediately. With an active relay or mesh connection, missing linked nodes are scheduled for bounded background fetch.
+
+`Chain.watchTraverse(...)` receives updated traversal results as fetched nodes merge into the local graph.
+
+`TraversalResult.fetched` is the number of background node fetches scheduled by that evaluation.

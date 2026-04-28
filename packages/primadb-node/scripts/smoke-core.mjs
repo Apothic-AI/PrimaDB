@@ -21,6 +21,7 @@ try {
   const notes = db.chain("notes").field("items");
   const binary = db.chain("assets").field("bytes");
   const blobChain = db.chain("assets").field("blob");
+  const graphAlice = db.chain("graph").field("alice");
   const subscription = notes.subscribe();
   const title = `Node core ${Date.now()}`;
   const payload = Buffer.from([1, 2, 3, 5, 8, 13]);
@@ -29,6 +30,13 @@ try {
     title,
     body: "native addon smoke",
     createdAt: new Date().toISOString(),
+  });
+  graphAlice.put({
+    name: "Alice",
+    friend: { $link: "graph/bob" },
+  });
+  db.chain("graph").field("bob").put({
+    name: "Bob",
   });
   binary.putBytes(payload);
   const blobRef = blobChain.putBlob(payload, "application/octet-stream");
@@ -59,6 +67,20 @@ try {
   });
   const restoredBytes = restored.chain("assets").field("bytes").onceBytes();
   const restoredBlob = restored.chain("assets").field("blob").getBlob();
+  const traversal = restored.chain("graph").field("alice").traverse({
+    maxDepth: 1,
+    includeValues: true,
+  });
+  const traversalWatch = restored.chain("graph").field("alice").watchTraverse({
+    maxDepth: 1,
+    includeValues: true,
+  });
+  const traversalInitial = await traversalWatch.next();
+  restored.chain("graph").field("bob").put({
+    name: "Robert",
+  });
+  const traversalUpdate = await traversalWatch.next();
+  traversalWatch.close();
 
   console.log(
     JSON.stringify(
@@ -75,9 +97,16 @@ try {
         roundTripBlob: roundTripBlob ? Array.from(roundTripBlob) : null,
         restoredBytes: restoredBytes ? Array.from(restoredBytes) : null,
         restoredBlob: restoredBlob ? Array.from(restoredBlob) : null,
+        traversal,
+        traversalInitial,
+        traversalUpdate,
         node_package_core_confirmed:
           Array.isArray(entries) &&
           entries.length >= 1 &&
+          traversal?.entries?.some?.((entry) => entry.nodeId === "graph/bob" && entry.value?.name === "Bob") &&
+          traversalUpdate?.value?.entries?.some?.(
+            (entry) => entry.nodeId === "graph/bob" && entry.value?.name === "Robert",
+          ) &&
           JSON.stringify(roundTripBytes ? Array.from(roundTripBytes) : null) === JSON.stringify(Array.from(payload)) &&
           JSON.stringify(roundTripBlob ? Array.from(roundTripBlob) : null) === JSON.stringify(Array.from(payload)) &&
           JSON.stringify(restoredBytes ? Array.from(restoredBytes) : null) === JSON.stringify(Array.from(payload)) &&

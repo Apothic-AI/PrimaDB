@@ -14,19 +14,24 @@ PrimaDB already has traversal-adjacent primitives:
 - `map` and set-backed `query`
 - lexical scans through `LexSpec`
 - bounded recursive lexical scans through `LexSpec.follow_links`
-- remote transport pull primitives for `get`, `map`, `query`, `lex`, and `snapshot`
+- remote transport pull primitives for `get`, `map`, `query`, `lex`, `node`, and `snapshot`
 
-That is enough for useful graph-shaped documents and simple linked scans, but it is not yet a
-first-class graph traversal layer.
+That is enough for useful graph-shaped documents and simple linked scans. The current development
+pass adds a first-class bounded traversal layer.
 
-Current gaps:
+Implemented pieces:
 
-- no explicit traversal spec for reachability, neighborhoods, or paths
-- no user-facing `chain.traverse(...)` / `chain.watchTraverse(...)`
-- no lazy node-addressed pull primitive for linked node IDs that are not conveniently addressable by
-  root/path
-- no reverse-edge index for inbound traversal
-- no cross-platform traversal result type or traversal watch protocol
+- explicit `TraversalSpec`, `TraversalEntry`, and `TraversalResult` types
+- user-facing `chain.traverse(...)` / `chain.watchTraverse(...)`
+- node-addressed `PullRequestKind::Node { id }`
+- relationship indexes for outbound and inbound links/set-members
+- relay and mesh lazy node-fetch schedulers for native and browser WASM transports
+- Rust, browser WASM, Node, and Python package API surfaces
+
+Remaining follow-up:
+
+- traversal fetches are intentionally bounded and local-first, so immediate `traverse(...)` results
+  can be partial while `watchTraverse(...)` observes fetched data as it arrives
 
 ## Product Direction
 
@@ -103,10 +108,13 @@ Initial `TraversalSpec` should be deliberately bounded:
 - `maxDepth`
 - `limit`
 - `edgeFields`: optional field allowlist
-- `nodeFilter`: optional query-like predicate over materialized node values
-- `emit`: `nodes`, `edges`, or `paths`
+- `filters`: query-like predicates over shallow materialized node values
 - `followSets`: whether set members are traversable edges
+- `followLinks`: whether links are traversable edges
 - `includeStart`: whether the start node/path appears in output
+- `includeValues`: whether shallow node values are included
+- `fetchMissing`: whether missing nodes should be scheduled for peer fetch
+- `maxFetches`: strict budget for background peer fetch scheduling
 
 Everything must be bounded by default. Unbounded graph traversal should not be a supported default.
 
@@ -121,8 +129,9 @@ type TraversalResult = {
   timedOut: boolean;
   depthLimitReached: boolean;
   resultLimitReached: boolean;
-  fetched: number;
+  fetched: number; // number of background node fetches scheduled by this evaluation
   missing: string[];
+  denied: string[];
 };
 ```
 
@@ -225,6 +234,16 @@ The method names may follow host conventions, but behavior and result semantics 
 7. Add `watchTraverse(...)` using traversal dependency tracking.
 8. Add examples that traverse a partially replicated graph without snapshot-syncing the whole peer.
 
+## Implementation Notes
+
+- Link and set references should not manufacture empty target nodes. Absent targets are missing
+  graph elements; explicit empty objects are valid known nodes.
+- Traversal should use shallow value materialization for filters and returned values so a traversal
+  does not accidentally recursively materialize the whole reachable graph.
+- `watchTraverse(...)` should reuse touched-path dependency tracking and should refresh only when the
+  previous traversal's start path, reached nodes, edges, missing nodes, or denied nodes overlap the
+  change event.
+
 ## Verification Plan
 
 - local traversal returns bounded deterministic results
@@ -242,4 +261,3 @@ The method names may follow host conventions, but behavior and result semantics 
 - Do not make users choose local versus remote traversal methods.
 - Do not add unbounded network crawling.
 - Do not make remote traversal a separate first-class API family.
-

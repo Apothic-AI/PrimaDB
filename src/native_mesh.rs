@@ -2,17 +2,18 @@
 use crate::SecureSyncFrame;
 use crate::{
     ChangeSubscription, HookTransport, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
-    PeerRecommendation, Primadb, PrimadbError, RemoteWatchMessage, RemoteWatchSubscription, Result,
-    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope,
-    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, error_watch_event,
+    NodeFetchScheduler, PeerRecommendation, Primadb, PrimadbError, RemoteWatchMessage,
+    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    Router, RouterConfig, SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
+    error_watch_event,
 };
 use async_channel::{Sender, unbounded};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -77,6 +78,9 @@ enum PullAccumulator {
     Lex {
         entries: Vec<crate::LexEntry>,
     },
+    Node {
+        node: Option<crate::NodeState>,
+    },
     Snapshot {
         clock: Option<crate::HybridClock>,
         nodes: BTreeMap<String, crate::NodeState>,
@@ -129,6 +133,11 @@ pub struct NativeWebRtcMesh {
     change_subscription: Option<ChangeSubscription>,
     change_task: Option<JoinHandle<()>>,
     retry_task: Option<JoinHandle<()>>,
+    node_fetch_registration: Option<u64>,
+}
+
+struct NativeMeshNodeFetchScheduler {
+    state: Weak<NativeWebRtcMeshState>,
 }
 
 impl NativeWebRtcMesh {
@@ -210,11 +219,17 @@ impl NativeWebRtcMesh {
 
         let _ = connect_mesh_relay_state(&state).await;
 
+        let node_fetch_registration =
+            db.register_node_fetch_scheduler(Arc::new(NativeMeshNodeFetchScheduler {
+                state: Arc::downgrade(&state),
+            }));
+
         Ok(Self {
             state,
             change_subscription: Some(change_subscription),
             change_task: Some(change_task),
             retry_task: Some(retry_task),
+            node_fetch_registration: Some(node_fetch_registration),
         })
     }
 
@@ -316,6 +331,19 @@ impl NativeWebRtcMesh {
         .await
     }
 
+    pub async fn watch_node(
+        &self,
+        peer_id: impl Into<String>,
+        id: impl Into<String>,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Node { id: id.into() },
+        )
+        .await
+    }
+
     pub async fn watch_snapshot(
         &self,
         peer_id: impl Into<String>,
@@ -342,6 +370,9 @@ impl NativeWebRtcMesh {
     }
 
     async fn teardown(&mut self) {
+        if let Some(id) = self.node_fetch_registration.take() {
+            self.state.db.unregister_node_fetch_scheduler(id);
+        }
         self.state.closed.store(true, Ordering::SeqCst);
         let _ = post_mesh_leave_signal_state(&self.state).await;
         disconnect_mesh_relay_state(&self.state, true).await;
@@ -372,6 +403,9 @@ impl NativeWebRtcMesh {
 
 impl Drop for NativeWebRtcMesh {
     fn drop(&mut self) {
+        if let Some(id) = self.node_fetch_registration.take() {
+            self.state.db.unregister_node_fetch_scheduler(id);
+        }
         self.state.closed.store(true, Ordering::SeqCst);
         self.state.relay_connected.store(false, Ordering::SeqCst);
         self.state.runtime.spawn({
@@ -1843,6 +1877,10 @@ fn apply_response_body(
             }
             None
         }
+        crate::PullResponseBody::Node { node } => {
+            *accumulator = PullAccumulator::Node { node: node.clone() };
+            None
+        }
         crate::PullResponseBody::Snapshot {
             clock,
             nodes,
@@ -1939,6 +1977,60 @@ fn peer_recommendation_from_presence(
     }
 }
 
+impl NodeFetchScheduler for NativeMeshNodeFetchScheduler {
+    fn fetch_nodes(&self, nodes: Vec<String>) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        let runtime = state.runtime.clone();
+        runtime.spawn(async move {
+            let peer_ids = {
+                let peers = state.peers.lock().await;
+                peers
+                    .iter()
+                    .filter_map(|(peer_id, peer)| {
+                        peer.channel
+                            .as_ref()
+                            .is_some_and(mesh_channel_is_open)
+                            .then_some(peer_id.clone())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for node_id in nodes {
+                let mut fetched = false;
+                for peer_id in &peer_ids {
+                    let subscription = match start_mesh_watch(
+                        &state,
+                        peer_id.clone(),
+                        crate::PullRequestKind::Node {
+                            id: node_id.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(subscription) => subscription,
+                        Err(_) => continue,
+                    };
+                    let message = subscription.recv().await;
+                    subscription.close();
+                    if let Some(Ok(crate::RemoteWatchMessage {
+                        result: crate::RemoteResult::Node { node: Some(node) },
+                        ..
+                    })) = message
+                    {
+                        let _ = state.db.apply_node_state(node);
+                        fetched = true;
+                        break;
+                    }
+                }
+                if !fetched {
+                    state.db.clear_scheduled_node_fetch(&node_id);
+                }
+            }
+        });
+    }
+}
+
 impl PullAccumulator {
     fn new(request: &crate::PullRequestKind) -> Self {
         match request {
@@ -1952,6 +2044,7 @@ impl PullAccumulator {
             crate::PullRequestKind::Lex { .. } => Self::Lex {
                 entries: Vec::new(),
             },
+            crate::PullRequestKind::Node { .. } => Self::Node { node: None },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
                 nodes: BTreeMap::new(),
@@ -1966,6 +2059,7 @@ impl PullAccumulator {
             Self::Map { entries } => Ok(crate::RemoteResult::Map { entries }),
             Self::Query { entries } => Ok(crate::RemoteResult::Query { entries }),
             Self::Lex { entries } => Ok(crate::RemoteResult::Lex { entries }),
+            Self::Node { node } => Ok(crate::RemoteResult::Node { node }),
             Self::Snapshot {
                 clock,
                 nodes,

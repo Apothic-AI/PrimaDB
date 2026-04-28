@@ -284,7 +284,7 @@ function parsePythonStub(filePath) {
   }));
 }
 
-function renderPythonPage({ title, sidebarPosition, intro, sourcePath }) {
+function renderPythonPage({ title, sidebarPosition, intro, sourcePath, extraSections = [] }) {
   const blocks = parsePythonStub(sourcePath);
   const parts = [
     "---",
@@ -306,6 +306,13 @@ function renderPythonPage({ title, sidebarPosition, intro, sourcePath }) {
     parts.push("```py");
     parts.push(block.code);
     parts.push("```");
+    parts.push("");
+  }
+
+  for (const section of extraSections) {
+    parts.push(`## ${section.title}`);
+    parts.push("");
+    parts.push(section.body.trim());
     parts.push("");
   }
 
@@ -613,7 +620,7 @@ function parseWasmBrowserRuntime(filePath) {
   return { topLevelFunctions, classes };
 }
 
-function renderBrowserRuntimePage({ title, sidebarPosition, intro, sourcePath }) {
+function renderBrowserRuntimePage({ title, sidebarPosition, intro, sourcePath, extraSections = [] }) {
   const parsed = parseWasmBrowserRuntime(sourcePath);
   const parts = [
     "---",
@@ -650,6 +657,13 @@ function renderBrowserRuntimePage({ title, sidebarPosition, intro, sourcePath })
     }
     parts.push("}");
     parts.push("```");
+    parts.push("");
+  }
+
+  for (const section of extraSections) {
+    parts.push(`## ${section.title}`);
+    parts.push("");
+    parts.push(section.body.trim());
     parts.push("");
   }
 
@@ -711,7 +725,7 @@ function copyRustDocSite() {
   }
 }
 
-function renderRustPage({ title, sidebarPosition, intro, libPath }) {
+function renderRustPage({ title, sidebarPosition, intro, libPath, extraSections = [] }) {
   const groups = parseRustReexports(libPath);
   const parts = [
     "---",
@@ -738,6 +752,13 @@ function renderRustPage({ title, sidebarPosition, intro, libPath }) {
     for (const item of items) {
       parts.push(`- \`${item}\``);
     }
+    parts.push("");
+  }
+
+  for (const section of extraSections) {
+    parts.push(`## ${section.title}`);
+    parts.push("");
+    parts.push(section.body.trim());
     parts.push("");
   }
 
@@ -768,6 +789,13 @@ function generateApiDocs() {
       ],
       extraSections: [
         {
+          title: "Traversal semantics",
+          body: [
+            "Traversal methods are exported from the generated WASM runtime types.",
+            "`traverse(...)` is local-first and bounded. Connected relay or mesh transports schedule missing linked nodes for background fetch, and traversal watches receive updates as those nodes arrive.",
+          ].join("\n\n"),
+        },
+        {
           title: "Related pages",
           body:
             "- [Browser runtime API](browser-runtime)\n- [Threaded browser package API](browser-threads)\n- [Gun runtime API](gun-runtime-api)",
@@ -784,6 +812,16 @@ function generateApiDocs() {
       intro:
         "This page covers the browser-facing `wasm_bindgen` runtime exported by the core crate. These are the classes and functions re-exported through the browser TypeScript package.",
       sourcePath: resolve(repoRoot, "src", "wasm.rs"),
+      extraSections: [
+        {
+          title: "Traversal semantics",
+          body: [
+            "`Chain.traverse(...)` returns the current local traversal result immediately. When connected relay or mesh transports are active, missing linked nodes are scheduled for bounded background fetch.",
+            "`Chain.watchTraverse(...)` is the preferred API for peer-assisted traversal because it emits updated traversal results as fetched nodes merge into the local graph.",
+            "`TraversalResult.fetched` is the number of background node fetches scheduled by that evaluation, not a blocking network completion count.",
+          ].join("\n\n"),
+        },
+      ],
     }),
   );
 
@@ -854,6 +892,16 @@ function generateApiDocs() {
           note: "Experimental `primadb-node/moq` helper declarations.",
         },
       ],
+      extraSections: [
+        {
+          title: "Traversal semantics",
+          body: [
+            "`Chain.traverse(...)` returns the current local traversal result immediately. With an active relay or mesh connection, missing linked nodes are scheduled for bounded background fetch.",
+            "`Chain.watchTraverse(...)` receives updated traversal results as fetched nodes merge into the local graph.",
+            "`TraversalResult.fetched` is the number of background node fetches scheduled by that evaluation.",
+          ].join("\n\n"),
+        },
+      ],
     }),
   );
 
@@ -865,6 +913,16 @@ function generateApiDocs() {
       intro:
         "This page covers the `primadb-python` package surface. It is generated directly from the public stub file shipped with the package.",
       sourcePath: resolve(repoRoot, "packages", "primadb-python", "python", "primadb", "__init__.pyi"),
+      extraSections: [
+        {
+          title: "Traversal semantics",
+          body: [
+            "`Chain.traverse(...)` returns the current local traversal result immediately. With an active relay or mesh connection, missing linked nodes are scheduled for bounded background fetch.",
+            "`Chain.watch_traverse(...)` receives updated traversal results as fetched nodes merge into the local graph.",
+            "`TraversalResult.fetched` is the number of background node fetches scheduled by that evaluation.",
+          ].join("\n\n"),
+        },
+      ],
     }),
   );
 
@@ -877,6 +935,16 @@ function generateApiDocs() {
       intro:
         "This page covers the public Rust crate surface. The site also serves the full bundled rustdoc so Rust consumers can browse the real crate API directly.",
       libPath: resolve(repoRoot, "src", "lib.rs"),
+      extraSections: [
+        {
+          title: "Traversal semantics",
+          body: [
+            "`Chain::traverse` is local-first and bounded. With active relay or mesh transports, missing linked nodes are scheduled for bounded background fetch.",
+            "`Chain::watch_traverse` receives updated results when fetched nodes merge into the local graph.",
+            "The `fetched` field on `TraversalResult` is the number of background node fetches scheduled by that evaluation.",
+          ].join("\n\n"),
+        },
+      ],
     }),
   );
 }

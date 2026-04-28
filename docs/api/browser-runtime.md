@@ -131,8 +131,10 @@ class Chain {
   map(): any;
   query(spec: any): any;
   scan(spec: any): any;
+  traverse(spec: any): any;
   firstQuery(spec: any): any;
   on(callback: Function): Subscription;
+  watchTraverse(spec: any, callback: Function): TraversalSubscription;
   putBlob(data: Uint8Array, media_type: string | null): Promise<any>;
   blobRef(): any;
   getBlob(): Promise<any>;
@@ -143,6 +145,14 @@ class Chain {
 
 ```ts
 class Subscription {
+  cancel(): void;
+}
+```
+
+### `TraversalSubscription`
+
+```ts
+class TraversalSubscription {
   cancel(): void;
 }
 ```
@@ -198,10 +208,12 @@ class WebSocketSync {
   watchRemoteMap(peer_id: string, path: any): RemoteWatch;
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteLex(peer_id: string, path: any, spec: any): RemoteWatch;
+  watchRemoteNode(peer_id: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peer_id: string, root: string | null): RemoteWatch;
   remoteGet(peer_id: string, path: any): Promise<any>;
   remoteQuery(peer_id: string, path: any, spec: any): Promise<any>;
   remoteLex(peer_id: string, path: any, spec: any): Promise<any>;
+  remoteNode(peer_id: string, id: string): Promise<any>;
   remoteSnapshot(peer_id: string, root: string | null): Promise<any>;
   flushPending(): number;
   retryInflight(): number;
@@ -224,9 +236,18 @@ class WebRtcMesh {
   watchRemoteMap(peer_id: string, path: any): RemoteWatch;
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteLex(peer_id: string, path: any, spec: any): RemoteWatch;
+  watchRemoteNode(peer_id: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peer_id: string, root: string | null): RemoteWatch;
   flushPending(): number;
   retryInflight(): number;
   close(): void;
 }
 ```
+
+## Traversal semantics
+
+`Chain.traverse(...)` returns the current local traversal result immediately. When connected relay or mesh transports are active, missing linked nodes are scheduled for bounded background fetch.
+
+`Chain.watchTraverse(...)` is the preferred API for peer-assisted traversal because it emits updated traversal results as fetched nodes merge into the local graph.
+
+`TraversalResult.fetched` is the number of background node fetches scheduled by that evaluation, not a blocking network completion count.

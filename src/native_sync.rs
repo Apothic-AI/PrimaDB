@@ -1,18 +1,18 @@
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
 use crate::{
-    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, Operation,
-    PeerRecommendation, Primadb, PrimadbError, RelayClientConfig, RemotePath, RemoteResult,
-    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
-    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, WatchEvent,
-    WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
+    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, NodeFetchScheduler,
+    Operation, PeerRecommendation, Primadb, PrimadbError, RelayClientConfig, RemotePath,
+    RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem,
+    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
+    WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -71,6 +71,9 @@ enum PullAccumulator {
     Lex {
         entries: Vec<LexEntry>,
     },
+    Node {
+        node: Option<crate::NodeState>,
+    },
     Snapshot {
         clock: Option<HybridClock>,
         nodes: BTreeMap<String, crate::NodeState>,
@@ -99,6 +102,11 @@ pub struct NativeWebSocketSync {
     connection_task: Option<JoinHandle<()>>,
     change_task: Option<JoinHandle<()>>,
     retry_task: Option<JoinHandle<()>>,
+    node_fetch_registration: Option<u64>,
+}
+
+struct NativeWebSocketNodeFetchScheduler {
+    state: Weak<NativeWebSocketSyncState>,
 }
 
 impl NativeWebSocketSync {
@@ -256,12 +264,18 @@ impl NativeWebSocketSync {
             }
         });
 
+        let node_fetch_registration =
+            db.register_node_fetch_scheduler(Arc::new(NativeWebSocketNodeFetchScheduler {
+                state: Arc::downgrade(&state),
+            }));
+
         Ok(Self {
             state,
             change_subscription: Some(change_subscription),
             connection_task: Some(connection_task),
             change_task: Some(change_task),
             retry_task: Some(retry_task),
+            node_fetch_registration: Some(node_fetch_registration),
         })
     }
 
@@ -341,6 +355,18 @@ impl NativeWebSocketSync {
         )
     }
 
+    pub fn watch_node(
+        &self,
+        peer_id: impl Into<String>,
+        id: impl Into<String>,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Node { id: id.into() },
+        )
+    }
+
     pub fn watch_snapshot(
         &self,
         peer_id: impl Into<String>,
@@ -412,6 +438,25 @@ impl NativeWebSocketSync {
         }
     }
 
+    pub async fn remote_node(
+        &self,
+        peer_id: impl Into<String>,
+        id: impl Into<String>,
+    ) -> Result<Option<crate::NodeState>> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Node { id: id.into() },
+        )
+        .await?
+        {
+            RemoteResult::Node { node } => Ok(node),
+            other => Err(PrimadbError::Message(format!(
+                "expected node result, received {other:?}"
+            ))),
+        }
+    }
+
     pub async fn remote_snapshot(
         &self,
         peer_id: impl Into<String>,
@@ -444,6 +489,9 @@ impl NativeWebSocketSync {
     }
 
     fn teardown(&mut self) {
+        if let Some(id) = self.node_fetch_registration.take() {
+            self.state.db.unregister_node_fetch_scheduler(id);
+        }
         self.state.closed.store(true, Ordering::SeqCst);
         self.state.connected.store(false, Ordering::SeqCst);
         let _ = self.state.outbound.send(Message::Close(None));
@@ -1321,6 +1369,10 @@ fn apply_response_body(
             }
             None
         }
+        crate::PullResponseBody::Node { node } => {
+            *accumulator = PullAccumulator::Node { node: node.clone() };
+            None
+        }
         crate::PullResponseBody::Snapshot {
             clock,
             nodes,
@@ -1380,6 +1432,47 @@ fn decode_sync_payload(_db: &Primadb, encoding: &str, payload: JsonValue) -> Res
     }
 }
 
+impl NodeFetchScheduler for NativeWebSocketNodeFetchScheduler {
+    fn fetch_nodes(&self, nodes: Vec<String>) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let peers = state
+                .router
+                .known_peers()
+                .into_iter()
+                .map(|peer| peer.peer_id)
+                .collect::<Vec<_>>();
+            for node_id in nodes {
+                let mut fetched = false;
+                for peer_id in &peers {
+                    match request_remote_result(
+                        &state,
+                        peer_id.clone(),
+                        crate::PullRequestKind::Node {
+                            id: node_id.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(RemoteResult::Node { node: Some(node) }) => {
+                            let _ = state.db.apply_node_state(node);
+                            fetched = true;
+                            break;
+                        }
+                        Ok(RemoteResult::Node { node: None }) | Err(_) => {}
+                        Ok(_) => {}
+                    }
+                }
+                if !fetched {
+                    state.db.clear_scheduled_node_fetch(&node_id);
+                }
+            }
+        });
+    }
+}
+
 impl PullAccumulator {
     fn new(request: &crate::PullRequestKind) -> Self {
         match request {
@@ -1393,6 +1486,7 @@ impl PullAccumulator {
             crate::PullRequestKind::Lex { .. } => Self::Lex {
                 entries: Vec::new(),
             },
+            crate::PullRequestKind::Node { .. } => Self::Node { node: None },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
                 nodes: BTreeMap::new(),
@@ -1407,6 +1501,7 @@ impl PullAccumulator {
             Self::Map { entries } => Ok(RemoteResult::Map { entries }),
             Self::Query { entries } => Ok(RemoteResult::Query { entries }),
             Self::Lex { entries } => Ok(RemoteResult::Lex { entries }),
+            Self::Node { node } => Ok(RemoteResult::Node { node }),
             Self::Snapshot {
                 clock,
                 nodes,

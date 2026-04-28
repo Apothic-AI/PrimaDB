@@ -30,6 +30,7 @@ def main() -> None:
         notes = db.chain("notes").field("items")
         binary = db.chain("assets").field("bytes")
         blob_chain = db.chain("assets").field("blob")
+        graph_alice = db.chain("graph").field("alice")
         subscription = notes.subscribe()
         payload = bytes([1, 2, 3, 5, 8, 13])
 
@@ -40,6 +41,8 @@ def main() -> None:
                 "done": False,
             }
         )
+        graph_alice.put({"name": "Alice", "friend": {"$link": "graph/bob"}})
+        db.chain("graph").field("bob").put({"name": "Bob"})
         binary.put_bytes(payload)
         blob_ref = blob_chain.put_blob(payload, "application/octet-stream")
         round_trip_bytes = binary.once_bytes()
@@ -76,6 +79,22 @@ def main() -> None:
         )
         restored_bytes = restored.chain("assets").field("bytes").once_bytes()
         restored_blob = restored.chain("assets").field("blob").get_blob()
+        traversal = restored.chain("graph").field("alice").traverse(
+            {
+                "maxDepth": 1,
+                "includeValues": True,
+            }
+        )
+        traversal_watch = restored.chain("graph").field("alice").watch_traverse(
+            {
+                "maxDepth": 1,
+                "includeValues": True,
+            }
+        )
+        traversal_initial = traversal_watch.next()
+        restored.chain("graph").field("bob").put({"name": "Robert"})
+        traversal_update = traversal_watch.next()
+        traversal_watch.close()
 
         print(
             json.dumps(
@@ -90,10 +109,21 @@ def main() -> None:
                     "roundTripBlob": list(round_trip_blob) if round_trip_blob is not None else None,
                     "restoredBytes": list(restored_bytes) if restored_bytes is not None else None,
                     "restoredBlob": list(restored_blob) if restored_blob is not None else None,
+                    "traversal": traversal,
+                    "traversalInitial": traversal_initial,
+                    "traversalUpdate": traversal_update,
                     "subscriptionEvent": event,
                     "restoredCount": len(results),
                     "python_package_core_confirmed": (
                         len(results) == 1
+                        and any(
+                            entry["nodeId"] == "graph/bob" and entry["value"]["name"] == "Bob"
+                            for entry in traversal["entries"]
+                        )
+                        and any(
+                            entry["nodeId"] == "graph/bob" and entry["value"]["name"] == "Robert"
+                            for entry in traversal_update["value"]["entries"]
+                        )
                         and round_trip_bytes == payload
                         and round_trip_blob == payload
                         and restored_bytes == payload

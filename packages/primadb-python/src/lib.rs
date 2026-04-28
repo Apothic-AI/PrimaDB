@@ -5,10 +5,11 @@ use primadb::{
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
     PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
-    RemoteResult as CoreRemoteResult, RoomHookContext, ServeRequestContext, ServeResultContext,
-    RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
-    Subscription as CoreSubscription, parse_request_hook_json, parse_result_hook_json,
-    parse_void_hook_json,
+    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
+    RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, ServeRequestContext,
+    ServeResultContext, Subscription as CoreSubscription,
+    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, parse_request_hook_json,
+    parse_result_hook_json, parse_void_hook_json,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -71,6 +72,7 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         CoreRemoteResult::Map { entries }
         | CoreRemoteResult::Query { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
     }
 }
@@ -81,6 +83,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Map { .. } => "map",
         CoreRemoteResult::Query { .. } => "query",
         CoreRemoteResult::Lex { .. } => "lex",
+        CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
     };
     json!({
@@ -260,6 +263,11 @@ struct Subscription {
 }
 
 #[pyclass(module = "primadb._native")]
+struct TraversalSubscription {
+    inner: Arc<Mutex<Option<CoreTraversalSubscription>>>,
+}
+
+#[pyclass(module = "primadb._native")]
 struct WebSocketSync {
     inner: Arc<Mutex<Option<CoreWebSocketSync>>>,
 }
@@ -307,6 +315,15 @@ impl Primadb {
     #[pyo3(signature = (root=None))]
     fn snapshot_for_root(&self, py: Python<'_>, root: Option<String>) -> PyResult<Py<PyAny>> {
         to_py(py, self.inner.snapshot_for_root(root.as_deref()))
+    }
+
+    fn node_state(&self, py: Python<'_>, id: String) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.node_state(&id).map_err(to_py_err)?)
+    }
+
+    fn apply_node_state(&self, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let node: primadb::NodeState = from_py(node)?;
+        self.inner.apply_node_state(node).map_err(to_py_err)
     }
 
     fn export_snapshot_json(&self) -> PyResult<String> {
@@ -542,9 +559,22 @@ impl Chain {
         to_py(py, self.inner.scan(spec).map_err(to_py_err)?)
     }
 
+    fn traverse(&self, py: Python<'_>, spec: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let spec: TraversalSpec = from_py(spec)?;
+        to_py(py, self.inner.traverse(spec).map_err(to_py_err)?)
+    }
+
     fn subscribe(&self) -> PyResult<Subscription> {
         let subscription = self.inner.subscribe().map_err(to_py_err)?;
         Ok(Subscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
+    }
+
+    fn watch_traverse(&self, spec: &Bound<'_, PyAny>) -> PyResult<TraversalSubscription> {
+        let spec: TraversalSpec = from_py(spec)?;
+        let subscription = self.inner.watch_traverse(spec).map_err(to_py_err)?;
+        Ok(TraversalSubscription {
             inner: Arc::new(Mutex::new(Some(subscription))),
         })
     }
@@ -556,6 +586,64 @@ impl Subscription {
         let subscription = {
             let mut guard = self.inner.lock().unwrap();
             guard.take().ok_or_else(|| closed_error("subscription"))?
+        };
+
+        let message = py.detach(|| runtime().block_on(subscription.recv()));
+        let response = match message {
+            Some(value) => {
+                self.inner.lock().unwrap().replace(subscription);
+                json!({
+                    "done": false,
+                    "value": value,
+                })
+            }
+            None => json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }),
+        };
+
+        to_py(py, response)
+    }
+
+    fn try_next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return to_py(
+                py,
+                json!({
+                    "done": true,
+                    "value": JsonValue::Null,
+                }),
+            );
+        };
+
+        let message = match subscription.try_recv() {
+            Some(value) => json!({
+                "done": false,
+                "value": value,
+            }),
+            None => json!({
+                "done": false,
+                "value": JsonValue::Null,
+            }),
+        };
+        to_py(py, message)
+    }
+
+    fn close(&self) {
+        let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[pymethods]
+impl TraversalSubscription {
+    fn next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("traversal subscription"))?
         };
 
         let message = py.detach(|| runtime().block_on(subscription.recv()));
@@ -832,6 +920,21 @@ impl WebSocketSync {
         to_py(py, result.map_err(to_py_err)?)
     }
 
+    fn remote_node(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        id: String,
+    ) -> PyResult<Py<PyAny>> {
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_node(peer_id, id)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
     #[pyo3(signature = (peer_id, root=None))]
     fn remote_snapshot(
         &self,
@@ -914,6 +1017,20 @@ impl WebSocketSync {
             .as_ref()
             .ok_or_else(|| closed_error("websocket sync"))?
             .watch_lex(peer_id, path, spec)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    fn watch_remote_node(&self, peer_id: String, id: String) -> PyResult<RemoteWatch> {
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_node(peer_id, id)
             .map_err(to_py_err)?;
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(watch))),
@@ -1114,6 +1231,23 @@ impl WebRtcMesh {
         })
     }
 
+    fn watch_remote_node(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        id: String,
+    ) -> PyResult<RemoteWatch> {
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_node(peer_id, id)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
     #[pyo3(signature = (peer_id, root=None))]
     fn watch_remote_snapshot(
         &self,
@@ -1166,6 +1300,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Primadb>()?;
     module.add_class::<Chain>()?;
     module.add_class::<Subscription>()?;
+    module.add_class::<TraversalSubscription>()?;
     module.add_class::<RelayServer>()?;
     module.add_class::<RemoteWatch>()?;
     module.add_class::<WebSocketSync>()?;
