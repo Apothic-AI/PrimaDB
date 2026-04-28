@@ -4,7 +4,11 @@ use crate::blob::FileBlobStore;
 use crate::blob::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, BlobStore, MemoryBlobStore, StoredBlob,
 };
-use crate::clock::{HybridClock, Revision, VersionMarker};
+use crate::clock::{HybridClock, Revision, VersionMarker, now_millis};
+use crate::consistency::{
+    ProvisionalTransaction, ScopeAuthority, ScopeConsistency, ScopeOfflineWrites, ScopePolicy,
+    TransactionOptions, TransactionReport, TransactionStatus, TransactionStep,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::durable::{DurableStorageBinding, DurableStorageConfig};
 use crate::engine::{
@@ -95,6 +99,24 @@ pub struct TraversalSubscription {
     inner: Arc<TraversalSubscriptionInner>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Scope {
+    db: Primadb,
+    root: NodeId,
+}
+
+pub struct Transaction<'a> {
+    inner: &'a mut Inner,
+    scope_root: Option<NodeId>,
+    member_ids: Vec<String>,
+}
+
+pub struct TransactionChain<'tx, 'inner> {
+    tx: &'tx mut Transaction<'inner>,
+    anchor: NodeId,
+    segments: Vec<String>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub trait NodeFetchScheduler: Send + Sync {
     fn fetch_nodes(&self, nodes: Vec<NodeId>);
@@ -164,6 +186,9 @@ struct Inner {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     next_node_fetch_scheduler_id: u64,
     scheduled_node_fetches: BTreeSet<NodeId>,
+    scope_policies: BTreeMap<String, ScopePolicy>,
+    provisional_transactions: BTreeMap<String, ProvisionalTransaction>,
+    next_provisional_transaction_id: u64,
     next_storage_tx_id: u64,
     limits: PrimadbLimits,
     network_hooks: Option<Arc<dyn NetworkHooks>>,
@@ -282,6 +307,45 @@ impl ChangeImpact {
             touched_paths: touched_paths.into_iter().collect(),
         }
     }
+
+    fn is_empty(&self) -> bool {
+        !self.data_changed && !self.full_refresh && self.touched_paths.is_empty()
+    }
+}
+
+#[derive(Clone)]
+struct TransactionRollback {
+    clock: HybridClock,
+    nodes: BTreeMap<NodeId, NodeState>,
+    pending_ops: Vec<Operation>,
+    unflushed_ops: Vec<Operation>,
+    missing_nodes: BTreeSet<NodeId>,
+    relationship_index: RelationshipIndex,
+    scheduled_node_fetches: BTreeSet<NodeId>,
+}
+
+impl TransactionRollback {
+    fn capture(inner: &Inner) -> Self {
+        Self {
+            clock: inner.clock.clone(),
+            nodes: inner.nodes.clone(),
+            pending_ops: inner.pending_ops.clone(),
+            unflushed_ops: inner.unflushed_ops.clone(),
+            missing_nodes: inner.missing_nodes.clone(),
+            relationship_index: inner.relationship_index.clone(),
+            scheduled_node_fetches: inner.scheduled_node_fetches.clone(),
+        }
+    }
+
+    fn restore(self, inner: &mut Inner) {
+        inner.clock = self.clock;
+        inner.nodes = self.nodes;
+        inner.pending_ops = self.pending_ops;
+        inner.unflushed_ops = self.unflushed_ops;
+        inner.missing_nodes = self.missing_nodes;
+        inner.relationship_index = self.relationship_index;
+        inner.scheduled_node_fetches = self.scheduled_node_fetches;
+    }
 }
 
 impl ChangeEvent {
@@ -344,6 +408,9 @@ impl Primadb {
                 node_fetch_schedulers: BTreeMap::new(),
                 next_node_fetch_scheduler_id: 0,
                 scheduled_node_fetches: BTreeSet::new(),
+                scope_policies: BTreeMap::new(),
+                provisional_transactions: BTreeMap::new(),
+                next_provisional_transaction_id: 0,
                 next_storage_tx_id: 1,
                 limits: PrimadbLimits::default(),
                 network_hooks: None,
@@ -365,20 +432,230 @@ impl Primadb {
         }
     }
 
+    pub fn scope(&self, root: impl Into<String>) -> Scope {
+        Scope {
+            db: self.clone(),
+            root: root.into(),
+        }
+    }
+
+    pub fn transaction<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Transaction<'_>) -> Result<T>,
+    {
+        self.run_local_transaction(f).map(|(value, _, _)| value)
+    }
+
+    pub fn apply_transaction_steps(
+        &self,
+        steps: Vec<TransactionStep>,
+    ) -> Result<TransactionReport> {
+        self.validate_transaction_scopes(None, &steps)?;
+        let (_, member_ids, operation_count) =
+            self.run_local_transaction(|tx| apply_transaction_steps(tx, &steps))?;
+        Ok(TransactionReport {
+            status: TransactionStatus::Committed,
+            operation_count,
+            member_ids,
+            proposal_id: None,
+        })
+    }
+
+    pub fn scope_policy(&self, scope: &str) -> Option<ScopePolicy> {
+        self.inner
+            .lock()
+            .unwrap()
+            .scope_policies
+            .get(scope)
+            .cloned()
+    }
+
+    fn configure_scope_policy(&self, scope: &str, policy: ScopePolicy) -> Result<()> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.scope_policies.insert(scope.to_owned(), policy);
+        }
+        self.finalize_change(ChangeImpact::pending_only())
+    }
+
+    fn provisional_transactions_for_scope(&self, scope: &str) -> Vec<ProvisionalTransaction> {
+        self.inner
+            .lock()
+            .unwrap()
+            .provisional_transactions
+            .values()
+            .filter(|proposal| proposal.scope == scope)
+            .cloned()
+            .collect()
+    }
+
+    fn queue_provisional_transaction(
+        &self,
+        scope: &str,
+        steps: Vec<TransactionStep>,
+        options: TransactionOptions,
+    ) -> Result<TransactionReport> {
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_provisional_transaction_id =
+                inner.next_provisional_transaction_id.saturating_add(1);
+            let id = format!(
+                "{}/proposal/{:x}",
+                inner.clock.actor(),
+                inner.next_provisional_transaction_id
+            );
+            let proposal = ProvisionalTransaction {
+                id: id.clone(),
+                scope: scope.to_owned(),
+                created_at_millis: now_millis(),
+                steps,
+                options,
+            };
+            inner.provisional_transactions.insert(id.clone(), proposal);
+            id
+        };
+        self.finalize_change(ChangeImpact::pending_only())?;
+        Ok(TransactionReport {
+            status: TransactionStatus::Provisional,
+            operation_count: 0,
+            member_ids: Vec::new(),
+            proposal_id: Some(id),
+        })
+    }
+
+    fn run_local_transaction<F, T>(&self, f: F) -> Result<(T, Vec<String>, usize)>
+    where
+        F: FnOnce(&mut Transaction<'_>) -> Result<T>,
+    {
+        self.run_local_transaction_in_scope(None, f)
+    }
+
+    fn run_local_transaction_in_scope<F, T>(
+        &self,
+        scope_root: Option<NodeId>,
+        f: F,
+    ) -> Result<(T, Vec<String>, usize)>
+    where
+        F: FnOnce(&mut Transaction<'_>) -> Result<T>,
+    {
+        let (result, member_ids, operation_count, impact) = {
+            let mut inner = self.inner.lock().unwrap();
+            let rollback = TransactionRollback::capture(&inner);
+            let start_unflushed_len = inner.unflushed_ops.len();
+            let (result, member_ids) = {
+                let mut tx = Transaction {
+                    inner: &mut inner,
+                    scope_root,
+                    member_ids: Vec::new(),
+                };
+                let result = f(&mut tx);
+                let member_ids = tx.member_ids.clone();
+                (result, member_ids)
+            };
+
+            match result {
+                Ok(value) => {
+                    let ops = inner.unflushed_ops[start_unflushed_len..].to_vec();
+                    let operation_count = ops.len();
+                    (
+                        Ok(value),
+                        member_ids,
+                        operation_count,
+                        ChangeImpact::from_ops(&ops),
+                    )
+                }
+                Err(error) => {
+                    rollback.restore(&mut inner);
+                    (Err(error), Vec::new(), 0, ChangeImpact::pending_only())
+                }
+            }
+        };
+
+        let value = result?;
+        if !impact.is_empty() {
+            self.finalize_change(impact)?;
+        }
+        Ok((value, member_ids, operation_count))
+    }
+
+    fn validate_transaction_scopes(
+        &self,
+        required_scope: Option<&str>,
+        steps: &[TransactionStep],
+    ) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        let mut matched_strict_scope: Option<String> = required_scope.map(str::to_owned);
+        let mut saw_unscoped_path = false;
+        for path in steps.iter().map(transaction_step_path) {
+            if let Some(required) = required_scope {
+                let display = path.path();
+                if !node_matches_root(&display, required) {
+                    return Err(PrimadbError::StrictScopeConflict {
+                        message: format!("path `{display}` is outside scope `{required}`"),
+                    });
+                }
+            }
+
+            let Some((scope, policy)) = inner.policy_for_path(&path.path()) else {
+                if required_scope.is_none() {
+                    saw_unscoped_path = true;
+                }
+                if matched_strict_scope.is_some() && required_scope.is_none() {
+                    return Err(PrimadbError::StrictScopeConflict {
+                        message: "transaction mixes scoped and unscoped paths".to_owned(),
+                    });
+                }
+                continue;
+            };
+
+            if policy.consistency != ScopeConsistency::Eventual {
+                if saw_unscoped_path && required_scope.is_none() {
+                    return Err(PrimadbError::StrictScopeConflict {
+                        message: "transaction mixes scoped and unscoped paths".to_owned(),
+                    });
+                }
+                match &matched_strict_scope {
+                    Some(current) if current != scope => {
+                        return Err(PrimadbError::StrictScopeConflict {
+                            message: format!("transaction touches both `{current}` and `{scope}`"),
+                        });
+                    }
+                    None => matched_strict_scope = Some(scope.to_owned()),
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> DatabaseSnapshot {
-        let (engine, clock, pending_ops, nodes) = {
+        let (
+            engine,
+            clock,
+            pending_ops,
+            nodes,
+            scope_policies,
+            provisional_transactions,
+            next_provisional_transaction_id,
+        ) = {
             let inner = self.inner.lock().unwrap();
             (
                 inner.storage_engine.clone(),
                 inner.clock.clone(),
                 inner.pending_ops.clone(),
                 inner.nodes.clone(),
+                inner.scope_policies.clone(),
+                inner.provisional_transactions.clone(),
+                inner.next_provisional_transaction_id,
             )
         };
         if let Some(engine) = engine {
             if let Ok(mut snapshot) = engine.export_snapshot(None) {
                 snapshot.clock = clock;
                 snapshot.pending_ops = pending_ops;
+                snapshot.scope_policies = scope_policies;
+                snapshot.provisional_transactions = provisional_transactions;
+                snapshot.next_provisional_transaction_id = next_provisional_transaction_id;
                 for (node_id, node_state) in nodes {
                     snapshot.nodes.insert(node_id, node_state);
                 }
@@ -389,6 +666,9 @@ impl Primadb {
             clock,
             nodes,
             pending_ops,
+            scope_policies,
+            provisional_transactions,
+            next_provisional_transaction_id,
         }
     }
 
@@ -453,6 +733,9 @@ impl Primadb {
             inner.clock = snapshot.clock;
             inner.nodes = snapshot.nodes;
             inner.pending_ops = snapshot.pending_ops;
+            inner.scope_policies = snapshot.scope_policies;
+            inner.provisional_transactions = snapshot.provisional_transactions;
+            inner.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
             inner.unflushed_ops.clear();
             inner.missing_nodes.clear();
             inner.scheduled_node_fetches.clear();
@@ -481,6 +764,9 @@ impl Primadb {
             } else {
                 Vec::new()
             };
+            inner.scope_policies = snapshot.scope_policies;
+            inner.provisional_transactions = snapshot.provisional_transactions;
+            inner.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
             inner.unflushed_ops.clear();
             inner.missing_nodes.clear();
             inner.scheduled_node_fetches.clear();
@@ -714,13 +1000,14 @@ impl Primadb {
     }
 
     pub fn snapshot_for_root(&self, root: Option<&str>) -> DatabaseSnapshot {
-        let (engine, clock, pending_ops, loaded_nodes) = {
+        let (engine, clock, pending_ops, loaded_nodes, scope_policies) = {
             let inner = self.inner.lock().unwrap();
             (
                 inner.storage_engine.clone(),
                 inner.clock.clone(),
                 inner.pending_ops.clone(),
                 inner.nodes.clone(),
+                inner.scope_policies.clone(),
             )
         };
 
@@ -729,16 +1016,25 @@ impl Primadb {
                 clock: clock.clone(),
                 nodes: BTreeMap::new(),
                 pending_ops: Vec::new(),
+                scope_policies: BTreeMap::new(),
+                provisional_transactions: BTreeMap::new(),
+                next_provisional_transaction_id: 0,
             })
         } else {
             DatabaseSnapshot {
                 clock: clock.clone(),
                 nodes: BTreeMap::new(),
                 pending_ops: Vec::new(),
+                scope_policies: BTreeMap::new(),
+                provisional_transactions: BTreeMap::new(),
+                next_provisional_transaction_id: 0,
             }
         };
 
         snapshot.clock = clock;
+        snapshot.scope_policies = scope_policies;
+        snapshot.provisional_transactions.clear();
+        snapshot.next_provisional_transaction_id = 0;
         for (node_id, node_state) in loaded_nodes {
             snapshot.nodes.insert(node_id, node_state);
         }
@@ -752,6 +1048,9 @@ impl Primadb {
                 .into_iter()
                 .filter(|op| operation_matches_snapshot_nodes(op, &reachable))
                 .collect();
+            snapshot
+                .scope_policies
+                .retain(|scope, _| node_matches_root(scope, root));
         } else {
             snapshot.pending_ops = pending_ops;
         }
@@ -778,6 +1077,15 @@ impl Primadb {
             }),
             PullRequestKind::Snapshot { root } => Ok(RemoteResult::Snapshot {
                 snapshot: self.snapshot_for_root(root.as_deref()),
+            }),
+            PullRequestKind::Transaction {
+                scope,
+                steps,
+                options,
+            } => Ok(RemoteResult::Transaction {
+                report: self
+                    .scope(scope)
+                    .transaction_steps(steps.clone(), options.clone())?,
             }),
         }
     }
@@ -1122,14 +1430,18 @@ impl Primadb {
     pub fn vacuum_storage(&self) -> Result<VacuumReport> {
         let (storage, blob_store, metadata, nodes, next_storage_tx_id) = {
             let inner = self.inner.lock().unwrap();
+            let mut metadata = build_storage_metadata(
+                inner.clock.clone(),
+                inner.pending_ops.clone(),
+                inner.next_storage_tx_id + 1,
+            );
+            metadata.scope_policies = inner.scope_policies.clone();
+            metadata.provisional_transactions = inner.provisional_transactions.clone();
+            metadata.next_provisional_transaction_id = inner.next_provisional_transaction_id;
             (
                 inner.storage_engine.clone(),
                 inner.blob_store.clone(),
-                build_storage_metadata(
-                    inner.clock.clone(),
-                    inner.pending_ops.clone(),
-                    inner.next_storage_tx_id + 1,
-                ),
+                metadata,
                 inner.nodes.clone(),
                 inner.next_storage_tx_id,
             )
@@ -1191,6 +1503,9 @@ impl Primadb {
             if let Some(metadata) = metadata.clone() {
                 inner.clock = metadata.clock;
                 inner.pending_ops = metadata.pending_ops;
+                inner.scope_policies = metadata.scope_policies;
+                inner.provisional_transactions = metadata.provisional_transactions;
+                inner.next_provisional_transaction_id = metadata.next_provisional_transaction_id;
                 inner.unflushed_ops.clear();
                 inner.nodes.clear();
                 inner.missing_nodes.clear();
@@ -1324,6 +1639,9 @@ impl Primadb {
             clock,
             pending_ops,
             nodes,
+            scope_policies,
+            provisional_transactions,
+            next_provisional_transaction_id,
         ) = {
             let inner = self.inner.lock().unwrap();
             (
@@ -1334,12 +1652,18 @@ impl Primadb {
                     clock: inner.clock.clone(),
                     nodes: inner.nodes.clone(),
                     pending_ops: inner.pending_ops.clone(),
+                    scope_policies: inner.scope_policies.clone(),
+                    provisional_transactions: inner.provisional_transactions.clone(),
+                    next_provisional_transaction_id: inner.next_provisional_transaction_id,
                 },
                 inner.unflushed_ops.clone(),
                 inner.next_storage_tx_id,
                 inner.clock.clone(),
                 inner.pending_ops.clone(),
                 inner.nodes.clone(),
+                inner.scope_policies.clone(),
+                inner.provisional_transactions.clone(),
+                inner.next_provisional_transaction_id,
             )
         };
 
@@ -1352,7 +1676,10 @@ impl Primadb {
         }
 
         if let Some(engine) = engine {
-            let metadata = build_storage_metadata(clock, pending_ops, next_storage_tx_id + 1);
+            let mut metadata = build_storage_metadata(clock, pending_ops, next_storage_tx_id + 1);
+            metadata.scope_policies = scope_policies;
+            metadata.provisional_transactions = provisional_transactions;
+            metadata.next_provisional_transaction_id = next_provisional_transaction_id;
             let transaction = if unflushed_ops.is_empty() {
                 build_storage_transaction(next_storage_tx_id, metadata, nodes)
             } else {
@@ -1894,29 +2221,7 @@ impl Primadb {
     fn put_json(&self, anchor: &str, segments: &[String], value: JsonValue) -> Result<()> {
         {
             let mut inner = self.inner.lock().unwrap();
-            if segments.is_empty() {
-                let ParsedInput::Object(object) =
-                    parse_input(value, &display_path(anchor, segments))?
-                else {
-                    return Err(PrimadbError::ExpectedObject {
-                        path: display_path(anchor, segments),
-                    });
-                };
-                inner.write_object_to_node(anchor, object, &display_path(anchor, segments))?;
-            } else {
-                let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)?
-                else {
-                    return Err(PrimadbError::ExpectedFieldPath {
-                        path: display_path(anchor, segments),
-                    });
-                };
-                inner.write_value_to_field(
-                    &node,
-                    &field,
-                    value,
-                    &display_path(anchor, segments),
-                )?;
-            }
+            put_json_inner(&mut inner, anchor, segments, value)?;
         }
         self.finalize_local_change()
     }
@@ -1931,6 +2236,7 @@ impl Primadb {
     ) -> Result<()> {
         {
             let mut inner = self.inner.lock().unwrap();
+            inner.ensure_canonical_write_allowed(anchor, segments)?;
             if segments.is_empty() {
                 let ParsedInput::Object(object) =
                     parse_input(value, &display_path(anchor, segments))?
@@ -1973,12 +2279,7 @@ impl Primadb {
 
         {
             let mut inner = self.inner.lock().unwrap();
-            let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
-                return Err(PrimadbError::ExpectedFieldPath {
-                    path: display_path(anchor, segments),
-                });
-            };
-            inner.delete_field(&node, &field);
+            unset_inner(&mut inner, anchor, segments)?;
         }
         self.finalize_local_change()
     }
@@ -1992,14 +2293,7 @@ impl Primadb {
 
         let member_id = {
             let mut inner = self.inner.lock().unwrap();
-            let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
-                return Err(PrimadbError::ExpectedFieldPath {
-                    path: display_path(anchor, segments),
-                });
-            };
-
-            let parsed = parse_input(value, &display_path(anchor, segments))?;
-            inner.add_member_to_set(&node, &field, parsed, &display_path(anchor, segments))?
+            set_json_inner(&mut inner, anchor, segments, value)?
         };
         self.finalize_local_change()?;
         Ok(member_id)
@@ -2021,6 +2315,7 @@ impl Primadb {
 
         let member_id = {
             let mut inner = self.inner.lock().unwrap();
+            inner.ensure_canonical_write_allowed(anchor, segments)?;
             let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
                 return Err(PrimadbError::ExpectedFieldPath {
                     path: display_path(anchor, segments),
@@ -2049,15 +2344,7 @@ impl Primadb {
 
         let member_id = {
             let mut inner = self.inner.lock().unwrap();
-            let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
-                return Err(PrimadbError::ExpectedFieldPath {
-                    path: display_path(anchor, segments),
-                });
-            };
-
-            let member_id = parse_member_reference(value, &display_path(anchor, segments))?;
-            inner.remove_member_from_set(&node, &field, &member_id);
-            member_id
+            remove_json_inner(&mut inner, anchor, segments, value)?
         };
         self.finalize_local_change()?;
         Ok(member_id)
@@ -2067,6 +2354,514 @@ impl Primadb {
 impl Default for Primadb {
     fn default() -> Self {
         Self::with_replica_id(HybridClock::default_actor())
+    }
+}
+
+fn put_json_inner(
+    inner: &mut Inner,
+    anchor: &str,
+    segments: &[String],
+    value: JsonValue,
+) -> Result<()> {
+    inner.ensure_canonical_write_allowed(anchor, segments)?;
+    if segments.is_empty() {
+        let ParsedInput::Object(object) = parse_input(value, &display_path(anchor, segments))?
+        else {
+            return Err(PrimadbError::ExpectedObject {
+                path: display_path(anchor, segments),
+            });
+        };
+        inner.write_object_to_node(anchor, object, &display_path(anchor, segments))?;
+    } else {
+        let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
+            return Err(PrimadbError::ExpectedFieldPath {
+                path: display_path(anchor, segments),
+            });
+        };
+        inner.write_value_to_field(&node, &field, value, &display_path(anchor, segments))?;
+    }
+    Ok(())
+}
+
+fn unset_inner(inner: &mut Inner, anchor: &str, segments: &[String]) -> Result<()> {
+    if segments.is_empty() {
+        return Err(PrimadbError::ExpectedFieldPath {
+            path: display_path(anchor, segments),
+        });
+    }
+    inner.ensure_canonical_write_allowed(anchor, segments)?;
+    let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
+        return Err(PrimadbError::ExpectedFieldPath {
+            path: display_path(anchor, segments),
+        });
+    };
+    inner.delete_field(&node, &field);
+    Ok(())
+}
+
+fn set_json_inner(
+    inner: &mut Inner,
+    anchor: &str,
+    segments: &[String],
+    value: JsonValue,
+) -> Result<String> {
+    if segments.is_empty() {
+        return Err(PrimadbError::ExpectedFieldPath {
+            path: display_path(anchor, segments),
+        });
+    }
+    inner.ensure_canonical_write_allowed(anchor, segments)?;
+    let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
+        return Err(PrimadbError::ExpectedFieldPath {
+            path: display_path(anchor, segments),
+        });
+    };
+    let parsed = parse_input(value, &display_path(anchor, segments))?;
+    inner.add_member_to_set(&node, &field, parsed, &display_path(anchor, segments))
+}
+
+fn remove_json_inner(
+    inner: &mut Inner,
+    anchor: &str,
+    segments: &[String],
+    value: JsonValue,
+) -> Result<String> {
+    if segments.is_empty() {
+        return Err(PrimadbError::ExpectedFieldPath {
+            path: display_path(anchor, segments),
+        });
+    }
+    inner.ensure_canonical_write_allowed(anchor, segments)?;
+    let Cursor::Field { node, field } = inner.ensure_field_cursor(anchor, segments)? else {
+        return Err(PrimadbError::ExpectedFieldPath {
+            path: display_path(anchor, segments),
+        });
+    };
+    let member_id = parse_member_reference(value, &display_path(anchor, segments))?;
+    inner.remove_member_from_set(&node, &field, &member_id);
+    Ok(member_id)
+}
+
+fn materialize_inner(
+    inner: &mut Inner,
+    anchor: &str,
+    segments: &[String],
+) -> Result<Option<JsonValue>> {
+    match inner.resolve_cursor(anchor, segments)? {
+        Some(Cursor::Node(node)) => Ok(Some(inner.materialize_node(
+            &node,
+            &node,
+            &mut BTreeSet::new(),
+        ))),
+        Some(Cursor::Field { node, field }) => {
+            let value = match inner
+                .nodes
+                .get(&node)
+                .and_then(|node_state| node_state.fields.get(&field))
+                .map(|field_state| field_state.value.clone())
+            {
+                Some(value) => value,
+                None => return Ok(None),
+            };
+            Ok(Some(inner.materialize_field(
+                &node,
+                &field,
+                &value,
+                &mut BTreeSet::new(),
+            )))
+        }
+        None => Ok(None),
+    }
+}
+
+fn path_exists_inner(inner: &mut Inner, anchor: &str, segments: &[String]) -> Result<bool> {
+    match inner.resolve_cursor(anchor, segments)? {
+        Some(Cursor::Node(node)) => Ok(inner.nodes.contains_key(&node)),
+        Some(Cursor::Field { node, field }) => Ok(inner
+            .nodes
+            .get(&node)
+            .and_then(|node_state| node_state.fields.get(&field))
+            .is_some()),
+        None => Ok(false),
+    }
+}
+
+fn revision_at_inner(
+    inner: &mut Inner,
+    anchor: &str,
+    segments: &[String],
+) -> Result<Option<VersionMarker>> {
+    match inner.resolve_cursor(anchor, segments)? {
+        Some(Cursor::Node(node)) => Ok(inner.nodes.get(&node).and_then(node_revision_marker)),
+        Some(Cursor::Field { node, field }) => {
+            let Some(node_state) = inner.nodes.get(&node) else {
+                return Ok(None);
+            };
+            Ok(node_state
+                .fields
+                .get(&field)
+                .map(|state| state.version.clone())
+                .or_else(|| node_state.tombstones.get(&field).cloned()))
+        }
+        None => Ok(None),
+    }
+}
+
+fn node_revision_marker(node: &NodeState) -> Option<VersionMarker> {
+    let mut marker = None;
+    for field in node.fields.values() {
+        marker = max_marker(marker, Some(field.version.clone()));
+    }
+    for tombstone in node.tombstones.values() {
+        marker = max_marker(marker, Some(tombstone.clone()));
+    }
+    marker
+}
+
+fn apply_transaction_steps(tx: &mut Transaction<'_>, steps: &[TransactionStep]) -> Result<()> {
+    for step in steps {
+        match step.clone() {
+            TransactionStep::Put { path, value } => tx.chain(path).put_json(value)?,
+            TransactionStep::Unset { path } => tx.chain(path).unset()?,
+            TransactionStep::Set { path, value } => {
+                tx.chain(path).set_json(value)?;
+            }
+            TransactionStep::Remove { path, value } => {
+                tx.chain(path).remove_json(value)?;
+            }
+            TransactionStep::AssertExists { path } => tx.chain(path).assert_exists()?,
+            TransactionStep::AssertAbsent { path } => tx.chain(path).assert_absent()?,
+            TransactionStep::AssertValue { path, value } => tx.chain(path).assert_value(value)?,
+            TransactionStep::AssertRevision { path, revision } => {
+                tx.chain(path).assert_revision(revision)?
+            }
+            TransactionStep::Increment { path, by } => {
+                tx.chain(path).increment(by)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn transaction_step_path(step: &TransactionStep) -> &RemotePath {
+    match step {
+        TransactionStep::Put { path, .. }
+        | TransactionStep::Unset { path }
+        | TransactionStep::Set { path, .. }
+        | TransactionStep::Remove { path, .. }
+        | TransactionStep::AssertExists { path }
+        | TransactionStep::AssertAbsent { path }
+        | TransactionStep::AssertValue { path, .. }
+        | TransactionStep::AssertRevision { path, .. }
+        | TransactionStep::Increment { path, .. } => path,
+    }
+}
+
+fn scope_transaction_step(scope: &str, step: TransactionStep) -> TransactionStep {
+    match step {
+        TransactionStep::Put { path, value } => TransactionStep::Put {
+            path: scope_remote_path(scope, path),
+            value,
+        },
+        TransactionStep::Unset { path } => TransactionStep::Unset {
+            path: scope_remote_path(scope, path),
+        },
+        TransactionStep::Set { path, value } => TransactionStep::Set {
+            path: scope_remote_path(scope, path),
+            value,
+        },
+        TransactionStep::Remove { path, value } => TransactionStep::Remove {
+            path: scope_remote_path(scope, path),
+            value,
+        },
+        TransactionStep::AssertExists { path } => TransactionStep::AssertExists {
+            path: scope_remote_path(scope, path),
+        },
+        TransactionStep::AssertAbsent { path } => TransactionStep::AssertAbsent {
+            path: scope_remote_path(scope, path),
+        },
+        TransactionStep::AssertValue { path, value } => TransactionStep::AssertValue {
+            path: scope_remote_path(scope, path),
+            value,
+        },
+        TransactionStep::AssertRevision { path, revision } => TransactionStep::AssertRevision {
+            path: scope_remote_path(scope, path),
+            revision,
+        },
+        TransactionStep::Increment { path, by } => TransactionStep::Increment {
+            path: scope_remote_path(scope, path),
+            by,
+        },
+    }
+}
+
+fn scope_remote_path(scope: &str, path: RemotePath) -> RemotePath {
+    let (anchor, segments) = scoped_anchor_segments(Some(scope), path.anchor, path.segments);
+    RemotePath { anchor, segments }
+}
+
+fn scoped_anchor_segments(
+    scope: Option<&str>,
+    anchor: String,
+    segments: Vec<String>,
+) -> (String, Vec<String>) {
+    let Some(scope) = scope else {
+        return (anchor, segments);
+    };
+    if anchor.is_empty() {
+        return (scope.to_owned(), segments);
+    }
+    if node_matches_root(&anchor, scope) {
+        return (anchor, segments);
+    }
+    let mut scoped_segments = Vec::with_capacity(segments.len() + 1);
+    scoped_segments.push(anchor);
+    scoped_segments.extend(segments);
+    (scope.to_owned(), scoped_segments)
+}
+
+fn scope_policy_matches_authority_actor(policy: &ScopePolicy, actor: &str) -> bool {
+    let Some(authority) = &policy.authority else {
+        return false;
+    };
+    match authority {
+        ScopeAuthority::Peer { peer_id } | ScopeAuthority::FullNode { peer_id } => {
+            peer_id == actor
+                || peer_id == &format!("native:{actor}")
+                || peer_id == &format!("full-node:{actor}")
+        }
+        ScopeAuthority::Quorum { peers, threshold } => {
+            *threshold <= 1
+                && peers.iter().any(|peer_id| {
+                    peer_id == actor
+                        || peer_id == &format!("native:{actor}")
+                        || peer_id == &format!("full-node:{actor}")
+                })
+        }
+    }
+}
+
+impl Scope {
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    pub fn configure(&self, policy: ScopePolicy) -> Result<()> {
+        self.db.configure_scope_policy(&self.root, policy)
+    }
+
+    pub fn policy(&self) -> Option<ScopePolicy> {
+        self.db.scope_policy(&self.root)
+    }
+
+    pub fn proposals(&self) -> Vec<ProvisionalTransaction> {
+        self.db.provisional_transactions_for_scope(&self.root)
+    }
+
+    pub fn transaction<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Transaction<'_>) -> Result<T>,
+    {
+        let policy = self.policy().unwrap_or_default();
+        if policy.consistency == ScopeConsistency::Coordinated
+            && !scope_policy_matches_authority_actor(&policy, &self.db.replica_id())
+        {
+            return Err(PrimadbError::StrictScopeUnavailable {
+                scope: self.root.clone(),
+            });
+        }
+
+        self.db
+            .run_local_transaction_in_scope(Some(self.root.clone()), f)
+            .map(|(value, _, _)| value)
+    }
+
+    pub fn transaction_steps(
+        &self,
+        steps: Vec<TransactionStep>,
+        options: TransactionOptions,
+    ) -> Result<TransactionReport> {
+        let steps = steps
+            .into_iter()
+            .map(|step| scope_transaction_step(&self.root, step))
+            .collect::<Vec<_>>();
+        self.db
+            .validate_transaction_scopes(Some(&self.root), &steps)?;
+
+        let policy = self.policy().unwrap_or_default();
+        if policy.consistency == ScopeConsistency::Coordinated
+            && !scope_policy_matches_authority_actor(&policy, &self.db.replica_id())
+        {
+            let offline = options
+                .offline
+                .clone()
+                .unwrap_or_else(|| policy.offline_writes.clone());
+            return match offline {
+                ScopeOfflineWrites::Reject => Err(PrimadbError::StrictScopeUnavailable {
+                    scope: self.root.clone(),
+                }),
+                ScopeOfflineWrites::QueueProvisional => self
+                    .db
+                    .queue_provisional_transaction(&self.root, steps, options),
+            };
+        }
+
+        let (_, member_ids, operation_count) = self
+            .db
+            .run_local_transaction_in_scope(Some(self.root.clone()), |tx| {
+                apply_transaction_steps(tx, &steps)
+            })?;
+        Ok(TransactionReport {
+            status: TransactionStatus::Committed,
+            operation_count,
+            member_ids,
+            proposal_id: None,
+        })
+    }
+}
+
+impl<'a> Transaction<'a> {
+    pub fn root<'tx>(&'tx mut self, node: impl Into<String>) -> TransactionChain<'tx, 'a> {
+        let (anchor, segments) =
+            scoped_anchor_segments(self.scope_root.as_deref(), node.into(), Vec::new());
+        TransactionChain {
+            tx: self,
+            anchor,
+            segments,
+        }
+    }
+
+    pub fn chain<'tx>(&'tx mut self, path: RemotePath) -> TransactionChain<'tx, 'a> {
+        let (anchor, segments) =
+            scoped_anchor_segments(self.scope_root.as_deref(), path.anchor, path.segments);
+        TransactionChain {
+            tx: self,
+            anchor,
+            segments,
+        }
+    }
+
+    pub fn member_ids(&self) -> &[String] {
+        &self.member_ids
+    }
+}
+
+impl<'tx, 'inner> TransactionChain<'tx, 'inner> {
+    pub fn field(mut self, key: impl Into<String>) -> Self {
+        self.segments.push(key.into());
+        self
+    }
+
+    pub fn path(&self) -> String {
+        display_path(&self.anchor, &self.segments)
+    }
+
+    pub fn put<T: Serialize>(&mut self, value: T) -> Result<()> {
+        self.put_json(serde_json::to_value(value)?)
+    }
+
+    pub fn put_json(&mut self, value: JsonValue) -> Result<()> {
+        put_json_inner(self.tx.inner, &self.anchor, &self.segments, value)
+    }
+
+    pub fn unset(&mut self) -> Result<()> {
+        unset_inner(self.tx.inner, &self.anchor, &self.segments)
+    }
+
+    pub fn set<T: Serialize>(&mut self, value: T) -> Result<String> {
+        self.set_json(serde_json::to_value(value)?)
+    }
+
+    pub fn set_json(&mut self, value: JsonValue) -> Result<String> {
+        let member_id = set_json_inner(self.tx.inner, &self.anchor, &self.segments, value)?;
+        self.tx.member_ids.push(member_id.clone());
+        Ok(member_id)
+    }
+
+    pub fn remove<T: Serialize>(&mut self, value: T) -> Result<String> {
+        self.remove_json(serde_json::to_value(value)?)
+    }
+
+    pub fn remove_json(&mut self, value: JsonValue) -> Result<String> {
+        remove_json_inner(self.tx.inner, &self.anchor, &self.segments, value)
+    }
+
+    pub fn once_json(&mut self) -> Result<Option<JsonValue>> {
+        materialize_inner(self.tx.inner, &self.anchor, &self.segments)
+    }
+
+    pub fn revision(&mut self) -> Result<Option<VersionMarker>> {
+        revision_at_inner(self.tx.inner, &self.anchor, &self.segments)
+    }
+
+    pub fn assert_exists(&mut self) -> Result<()> {
+        if path_exists_inner(self.tx.inner, &self.anchor, &self.segments)? {
+            Ok(())
+        } else {
+            Err(PrimadbError::TransactionConflict {
+                message: format!("expected `{}` to exist", self.path()),
+            })
+        }
+    }
+
+    pub fn assert_absent(&mut self) -> Result<()> {
+        if path_exists_inner(self.tx.inner, &self.anchor, &self.segments)? {
+            Err(PrimadbError::TransactionConflict {
+                message: format!("expected `{}` to be absent", self.path()),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn assert_value<T: Serialize>(&mut self, expected: T) -> Result<()> {
+        let expected = serde_json::to_value(expected)?;
+        let current = self.once_json()?;
+        if current.as_ref() == Some(&expected) {
+            Ok(())
+        } else {
+            Err(PrimadbError::TransactionConflict {
+                message: format!("expected `{}` to equal `{expected}`", self.path()),
+            })
+        }
+    }
+
+    pub fn assert_revision(&mut self, expected: Option<VersionMarker>) -> Result<()> {
+        let current = self.revision()?;
+        if current == expected {
+            Ok(())
+        } else {
+            Err(PrimadbError::TransactionConflict {
+                message: format!("revision conflict at `{}`", self.path()),
+            })
+        }
+    }
+
+    pub fn increment(&mut self, by: f64) -> Result<f64> {
+        let current = self.once_json()?;
+        let base = match current {
+            Some(JsonValue::Number(number)) => {
+                number
+                    .as_f64()
+                    .ok_or_else(|| PrimadbError::TransactionConflict {
+                        message: format!("`{}` is not a finite number", self.path()),
+                    })?
+            }
+            Some(_) => {
+                return Err(PrimadbError::TransactionConflict {
+                    message: format!("`{}` is not numeric", self.path()),
+                });
+            }
+            None => 0.0,
+        };
+        let next = base + by;
+        let number = serde_json::Number::from_f64(next).ok_or_else(|| {
+            PrimadbError::TransactionConflict {
+                message: format!("increment produced a non-finite value at `{}`", self.path()),
+            }
+        })?;
+        self.put_json(JsonValue::Number(number))?;
+        Ok(next)
     }
 }
 
@@ -2749,6 +3544,32 @@ impl Inner {
         }
     }
 
+    fn policy_for_path(&self, path: &str) -> Option<(&str, &ScopePolicy)> {
+        if self.scope_policies.is_empty() {
+            return None;
+        }
+        self.scope_policies
+            .iter()
+            .filter(|(scope, _)| node_matches_root(path, scope))
+            .max_by_key(|(scope, _)| scope.len())
+            .map(|(scope, policy)| (scope.as_str(), policy))
+    }
+
+    fn ensure_canonical_write_allowed(&self, anchor: &str, segments: &[String]) -> Result<()> {
+        let path = watch_path_key(anchor, segments);
+        let Some((scope, policy)) = self.policy_for_path(&path) else {
+            return Ok(());
+        };
+        if policy.consistency == ScopeConsistency::Coordinated
+            && !scope_policy_matches_authority_actor(policy, self.clock.actor())
+        {
+            return Err(PrimadbError::StrictScopeUnavailable {
+                scope: scope.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     fn rebuild_relationship_index(&mut self) {
         self.relationship_index = RelationshipIndex::default();
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
@@ -3297,6 +4118,9 @@ impl Inner {
         {
             return false;
         }
+        if origin == OperationOrigin::Remote && !self.remote_operation_allowed(&op) {
+            return false;
+        }
         self.clock.observe(&op.revision);
         let marker = VersionMarker {
             revision: op.revision.clone(),
@@ -3548,6 +4372,17 @@ impl Inner {
         }
 
         accepted
+    }
+
+    fn remote_operation_allowed(&self, op: &Operation) -> bool {
+        let path = operation_touched_path(op);
+        let Some((_, policy)) = self.policy_for_path(&path) else {
+            return true;
+        };
+        if policy.consistency != ScopeConsistency::Coordinated {
+            return true;
+        }
+        scope_policy_matches_authority_actor(policy, &op.author)
     }
 
     fn materialize_node(
@@ -3992,6 +4827,7 @@ fn merge_snapshot_into_inner(inner: &mut Inner, snapshot: DatabaseSnapshot) {
         observe_node_state(&mut inner.clock, &node);
         merge_node_state(&mut inner.nodes, node);
     }
+    inner.scope_policies.extend(snapshot.scope_policies);
     inner.missing_nodes.clear();
     inner.scheduled_node_fetches.clear();
     inner.rebuild_relationship_index();
@@ -4248,10 +5084,19 @@ fn build_pull_responses(
                         clock: (index == 0).then_some(snapshot.clock.clone()),
                         nodes: node_chunks.get(index).cloned().unwrap_or_default(),
                         pending_ops: op_chunks.get(index).cloned().unwrap_or_default(),
+                        scope_policies: (index == 0)
+                            .then_some(snapshot.scope_policies.clone())
+                            .unwrap_or_default(),
                     },
                 })
                 .collect()
         }
+        RemoteResult::Transaction { report } => vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::Transaction { report },
+        }],
     }
 }
 
@@ -4774,10 +5619,11 @@ fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
 mod tests {
     use super::{NodeFetchScheduler, Primadb};
     use crate::{
-        ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PullRequest,
-        PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec, RemotePath,
-        Result, RoomHookContext, ServeRequestContext, ServeResultContext, TraversalDirection,
-        TraversalSpec,
+        ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PrimadbError,
+        PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec,
+        RemotePath, Result, RoomHookContext, ScopeAuthority, ScopeConsistency, ScopeOfflineWrites,
+        ScopePolicy, ServeRequestContext, ServeResultContext, TransactionOptions,
+        TransactionStatus, TransactionStep, TraversalDirection, TraversalSpec,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -4845,6 +5691,350 @@ mod tests {
             .once_json()?
             .unwrap();
         assert_eq!(members["$set"].as_array().unwrap().len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn local_transaction_commits_writes_in_one_watch_batch() -> Result<()> {
+        let db = Primadb::with_replica_id("node-a");
+        let changes = db.subscribe_changes();
+        let initial = changes.recv_blocking().unwrap();
+        assert_eq!(initial.revision, 0);
+
+        db.transaction(|tx| {
+            tx.root("docs").field("a").put(json!({"title": "A"}))?;
+            tx.root("docs").field("b").put(json!({"title": "B"}))?;
+            Ok(())
+        })?;
+
+        let event = changes.recv_blocking().unwrap();
+        assert!(event.data_changed);
+        assert_eq!(event.revision, 1);
+        assert!(changes.try_recv().is_none());
+        assert_eq!(
+            db.root("docs").field("a").once_json()?.unwrap()["title"],
+            "A"
+        );
+        assert_eq!(
+            db.root("docs").field("b").once_json()?.unwrap()["title"],
+            "B"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_transaction_rolls_back_on_failed_precondition() -> Result<()> {
+        let db = Primadb::with_replica_id("node-a");
+        db.root("docs").field("a").put(json!({"version": 1}))?;
+        let pending_before = db.pending_operations().len();
+
+        let result = db.transaction(|tx| {
+            tx.root("docs").field("a").put(json!({"version": 2}))?;
+            tx.root("docs").field("a").assert_absent()?;
+            Ok(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(PrimadbError::TransactionConflict { .. })
+        ));
+        assert_eq!(db.pending_operations().len(), pending_before);
+        assert_eq!(
+            db.root("docs").field("a").once_json()?.unwrap()["version"],
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_steps_support_revision_cas_and_increment() -> Result<()> {
+        let db = Primadb::with_replica_id("node-a");
+        db.root("accounts")
+            .field("alice")
+            .field("balance")
+            .put(10)?;
+        let revision = db.transaction(|tx| {
+            tx.root("accounts")
+                .field("alice")
+                .field("balance")
+                .revision()
+        })?;
+
+        let path = RemotePath::new("accounts", vec!["alice".to_owned(), "balance".to_owned()]);
+        let report = db.apply_transaction_steps(vec![
+            TransactionStep::AssertRevision {
+                path: path.clone(),
+                revision,
+            },
+            TransactionStep::Increment { path, by: 5.0 },
+        ])?;
+
+        assert_eq!(report.status, TransactionStatus::Committed);
+        assert_eq!(report.operation_count, 1);
+        assert_eq!(
+            db.root("accounts")
+                .field("alice")
+                .field("balance")
+                .once_json()?,
+            Some(json!(15.0))
+        );
+
+        let stale = db.apply_transaction_steps(vec![TransactionStep::AssertRevision {
+            path: RemotePath::new("accounts", vec!["alice".to_owned(), "balance".to_owned()]),
+            revision: None,
+        }]);
+        assert!(matches!(
+            stale,
+            Err(PrimadbError::TransactionConflict { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_steps_reject_unscoped_then_strict_scope_mix() -> Result<()> {
+        let db = Primadb::with_replica_id("ledger");
+        db.scope("accounts").configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            ..ScopePolicy::default()
+        })?;
+
+        let result = db.apply_transaction_steps(vec![
+            TransactionStep::Put {
+                path: RemotePath::new("notes", vec!["latest".to_owned()]),
+                value: json!("eventual"),
+            },
+            TransactionStep::Increment {
+                path: RemotePath::new("accounts", vec!["alice".to_owned(), "balance".to_owned()]),
+                by: 1.0,
+            },
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(PrimadbError::StrictScopeConflict { .. })
+        ));
+        assert_eq!(
+            db.root("notes").field("latest").once_json()?,
+            None,
+            "validation must fail before any unscoped write is committed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_steps_treat_local_transactional_scopes_as_strict_boundaries() -> Result<()> {
+        let db = Primadb::with_replica_id("node-a");
+        db.scope("catalog").configure(ScopePolicy {
+            consistency: ScopeConsistency::LocalTransactional,
+            ..ScopePolicy::default()
+        })?;
+
+        let result = db.apply_transaction_steps(vec![
+            TransactionStep::Put {
+                path: RemotePath::new("catalog", vec!["sku-1".to_owned()]),
+                value: json!({"stock": 1}),
+            },
+            TransactionStep::Put {
+                path: RemotePath::new("notes", vec!["latest".to_owned()]),
+                value: json!("eventual"),
+            },
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(PrimadbError::StrictScopeConflict { .. })
+        ));
+        assert_eq!(
+            db.root("catalog").field("sku-1").once_json()?,
+            None,
+            "mixed strict/eventual transaction must not partially commit"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coordinated_scope_rejects_canonical_write_when_authority_unavailable() -> Result<()> {
+        let db = Primadb::with_replica_id("peer-a");
+        db.scope("accounts").configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            offline_writes: ScopeOfflineWrites::Reject,
+            ..ScopePolicy::default()
+        })?;
+
+        let write = db.root("accounts").field("alice").field("balance").put(10);
+        assert!(matches!(
+            write,
+            Err(PrimadbError::StrictScopeUnavailable { .. })
+        ));
+        assert_eq!(
+            db.root("accounts")
+                .field("alice")
+                .field("balance")
+                .once_json()?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coordinated_scope_can_queue_provisional_write_without_committing() -> Result<()> {
+        let db = Primadb::with_replica_id("peer-a");
+        let scope = db.scope("accounts");
+        scope.configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            offline_writes: ScopeOfflineWrites::QueueProvisional,
+            ..ScopePolicy::default()
+        })?;
+
+        let report = scope.transaction_steps(
+            vec![TransactionStep::Increment {
+                path: RemotePath::new("alice", vec!["balance".to_owned()]),
+                by: 10.0,
+            }],
+            TransactionOptions::default(),
+        )?;
+
+        assert_eq!(report.status, TransactionStatus::Provisional);
+        assert!(report.proposal_id.is_some());
+        assert_eq!(scope.proposals().len(), 1);
+        assert_eq!(
+            db.root("accounts")
+                .field("alice")
+                .field("balance")
+                .once_json()?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coordinated_scope_local_authority_can_commit() -> Result<()> {
+        let db = Primadb::with_replica_id("ledger");
+        let scope = db.scope("accounts");
+        scope.configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            ..ScopePolicy::default()
+        })?;
+
+        let report = scope.transaction_steps(
+            vec![TransactionStep::Increment {
+                path: RemotePath::new("alice", vec!["balance".to_owned()]),
+                by: 10.0,
+            }],
+            TransactionOptions::default(),
+        )?;
+
+        assert_eq!(report.status, TransactionStatus::Committed);
+        assert_eq!(
+            db.root("accounts")
+                .field("alice")
+                .field("balance")
+                .once_json()?,
+            Some(json!(10.0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pull_transaction_request_commits_on_authority() -> Result<()> {
+        let db = Primadb::with_replica_id("ledger");
+        db.scope("accounts").configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            ..ScopePolicy::default()
+        })?;
+
+        let result = db.execute_pull_request(&PullRequest {
+            request_id: "tx-1".to_owned(),
+            request: PullRequestKind::Transaction {
+                scope: "accounts".to_owned(),
+                steps: vec![TransactionStep::Increment {
+                    path: RemotePath::new("alice", vec!["balance".to_owned()]),
+                    by: 12.0,
+                }],
+                options: TransactionOptions::default(),
+            },
+        })?;
+
+        match result {
+            crate::RemoteResult::Transaction { report } => {
+                assert_eq!(report.status, TransactionStatus::Committed);
+                assert!(report.operation_count >= 1);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        assert_eq!(
+            db.root("accounts")
+                .field("alice")
+                .field("balance")
+                .once_json()?,
+            Some(json!(12.0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coordinated_scope_rejects_remote_ops_from_non_authority() -> Result<()> {
+        let receiver = Primadb::with_replica_id("receiver");
+        receiver.scope("accounts").configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            ..ScopePolicy::default()
+        })?;
+
+        let rogue = Primadb::with_replica_id("rogue");
+        rogue
+            .root("accounts")
+            .field("alice")
+            .field("balance")
+            .put(99)?;
+        assert_eq!(
+            receiver.apply_operations(rogue.drain_pending_operations()?)?,
+            0
+        );
+        assert_eq!(
+            receiver
+                .root("accounts")
+                .field("alice")
+                .field("balance")
+                .once_json()?,
+            None
+        );
+
+        let authority = Primadb::with_replica_id("ledger");
+        authority
+            .root("accounts")
+            .field("alice")
+            .field("balance")
+            .put(7)?;
+        assert_eq!(
+            receiver.apply_operations(authority.drain_pending_operations()?)?,
+            2
+        );
+        assert_eq!(
+            receiver
+                .root("accounts")
+                .field("alice")
+                .field("balance")
+                .once_json()?,
+            Some(json!(7))
+        );
         Ok(())
     }
 
@@ -5349,6 +6539,43 @@ mod tests {
     }
 
     #[test]
+    fn file_persistence_round_trips_provisional_transactions() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-proposals-{unique}.json"));
+
+        let first = Primadb::with_replica_id("proposal-a");
+        assert!(!first.use_file_persistence(path.clone())?);
+        let scope = first.scope("accounts");
+        scope.configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            offline_writes: ScopeOfflineWrites::QueueProvisional,
+            ..ScopePolicy::default()
+        })?;
+        scope.transaction_steps(
+            vec![TransactionStep::Increment {
+                path: RemotePath::new("alice", vec!["balance".to_owned()]),
+                by: 1.0,
+            }],
+            TransactionOptions::default(),
+        )?;
+
+        let second = Primadb::with_replica_id("proposal-b");
+        assert!(second.use_file_persistence(path.clone())?);
+        let proposals = second.scope("accounts").proposals();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].scope, "accounts");
+
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
     fn bytes_fields_round_trip_and_replicate() -> Result<()> {
         let left = Primadb::with_replica_id("bytes-left");
         let right = Primadb::with_replica_id("bytes-right");
@@ -5492,6 +6719,43 @@ mod tests {
         assert!(second.use_radisk_storage(path.clone(), 2)?);
         let snapshot = second.root("docs").field("hello").once_json()?.unwrap();
         assert_eq!(snapshot["value"], "world");
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[test]
+    fn radisk_storage_round_trips_provisional_transactions() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-radisk-proposals-{unique}"));
+
+        let first = Primadb::with_replica_id("proposal-radisk-a");
+        assert!(!first.use_radisk_storage(path.clone(), 2)?);
+        let scope = first.scope("accounts");
+        scope.configure(ScopePolicy {
+            consistency: ScopeConsistency::Coordinated,
+            authority: Some(ScopeAuthority::FullNode {
+                peer_id: "native:ledger".to_owned(),
+            }),
+            offline_writes: ScopeOfflineWrites::QueueProvisional,
+            ..ScopePolicy::default()
+        })?;
+        scope.transaction_steps(
+            vec![TransactionStep::Increment {
+                path: RemotePath::new("alice", vec!["balance".to_owned()]),
+                by: 1.0,
+            }],
+            TransactionOptions::default(),
+        )?;
+
+        let second = Primadb::with_replica_id("proposal-radisk-b");
+        assert!(second.use_radisk_storage(path.clone(), 2)?);
+        let proposals = second.scope("accounts").proposals();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].scope, "accounts");
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())

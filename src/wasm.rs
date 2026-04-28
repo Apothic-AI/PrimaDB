@@ -7,10 +7,11 @@ use crate::{
     Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
     PullResponseBody, QuerySpec, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage,
     RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
-    RouterConfig, ServeRequestContext, ServeResultContext, Subscription, SyncEnvelope, SyncFrame,
-    TraversalSpec, TraversalSubscription as CoreTraversalSubscription, WatchEvent, WatchRequest,
-    WatchRequestKind, build_storage_metadata, build_storage_transaction, encode_component,
-    error_pull_response, error_watch_event,
+    RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
+    SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
+    TraversalSubscription as CoreTraversalSubscription, WatchEvent, WatchRequest, WatchRequestKind,
+    build_storage_metadata, build_storage_transaction, encode_component, error_pull_response,
+    error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
@@ -49,6 +50,11 @@ pub struct WasmPrimadb {
 pub struct WasmChain {
     inner: Chain,
     blob_storage: Rc<RefCell<Option<WasmBlobStorageConfig>>>,
+}
+
+#[wasm_bindgen(js_name = Scope)]
+pub struct WasmScope {
+    inner: Scope,
 }
 
 #[wasm_bindgen(js_name = Subscription)]
@@ -187,6 +193,10 @@ enum PullAccumulator {
         clock: Option<HybridClock>,
         nodes: BTreeMap<String, crate::NodeState>,
         pending_ops: Vec<Operation>,
+        scope_policies: BTreeMap<String, crate::ScopePolicy>,
+    },
+    Transaction {
+        report: Option<crate::TransactionReport>,
     },
 }
 
@@ -464,6 +474,23 @@ impl WasmPrimadb {
             inner: self.inner.root(root),
             blob_storage: self.blob_storage.clone(),
         }
+    }
+
+    pub fn scope(&self, root: String) -> WasmScope {
+        WasmScope {
+            inner: self.inner.scope(root),
+        }
+    }
+
+    pub fn transaction(&self, steps: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let steps: Vec<TransactionStep> = serde_wasm_bindgen::from_value(steps)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        to_js(
+            &self
+                .inner
+                .apply_transaction_steps(steps)
+                .map_err(to_js_error)?,
+        )
     }
 
     #[wasm_bindgen(js_name = snapshot)]
@@ -855,7 +882,10 @@ impl WasmPrimadb {
         namespace: String,
     ) -> std::result::Result<(), JsValue> {
         let snapshot = self.inner.snapshot();
-        let metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+        let mut metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+        metadata.scope_policies = snapshot.scope_policies;
+        metadata.provisional_transactions = snapshot.provisional_transactions;
+        metadata.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
         let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
         save_segment_transaction_indexed_db(&database_name, &store_name, &namespace, &transaction)
             .await
@@ -914,7 +944,10 @@ impl WasmPrimadb {
                     continue;
                 }
                 let snapshot = db.snapshot();
-                let metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+                let mut metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+                metadata.scope_policies = snapshot.scope_policies;
+                metadata.provisional_transactions = snapshot.provisional_transactions;
+                metadata.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
                 let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
                 let _ = save_segment_transaction_indexed_db(
                     &db_name,
@@ -1621,6 +1654,7 @@ fn remote_result_kind(result: &RemoteResult) -> &'static str {
         RemoteResult::Lex { .. } => "lex",
         RemoteResult::Node { .. } => "node",
         RemoteResult::Snapshot { .. } => "snapshot",
+        RemoteResult::Transaction { .. } => "transaction",
     }
 }
 
@@ -1636,6 +1670,7 @@ fn remote_result_to_js(result: &RemoteResult) -> std::result::Result<JsValue, Js
         RemoteResult::Lex { entries } => lex_entries_to_js(entries),
         RemoteResult::Node { node } => to_js(node),
         RemoteResult::Snapshot { snapshot } => to_js(snapshot),
+        RemoteResult::Transaction { report } => to_js(report),
     }
 }
 
@@ -1704,6 +1739,48 @@ impl WasmRemoteWatch {
     }
 }
 
+#[wasm_bindgen(js_class = Scope)]
+impl WasmScope {
+    pub fn root(&self) -> String {
+        self.inner.root().to_owned()
+    }
+
+    pub fn configure(&self, policy: JsValue) -> std::result::Result<(), JsValue> {
+        let policy: ScopePolicy = serde_wasm_bindgen::from_value(policy)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.inner.configure(policy).map_err(to_js_error)
+    }
+
+    pub fn policy(&self) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.policy())
+    }
+
+    pub fn proposals(&self) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.proposals())
+    }
+
+    pub fn transaction(
+        &self,
+        steps: JsValue,
+        options: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let steps: Vec<TransactionStep> = serde_wasm_bindgen::from_value(steps)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let options = if options.is_null() || options.is_undefined() {
+            TransactionOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?
+        };
+        to_js(
+            &self
+                .inner
+                .transaction_steps(steps, options)
+                .map_err(to_js_error)?,
+        )
+    }
+}
+
 #[wasm_bindgen(js_class = IndexedDbPersistence)]
 impl WasmIndexedDbPersistence {
     pub async fn flush(&self) -> std::result::Result<(), JsValue> {
@@ -1730,7 +1807,10 @@ impl Drop for WasmIndexedDbPersistence {
 impl WasmIndexedDbSegmentPersistence {
     pub async fn flush(&self) -> std::result::Result<(), JsValue> {
         let snapshot = self.db.snapshot();
-        let metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+        let mut metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
+        metadata.scope_policies = snapshot.scope_policies;
+        metadata.provisional_transactions = snapshot.provisional_transactions;
+        metadata.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
         let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
         save_segment_transaction_indexed_db(
             &self.database_name,
@@ -1992,6 +2072,40 @@ impl WasmWebSocketSync {
             RemoteResult::Snapshot { snapshot } => to_js(&snapshot),
             other => Err(JsValue::from_str(&format!(
                 "expected snapshot result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = remoteTransaction)]
+    pub async fn remote_transaction(
+        &self,
+        peer_id: String,
+        scope: String,
+        steps: JsValue,
+        options: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let steps: Vec<TransactionStep> = serde_wasm_bindgen::from_value(steps)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let options = if options.is_null() || options.is_undefined() {
+            TransactionOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?
+        };
+        match request_remote_result_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::Transaction {
+                scope,
+                steps,
+                options,
+            },
+        )
+        .await?
+        {
+            RemoteResult::Transaction { report } => to_js(&report),
+            other => Err(JsValue::from_str(&format!(
+                "expected transaction result, received {other:?}"
             ))),
         }
     }
@@ -3501,11 +3615,13 @@ fn apply_response_body_state(
             clock,
             nodes,
             pending_ops,
+            scope_policies,
         } => {
             if let PullAccumulator::Snapshot {
                 clock: current_clock,
                 nodes: current_nodes,
                 pending_ops: current_ops,
+                scope_policies: current_scope_policies,
             } = accumulator
             {
                 if current_clock.is_none() {
@@ -3513,7 +3629,14 @@ fn apply_response_body_state(
                 }
                 current_nodes.extend(nodes.clone());
                 current_ops.extend(pending_ops.clone());
+                current_scope_policies.extend(scope_policies.clone());
             }
+            None
+        }
+        PullResponseBody::Transaction { report } => {
+            *accumulator = PullAccumulator::Transaction {
+                report: Some(report.clone()),
+            };
             None
         }
         PullResponseBody::Error { message } => Some(message.clone()),
@@ -3538,7 +3661,9 @@ impl PullAccumulator {
                 clock: None,
                 nodes: BTreeMap::new(),
                 pending_ops: Vec::new(),
+                scope_policies: BTreeMap::new(),
             },
+            PullRequestKind::Transaction { .. } => Self::Transaction { report: None },
         }
     }
 
@@ -3553,6 +3678,7 @@ impl PullAccumulator {
                 clock,
                 nodes,
                 pending_ops,
+                scope_policies,
             } => Ok(RemoteResult::Snapshot {
                 snapshot: crate::DatabaseSnapshot {
                     clock: clock.ok_or_else(|| {
@@ -3562,7 +3688,17 @@ impl PullAccumulator {
                     })?,
                     nodes,
                     pending_ops,
+                    scope_policies,
+                    provisional_transactions: Default::default(),
+                    next_provisional_transaction_id: 0,
                 },
+            }),
+            Self::Transaction { report } => Ok(RemoteResult::Transaction {
+                report: report.ok_or_else(|| {
+                    crate::PrimadbError::Message(
+                        "transaction response completed without a report".to_owned(),
+                    )
+                })?,
             }),
         }
     }
@@ -5000,6 +5136,9 @@ async fn load_segment_snapshot_indexed_db(
         clock: metadata.clock,
         nodes,
         pending_ops: metadata.pending_ops,
+        scope_policies: metadata.scope_policies,
+        provisional_transactions: metadata.provisional_transactions,
+        next_provisional_transaction_id: metadata.next_provisional_transaction_id,
     }))
 }
 

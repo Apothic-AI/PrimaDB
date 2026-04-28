@@ -31,6 +31,8 @@ def main() -> None:
         binary = db.chain("assets").field("bytes")
         blob_chain = db.chain("assets").field("blob")
         graph_alice = db.chain("graph").field("alice")
+        ledger = db.scope("ledger")
+        offline_ledger = db.scope("offline-ledger")
         subscription = notes.subscribe()
         payload = bytes([1, 2, 3, 5, 8, 13])
 
@@ -42,6 +44,37 @@ def main() -> None:
             }
         )
         graph_alice.put({"name": "Alice", "friend": {"$link": "graph/bob"}})
+        ledger.configure(
+            {
+                "consistency": "coordinated",
+                "authority": {"kind": "full_node", "peerId": "native:python-core-a"},
+            }
+        )
+        ledger_report = ledger.transaction(
+            [
+                {
+                    "kind": "increment",
+                    "path": {"anchor": "alice", "segments": ["balance"]},
+                    "by": 10,
+                }
+            ]
+        )
+        offline_ledger.configure(
+            {
+                "consistency": "coordinated",
+                "authority": {"kind": "full_node", "peerId": "native:missing-ledger"},
+                "offlineWrites": "queue_provisional",
+            }
+        )
+        provisional_report = offline_ledger.transaction(
+            [
+                {
+                    "kind": "increment",
+                    "path": {"anchor": "alice", "segments": ["balance"]},
+                    "by": 10,
+                }
+            ]
+        )
         db.chain("graph").field("bob").put({"name": "Bob"})
         binary.put_bytes(payload)
         blob_ref = blob_chain.put_blob(payload, "application/octet-stream")
@@ -95,6 +128,10 @@ def main() -> None:
         restored.chain("graph").field("bob").put({"name": "Robert"})
         traversal_update = traversal_watch.next()
         traversal_watch.close()
+        restored_ledger_balance = restored.chain("ledger").field("alice").field("balance").once()
+        provisional_canonical = (
+            db.chain("offline-ledger").field("alice").field("balance").once()
+        )
 
         print(
             json.dumps(
@@ -112,6 +149,11 @@ def main() -> None:
                     "traversal": traversal,
                     "traversalInitial": traversal_initial,
                     "traversalUpdate": traversal_update,
+                    "ledgerReport": ledger_report,
+                    "provisionalReport": provisional_report,
+                    "restoredLedgerBalance": restored_ledger_balance,
+                    "provisionalCanonical": provisional_canonical,
+                    "offlineProposals": offline_ledger.proposals(),
                     "subscriptionEvent": event,
                     "restoredCount": len(results),
                     "python_package_core_confirmed": (
@@ -128,6 +170,11 @@ def main() -> None:
                         and round_trip_blob == payload
                         and restored_bytes == payload
                         and restored_blob == payload
+                        and ledger_report["status"] == "committed"
+                        and restored_ledger_balance == 10
+                        and provisional_report["status"] == "provisional"
+                        and provisional_canonical is None
+                        and len(offline_ledger.proposals()) == 1
                     ),
                 },
                 indent=2,

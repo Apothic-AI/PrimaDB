@@ -6,10 +6,10 @@ use primadb::{
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
     PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
     RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
-    RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, ServeRequestContext,
-    ServeResultContext, Subscription as CoreSubscription,
-    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, parse_request_hook_json,
-    parse_result_hook_json, parse_void_hook_json,
+    RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, Scope as CoreScope, ScopePolicy,
+    ServeRequestContext, ServeResultContext, Subscription as CoreSubscription, TransactionOptions,
+    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec,
+    parse_request_hook_json, parse_result_hook_json, parse_void_hook_json,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -74,6 +74,7 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Transaction { report } => serde_json::to_value(report).unwrap_or(JsonValue::Null),
     }
 }
 
@@ -85,6 +86,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Lex { .. } => "lex",
         CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
+        CoreRemoteResult::Transaction { .. } => "transaction",
     };
     json!({
         "done": false,
@@ -258,6 +260,11 @@ struct Chain {
 }
 
 #[pyclass(module = "primadb._native")]
+struct Scope {
+    inner: CoreScope,
+}
+
+#[pyclass(module = "primadb._native")]
 struct Subscription {
     inner: Arc<Mutex<Option<CoreSubscription>>>,
 }
@@ -306,6 +313,22 @@ impl Primadb {
         Chain {
             inner: self.inner.root(root),
         }
+    }
+
+    fn scope(&self, root: String) -> Scope {
+        Scope {
+            inner: self.inner.scope(root),
+        }
+    }
+
+    fn transaction(&self, py: Python<'_>, steps: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let steps: Vec<TransactionStep> = from_py(steps)?;
+        to_py(
+            py,
+            self.inner
+                .apply_transaction_steps(steps)
+                .map_err(to_py_err)?,
+        )
     }
 
     fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -442,6 +465,46 @@ impl Primadb {
 
     fn clear_network_hooks(&self) {
         self.inner.clear_network_hooks();
+    }
+}
+
+#[pymethods]
+impl Scope {
+    fn root(&self) -> String {
+        self.inner.root().to_owned()
+    }
+
+    fn configure(&self, policy: &Bound<'_, PyAny>) -> PyResult<()> {
+        let policy: ScopePolicy = from_py(policy)?;
+        self.inner.configure(policy).map_err(to_py_err)
+    }
+
+    fn policy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.policy())
+    }
+
+    fn proposals(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.proposals())
+    }
+
+    #[pyo3(signature = (steps, options=None))]
+    fn transaction(
+        &self,
+        py: Python<'_>,
+        steps: &Bound<'_, PyAny>,
+        options: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let steps: Vec<TransactionStep> = from_py(steps)?;
+        let options = match options {
+            Some(value) => from_py(value)?,
+            None => TransactionOptions::default(),
+        };
+        to_py(
+            py,
+            self.inner
+                .transaction_steps(steps, options)
+                .map_err(to_py_err)?,
+        )
     }
 }
 
@@ -951,6 +1014,30 @@ impl WebSocketSync {
         to_py(py, result.map_err(to_py_err)?)
     }
 
+    #[pyo3(signature = (peer_id, scope, steps, options=None))]
+    fn remote_transaction(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        scope: String,
+        steps: &Bound<'_, PyAny>,
+        options: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let steps: Vec<TransactionStep> = from_py(steps)?;
+        let options = match options {
+            Some(value) => from_py(value)?,
+            None => TransactionOptions::default(),
+        };
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(sync.remote_transaction(peer_id, scope, steps, options)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
     fn watch_remote_get(&self, peer_id: String, path: &Bound<'_, PyAny>) -> PyResult<RemoteWatch> {
         let path: RemotePath = from_py(path)?;
         let watch = self
@@ -1299,6 +1386,7 @@ impl WebRtcMesh {
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Primadb>()?;
     module.add_class::<Chain>()?;
+    module.add_class::<Scope>()?;
     module.add_class::<Subscription>()?;
     module.add_class::<TraversalSubscription>()?;
     module.add_class::<RelayServer>()?;

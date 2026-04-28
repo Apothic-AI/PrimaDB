@@ -7,12 +7,14 @@ native Rust runtime directly instead of going through the browser WASM layer.
 Current surface:
 
 - `Primadb` and `Chain` for local graph operations
+- `Scope` and step-based transactions for local ACID writes and coordinated strict-scope proposals
 - durable native storage through `open_durable_storage(...)`
 - content-addressed native blob storage through `open_blob_storage(...)`
 - first-class binary helpers through `put_bytes()`, `once_bytes()`, `put_blob()`, and `get_blob()`
 - subscriptions
 - native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connect_relay(...)`, including disconnected startup with background relay retry
+- remote strict-scope transaction submission through `remote_transaction(...)` on relay sync clients
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
 - network-boundary hooks through `set_network_hooks(...)` / `clear_network_hooks()`
@@ -64,6 +66,21 @@ db.chain("notes").field("items").set(
         "title": "Python note",
         "body": "Stored through the native extension",
     }
+)
+db.scope("ledger").configure(
+    {
+        "consistency": "coordinated",
+        "authority": {"kind": "full_node", "peerId": "native:py-a"},
+    }
+)
+db.scope("ledger").transaction(
+    [
+        {
+            "kind": "increment",
+            "path": {"anchor": "alice", "segments": ["balance"]},
+            "by": 10,
+        }
+    ]
 )
 db.chain("assets").field("avatar").put_bytes(b"\x01\x02\x03\x04")
 db.chain("assets").field("archive").put_blob(

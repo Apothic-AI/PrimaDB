@@ -7,12 +7,14 @@ native Rust runtime directly through a Node addon.
 Current surface:
 
 - `Primadb` and `Chain` for local graph operations
+- `Scope` and step-based transactions for local ACID writes and coordinated strict-scope proposals
 - durable native storage through `openDurableStorage(...)`
 - content-addressed native blob storage through `openBlobStorage(...)`
 - first-class binary helpers through `putBytes()`, `onceBytes()`, `putBlob()`, and `getBlob()`
 - subscriptions
 - native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connectRelay(...)`, including disconnected startup with background relay retry
+- remote strict-scope transaction submission through `remoteTransaction(...)` on relay sync clients
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
 - network-boundary hooks through `setNetworkHooks(...)` / `clearNetworkHooks()`
@@ -55,6 +57,17 @@ db.chain("notes").field("items").set({
   body: "Stored through the native addon",
   createdAt: new Date().toISOString(),
 });
+db.scope("ledger").configure({
+  consistency: "coordinated",
+  authority: { kind: "full_node", peerId: "native:node-a" },
+});
+db.scope("ledger").transaction([
+  {
+    kind: "increment",
+    path: { anchor: "alice", segments: ["balance"] },
+    by: 10,
+  },
+]);
 db.chain("assets").field("avatar").putBytes(Buffer.from([1, 2, 3, 4]));
 await db
   .chain("assets")

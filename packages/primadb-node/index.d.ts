@@ -149,13 +149,67 @@ export interface RemotePath {
   segments?: string[];
 }
 
+export type ScopeConsistency = "eventual" | "local_transactional" | "coordinated";
+export type ScopeOfflineWrites = "reject" | "queue_provisional";
+export type ScopeIsolation = "serializable";
+export type ScopeReadMode = "cached" | "authority" | "quorum";
+
+export type ScopeAuthority =
+  | { kind: "peer"; peerId: string }
+  | { kind: "full_node"; peerId: string }
+  | { kind: "quorum"; peers: string[]; threshold: number };
+
+export interface ScopePolicy {
+  consistency?: ScopeConsistency;
+  authority?: ScopeAuthority | null;
+  isolation?: ScopeIsolation;
+  readMode?: ScopeReadMode;
+  offlineWrites?: ScopeOfflineWrites;
+}
+
+export interface TransactionOptions {
+  offline?: ScopeOfflineWrites | null;
+}
+
+export type TransactionStep =
+  | { kind: "put"; path: RemotePath; value: JsonValue }
+  | { kind: "unset"; path: RemotePath }
+  | { kind: "set"; path: RemotePath; value: JsonValue }
+  | { kind: "remove"; path: RemotePath; value: JsonValue }
+  | { kind: "assert_exists"; path: RemotePath }
+  | { kind: "assert_absent"; path: RemotePath }
+  | { kind: "assert_value"; path: RemotePath; value: JsonValue }
+  | { kind: "assert_revision"; path: RemotePath; revision?: JsonValue | null }
+  | { kind: "increment"; path: RemotePath; by: number };
+
+export interface TransactionReport {
+  status: "committed" | "provisional";
+  operationCount: number;
+  memberIds?: string[];
+  proposalId?: string | null;
+}
+
+export interface ProvisionalTransaction {
+  id: string;
+  scope: string;
+  createdAtMillis: number;
+  steps: TransactionStep[];
+  options?: TransactionOptions;
+}
+
 export type PullRequestKind =
   | { kind: "get"; path: { anchor: string; segments?: string[] } }
   | { kind: "map"; path: { anchor: string; segments?: string[] } }
   | { kind: "query"; path: { anchor: string; segments?: string[] }; spec: QuerySpec }
   | { kind: "lex"; path: { anchor: string; segments?: string[] }; spec: LexSpec }
   | { kind: "node"; id: string }
-  | { kind: "snapshot"; root?: string | null };
+  | { kind: "snapshot"; root?: string | null }
+  | {
+      kind: "transaction";
+      scope: string;
+      steps: TransactionStep[];
+      options?: TransactionOptions;
+    };
 
 export type RemoteResult =
   | { kind: "get"; value: JsonValue | null }
@@ -163,7 +217,8 @@ export type RemoteResult =
   | { kind: "query"; entries: JsonValue[] }
   | { kind: "lex"; entries: JsonValue[] }
   | { kind: "node"; node: JsonValue | null }
-  | { kind: "snapshot"; snapshot: JsonValue };
+  | { kind: "snapshot"; snapshot: JsonValue }
+  | { kind: "transaction"; report: TransactionReport };
 
 export interface ServeRequestContext {
   peerId: string;
@@ -226,7 +281,7 @@ export interface SubscriptionMessage {
 export interface RemoteWatchMessage {
   done: boolean;
   initial?: boolean;
-  kind?: "get" | "map" | "query" | "lex" | "node" | "snapshot" | null;
+  kind?: "get" | "map" | "query" | "lex" | "node" | "snapshot" | "transaction" | null;
   value?: JsonValue | null;
   error?: string | null;
 }
@@ -235,6 +290,8 @@ export declare class Primadb {
   constructor(replicaId?: string | null);
   replicaId(): string;
   chain(root: string): Chain;
+  scope(root: string): Scope;
+  transaction(steps: TransactionStep[]): TransactionReport;
   snapshot(): JsonValue;
   snapshotForRoot(root?: string | null): JsonValue;
   nodeState(id: string): JsonValue | null;
@@ -256,6 +313,14 @@ export declare class Primadb {
   connectMesh(config: MeshConfig): Promise<WebRtcMesh>;
   setNetworkHooks(hooks: NetworkHooks): void;
   clearNetworkHooks(): void;
+}
+
+export declare class Scope {
+  root(): string;
+  configure(policy: ScopePolicy): void;
+  policy(): ScopePolicy | null;
+  proposals(): ProvisionalTransaction[];
+  transaction(steps: TransactionStep[], options?: TransactionOptions | null): TransactionReport;
 }
 
 export declare class Chain {
@@ -315,6 +380,12 @@ export declare class WebSocketSync {
   remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
   remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
   remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
+  remoteTransaction(
+    peerId: string,
+    scope: string,
+    steps: TransactionStep[],
+    options?: TransactionOptions | null,
+  ): Promise<TransactionReport>;
   watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
   watchRemoteMap(peerId: string, path: RemotePath): RemoteWatch;
   watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;

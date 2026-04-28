@@ -32,6 +32,12 @@ pub enum PrimadbError {
     BlobNotFound { blob_id: String },
     #[error("too many active remote watches (limit {limit})")]
     TooManyRemoteWatches { limit: usize },
+    #[error("transaction conflict: {message}")]
+    TransactionConflict { message: String },
+    #[error("strict scope `{scope}` is unavailable for canonical writes")]
+    StrictScopeUnavailable { scope: String },
+    #[error("strict transaction spans incompatible scopes: {message}")]
+    StrictScopeConflict { message: String },
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("i/o error: {0}")]

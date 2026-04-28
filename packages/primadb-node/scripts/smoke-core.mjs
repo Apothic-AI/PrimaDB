@@ -22,6 +22,8 @@ try {
   const binary = db.chain("assets").field("bytes");
   const blobChain = db.chain("assets").field("blob");
   const graphAlice = db.chain("graph").field("alice");
+  const ledger = db.scope("ledger");
+  const offlineLedger = db.scope("offline-ledger");
   const subscription = notes.subscribe();
   const title = `Node core ${Date.now()}`;
   const payload = Buffer.from([1, 2, 3, 5, 8, 13]);
@@ -35,6 +37,29 @@ try {
     name: "Alice",
     friend: { $link: "graph/bob" },
   });
+  ledger.configure({
+    consistency: "coordinated",
+    authority: { kind: "full_node", peerId: "native:node-core-a" },
+  });
+  const ledgerReport = ledger.transaction([
+    {
+      kind: "increment",
+      path: { anchor: "alice", segments: ["balance"] },
+      by: 10,
+    },
+  ]);
+  offlineLedger.configure({
+    consistency: "coordinated",
+    authority: { kind: "full_node", peerId: "native:missing-ledger" },
+    offlineWrites: "queue_provisional",
+  });
+  const provisionalReport = offlineLedger.transaction([
+    {
+      kind: "increment",
+      path: { anchor: "alice", segments: ["balance"] },
+      by: 10,
+    },
+  ]);
   db.chain("graph").field("bob").put({
     name: "Bob",
   });
@@ -81,6 +106,12 @@ try {
   });
   const traversalUpdate = await traversalWatch.next();
   traversalWatch.close();
+  const restoredLedgerBalance = restored.chain("ledger").field("alice").field("balance").once();
+  const provisionalCanonical = db
+    .chain("offline-ledger")
+    .field("alice")
+    .field("balance")
+    .once();
 
   console.log(
     JSON.stringify(
@@ -100,6 +131,11 @@ try {
         traversal,
         traversalInitial,
         traversalUpdate,
+        ledgerReport,
+        provisionalReport,
+        restoredLedgerBalance,
+        provisionalCanonical,
+        offlineProposals: offlineLedger.proposals(),
         node_package_core_confirmed:
           Array.isArray(entries) &&
           entries.length >= 1 &&
@@ -110,7 +146,12 @@ try {
           JSON.stringify(roundTripBytes ? Array.from(roundTripBytes) : null) === JSON.stringify(Array.from(payload)) &&
           JSON.stringify(roundTripBlob ? Array.from(roundTripBlob) : null) === JSON.stringify(Array.from(payload)) &&
           JSON.stringify(restoredBytes ? Array.from(restoredBytes) : null) === JSON.stringify(Array.from(payload)) &&
-          JSON.stringify(restoredBlob ? Array.from(restoredBlob) : null) === JSON.stringify(Array.from(payload)),
+          JSON.stringify(restoredBlob ? Array.from(restoredBlob) : null) === JSON.stringify(Array.from(payload)) &&
+          ledgerReport.status === "committed" &&
+          restoredLedgerBalance === 10 &&
+          provisionalReport.status === "provisional" &&
+          provisionalCanonical === null &&
+          offlineLedger.proposals().length === 1,
       },
       null,
       2,

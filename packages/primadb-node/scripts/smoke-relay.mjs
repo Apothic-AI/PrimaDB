@@ -25,10 +25,25 @@ try {
   const syncA = await dbA.connectRelay({ url: relayUrl, retryIntervalMs: 500 });
   const syncB = await dbB.connectRelay({ url: relayUrl, retryIntervalMs: 500 });
   const title = `Node relay ${Date.now()}`;
+  dbA.scope("relay-ledger").configure({
+    consistency: "coordinated",
+    authority: { kind: "full_node", peerId: "native:node-relay-a" },
+  });
 
   const targetPeer = await waitFor(async () => {
     const peers = syncB.recommendedPeers();
     return peers.find((entry) => entry?.peer?.replica_id === dbA.replicaId())?.peer?.peer_id ?? null;
+  });
+  const transactionReport = await syncB.remoteTransaction(targetPeer, "relay-ledger", [
+    {
+      kind: "increment",
+      path: { anchor: "alice", segments: ["balance"] },
+      by: 7,
+    },
+  ]);
+  const remoteBalance = await syncB.remoteGet(targetPeer, {
+    anchor: "relay-ledger",
+    segments: ["alice", "balance"],
   });
   const watch = syncB.watchRemoteQuery(
     targetPeer,
@@ -71,8 +86,11 @@ try {
         targetPeer,
         initialWatch,
         watchUpdate,
+        transactionReport,
+        remoteBalance,
         replicatedCount: replicated.length,
-        node_package_relay_confirmed: true,
+        node_package_relay_confirmed:
+          transactionReport.status === "committed" && remoteBalance === 7 && replicated.length > 0,
       },
       null,
       2,

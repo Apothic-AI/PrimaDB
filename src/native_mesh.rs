@@ -85,6 +85,10 @@ enum PullAccumulator {
         clock: Option<crate::HybridClock>,
         nodes: BTreeMap<String, crate::NodeState>,
         pending_ops: Vec<crate::Operation>,
+        scope_policies: BTreeMap<String, crate::ScopePolicy>,
+    },
+    Transaction {
+        report: Option<crate::TransactionReport>,
     },
 }
 
@@ -1885,11 +1889,13 @@ fn apply_response_body(
             clock,
             nodes,
             pending_ops,
+            scope_policies,
         } => {
             if let PullAccumulator::Snapshot {
                 clock: current_clock,
                 nodes: current_nodes,
                 pending_ops: current_ops,
+                scope_policies: current_scope_policies,
             } = accumulator
             {
                 if current_clock.is_none() {
@@ -1897,7 +1903,14 @@ fn apply_response_body(
                 }
                 current_nodes.extend(nodes.clone());
                 current_ops.extend(pending_ops.clone());
+                current_scope_policies.extend(scope_policies.clone());
             }
+            None
+        }
+        crate::PullResponseBody::Transaction { report } => {
+            *accumulator = PullAccumulator::Transaction {
+                report: Some(report.clone()),
+            };
             None
         }
         crate::PullResponseBody::Error { message } => Some(message.clone()),
@@ -2049,7 +2062,9 @@ impl PullAccumulator {
                 clock: None,
                 nodes: BTreeMap::new(),
                 pending_ops: Vec::new(),
+                scope_policies: BTreeMap::new(),
             },
+            crate::PullRequestKind::Transaction { .. } => Self::Transaction { report: None },
         }
     }
 
@@ -2064,6 +2079,7 @@ impl PullAccumulator {
                 clock,
                 nodes,
                 pending_ops,
+                scope_policies,
             } => Ok(crate::RemoteResult::Snapshot {
                 snapshot: crate::DatabaseSnapshot {
                     clock: clock.ok_or_else(|| {
@@ -2071,7 +2087,17 @@ impl PullAccumulator {
                     })?,
                     nodes,
                     pending_ops,
+                    scope_policies,
+                    provisional_transactions: Default::default(),
+                    next_provisional_transaction_id: 0,
                 },
+            }),
+            Self::Transaction { report } => Ok(crate::RemoteResult::Transaction {
+                report: report.ok_or_else(|| {
+                    PrimadbError::Message(
+                        "transaction response completed without a report".to_owned(),
+                    )
+                })?,
             }),
         }
     }

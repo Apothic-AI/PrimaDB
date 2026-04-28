@@ -12,9 +12,9 @@ use primadb::{
     PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
     RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
     RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, ServeRequestContext,
-    ServeResultContext, Subscription as CoreSubscription,
-    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, parse_request_hook_json,
-    parse_result_hook_json, parse_void_hook_json,
+    ServeResultContext, Scope as CoreScope, ScopePolicy, Subscription as CoreSubscription,
+    TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
+    TraversalSpec, parse_request_hook_json, parse_result_hook_json, parse_void_hook_json,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,7 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Transaction { report } => serde_json::to_value(report).unwrap_or(JsonValue::Null),
     }
 }
 
@@ -72,6 +73,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Lex { .. } => "lex",
         CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
+        CoreRemoteResult::Transaction { .. } => "transaction",
     };
     json!({
         "done": false,
@@ -268,6 +270,11 @@ pub struct Chain {
 }
 
 #[napi]
+pub struct Scope {
+    inner: CoreScope,
+}
+
+#[napi]
 pub struct Subscription {
     inner: Arc<Mutex<Option<CoreSubscription>>>,
 }
@@ -317,6 +324,19 @@ impl Primadb {
         Chain {
             inner: self.inner.root(root),
         }
+    }
+
+    #[napi]
+    pub fn scope(&self, root: String) -> Scope {
+        Scope {
+            inner: self.inner.scope(root),
+        }
+    }
+
+    #[napi]
+    pub fn transaction(&self, steps: JsonValue) -> Result<JsonValue> {
+        let steps: Vec<TransactionStep> = from_json(steps)?;
+        to_json(self.inner.apply_transaction_steps(steps).map_err(to_napi_error)?)
     }
 
     #[napi]
@@ -463,6 +483,44 @@ impl Primadb {
     #[napi(js_name = "clearNetworkHooks")]
     pub fn clear_network_hooks(&self) {
         self.inner.clear_network_hooks();
+    }
+}
+
+#[napi]
+impl Scope {
+    #[napi]
+    pub fn root(&self) -> String {
+        self.inner.root().to_owned()
+    }
+
+    #[napi]
+    pub fn configure(&self, policy: JsonValue) -> Result<()> {
+        let policy: ScopePolicy = from_json(policy)?;
+        self.inner.configure(policy).map_err(to_napi_error)
+    }
+
+    #[napi]
+    pub fn policy(&self) -> Result<JsonValue> {
+        to_json(self.inner.policy())
+    }
+
+    #[napi]
+    pub fn proposals(&self) -> Result<JsonValue> {
+        to_json(self.inner.proposals())
+    }
+
+    #[napi]
+    pub fn transaction(&self, steps: JsonValue, options: Option<JsonValue>) -> Result<JsonValue> {
+        let steps: Vec<TransactionStep> = from_json(steps)?;
+        let options = match options {
+            Some(value) => from_json(value)?,
+            None => TransactionOptions::default(),
+        };
+        to_json(
+            self.inner
+                .transaction_steps(steps, options)
+                .map_err(to_napi_error)?,
+        )
     }
 }
 
@@ -966,6 +1024,31 @@ impl WebSocketSync {
         };
         let result = sync
             .remote_snapshot(peer_id, root)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "remoteTransaction")]
+    pub async fn remote_transaction(
+        &self,
+        peer_id: String,
+        scope: String,
+        steps: JsonValue,
+        options: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let steps: Vec<TransactionStep> = from_json(steps)?;
+        let options = match options {
+            Some(value) => from_json(value)?,
+            None => TransactionOptions::default(),
+        };
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_transaction(peer_id, scope, steps, options)
             .await
             .map_err(to_napi_error);
         self.inner.lock().unwrap().replace(sync);

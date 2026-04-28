@@ -1,5 +1,8 @@
 use crate::value::{NodeId, NodeState};
-use crate::{DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec};
+use crate::{
+    DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec, ScopePolicy,
+    TransactionOptions, TransactionReport, TransactionStep,
+};
 use async_channel::Receiver;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -54,12 +57,33 @@ impl RemotePath {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PullRequestKind {
-    Get { path: RemotePath },
-    Map { path: RemotePath },
-    Query { path: RemotePath, spec: QuerySpec },
-    Lex { path: RemotePath, spec: LexSpec },
-    Node { id: NodeId },
-    Snapshot { root: Option<String> },
+    Get {
+        path: RemotePath,
+    },
+    Map {
+        path: RemotePath,
+    },
+    Query {
+        path: RemotePath,
+        spec: QuerySpec,
+    },
+    Lex {
+        path: RemotePath,
+        spec: LexSpec,
+    },
+    Node {
+        id: NodeId,
+    },
+    Snapshot {
+        root: Option<String>,
+    },
+    Transaction {
+        scope: String,
+        #[serde(default)]
+        steps: Vec<TransactionStep>,
+        #[serde(default)]
+        options: TransactionOptions,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,6 +123,11 @@ pub enum PullResponseBody {
         nodes: BTreeMap<NodeId, NodeState>,
         #[serde(default)]
         pending_ops: Vec<Operation>,
+        #[serde(default)]
+        scope_policies: BTreeMap<String, ScopePolicy>,
+    },
+    Transaction {
+        report: TransactionReport,
     },
     Error {
         message: String,
@@ -145,6 +174,7 @@ pub enum RemoteResult {
     Lex { entries: Vec<LexEntry> },
     Node { node: Option<NodeState> },
     Snapshot { snapshot: DatabaseSnapshot },
+    Transaction { report: TransactionReport },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,6 +201,7 @@ impl PullRequestKind {
             Self::Lex { .. } => "lex",
             Self::Node { .. } => "node",
             Self::Snapshot { .. } => "snapshot",
+            Self::Transaction { .. } => "transaction",
         }
     }
 
@@ -182,6 +213,7 @@ impl PullRequestKind {
             | Self::Lex { path, .. } => Some(path.path()),
             Self::Node { id } => Some(id.clone()),
             Self::Snapshot { root } => root.clone(),
+            Self::Transaction { scope, .. } => Some(scope.clone()),
         }
     }
 }

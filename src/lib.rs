@@ -4,6 +4,7 @@ mod binary;
 mod blob;
 mod clock;
 mod compat;
+mod consistency;
 #[cfg(feature = "crypto")]
 mod crypto;
 mod db;
@@ -48,13 +49,19 @@ pub use blob::{
 };
 pub use clock::{HybridClock, Revision, VersionMarker};
 pub use compat::{Gun, GunChain, GunCompatOptions};
+pub use consistency::{
+    ProvisionalTransaction, ScopeAuthority, ScopeConsistency, ScopeIsolation, ScopeOfflineWrites,
+    ScopePolicy, ScopeReadMode, TransactionOptions, TransactionReport, TransactionStatus,
+    TransactionStep,
+};
 #[cfg(feature = "crypto")]
 pub use crypto::{
     EncryptedPayload, Identity, PublicIdentity, SeaPair, SecretBoxKey, SignedPayload,
 };
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, NodeFetchScheduler, Primadb,
-    QueryBuilder, Subscription, TraversalSubscription, VacuumReport,
+    QueryBuilder, Scope, Subscription, Transaction, TransactionChain, TraversalSubscription,
+    VacuumReport,
 };
 pub use durable::{DurableStorageBinding, DurableStorageConfig};
 #[cfg(not(target_arch = "wasm32"))]

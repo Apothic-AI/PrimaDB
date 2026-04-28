@@ -24,6 +24,12 @@ def main() -> None:
 
         waiter = waiter_db.connect_relay({"url": RELAY_URL, "retryIntervalMs": 1500})
         writer = writer_db.connect_relay({"url": RELAY_URL, "retryIntervalMs": 1500})
+        writer_db.scope("relay-ledger").configure(
+            {
+                "consistency": "coordinated",
+                "authority": {"kind": "full_node", "peerId": "native:python-relay-writer"},
+            }
+        )
 
         deadline = time.time() + 20
         while time.time() < deadline:
@@ -50,6 +56,22 @@ def main() -> None:
             wait(100)
         else:
             raise RuntimeError("Timed out waiting for relay peer discovery")
+
+        transaction_report = waiter.remote_transaction(
+            target_peer,
+            "relay-ledger",
+            [
+                {
+                    "kind": "increment",
+                    "path": {"anchor": "alice", "segments": ["balance"]},
+                    "by": 7,
+                }
+            ],
+        )
+        remote_balance = waiter.remote_get(
+            target_peer,
+            {"anchor": "relay-ledger", "segments": ["alice", "balance"]},
+        )
 
         watch = waiter.watch_remote_query(
             target_peer,
@@ -104,12 +126,18 @@ def main() -> None:
                     "targetPeer": target_peer,
                     "initialWatch": initial_watch,
                     "watchUpdate": watch_update,
+                    "transactionReport": transaction_report,
+                    "remoteBalance": remote_balance,
                     "knownPeers": {
                         "waiter": waiter.known_peer_count(),
                         "writer": writer.known_peer_count(),
                     },
                     "matches": matches,
-                    "python_package_relay_confirmed": True,
+                    "python_package_relay_confirmed": (
+                        transaction_report["status"] == "committed"
+                        and remote_balance == 7
+                        and bool(matches)
+                    ),
                 },
                 indent=2,
             )

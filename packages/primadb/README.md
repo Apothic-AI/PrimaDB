@@ -17,6 +17,11 @@ The browser bindings also expose live remote watch helpers on relay and mesh tra
 - `watchRemoteLex(...)`
 - `watchRemoteSnapshot(...)`
 
+The browser bindings also expose `db.scope(...)`, `db.transaction(...)`, and
+`scope.transaction(...)` for step-based local transactions and strict-scope proposal workflows.
+Relay sync clients can submit strict-scope transactions to an authority peer with
+`remoteTransaction(...)`.
+
 They also now expose typed network-boundary hook helpers through:
 
 - `setNetworkHooks(db, hooks)`
@@ -89,6 +94,20 @@ setNetworkHooks(db, {
     return undefined;
   },
 });
+db.scope("ledger").configure({
+  consistency: "coordinated",
+  authority: { kind: "full_node", peerId: "browser-a" },
+});
+db.scope("ledger").transaction(
+  [
+    {
+      kind: "increment",
+      path: { anchor: "alice", segments: ["balance"] },
+      by: 10,
+    },
+  ],
+  null,
+);
 const relay = db.connectRelay({
   url: "ws://127.0.0.1:9010",
   retryIntervalMs: 1500,
