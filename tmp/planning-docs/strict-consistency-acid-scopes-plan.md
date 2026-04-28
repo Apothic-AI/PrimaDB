@@ -163,6 +163,7 @@ await db.scope("accounts").configure({
     peerId: "native:ledger",
   },
   isolation: "serializable",
+  offlineWrites: "queue_provisional",
 });
 
 await db.scope("accounts").transaction(async (tx) => {
@@ -192,6 +193,68 @@ type ConsistencyPolicy =
 ```
 
 Initial implementation should support a single authoritative full node before quorum.
+
+## Offline Write Policy
+
+Coordinated scopes need explicit offline behavior. The default should be safe:
+
+```ts
+offlineWrites: "reject"
+```
+
+With `reject`, an offline write to a coordinated scope fails immediately:
+
+- no canonical graph state is changed
+- no local operation is committed
+- normal watches do not emit a fake committed update
+- the caller receives a clear strict-scope availability error
+
+The optional local-first UX mode is:
+
+```ts
+offlineWrites: "queue_provisional"
+```
+
+With `queue_provisional`, the write is stored locally as a transaction proposal, not as graph truth.
+
+Required semantics:
+
+- provisional writes are durable local proposals
+- provisional writes are not canonical graph state
+- normal reads exclude provisional writes by default
+- normal watches exclude provisional writes by default
+- UI-oriented reads/watches may opt into a provisional overlay
+- proposals are submitted to the authority when reachable
+- accepted proposals become sequenced authoritative operations and then update the graph normally
+- rejected proposals become explicit rejection/conflict events
+- rejected proposals must not leave partial canonical graph state behind
+
+API sketch:
+
+```ts
+await db.scope("accounts").transaction(
+  async (tx) => {
+    tx.increment("alice/balance", -10);
+    tx.increment("bob/balance", 10);
+  },
+  {
+    offline: "queue_provisional",
+  },
+);
+
+const pending = db.scope("accounts").proposals();
+```
+
+Overlay read sketch:
+
+```ts
+const view = db.scope("accounts").get("alice/balance", {
+  includeProvisional: true,
+});
+```
+
+This preserves local-first UX without weakening strict consistency. The application can show pending
+state, but PrimaDB does not treat that state as committed until the authority accepts it.
 
 ## Path And Transaction Rules
 
