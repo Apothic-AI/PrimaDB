@@ -8,3 +8,4 @@ docs site content.
 - [cross-platform-parity-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/cross-platform-parity-plan.md)
 - [watch-index-storage-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/watch-index-storage-plan.md)
 - [callback-api-parity-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/callback-api-parity-plan.md)
+- [lazy-graph-traversal-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/lazy-graph-traversal-plan.md)

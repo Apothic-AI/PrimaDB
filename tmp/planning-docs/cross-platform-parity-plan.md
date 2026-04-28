@@ -23,6 +23,7 @@ of host adapters.
 The canonical capability set should include:
 
 - graph/query/auth core behavior
+- local-first graph traversal with default on-demand peer fetch
 - durable incremental storage
 - relay-backed sync and remote pull/query
 - direct peer mesh
@@ -95,6 +96,7 @@ Both targets should expose the same high-level relay behavior:
 - connect
 - sync with ack/retry/requeue
 - remote get/query/lex/snapshot
+- node-addressed lazy fetch for traversal internals
 - peer presence
 - peer recommendations
 
@@ -135,6 +137,22 @@ These do not need forced 1:1 parity:
 
 They are acceptable as platform sugar as long as the underlying capability is represented in the
 canonical model.
+
+## Traversal Plan
+
+Traversal is a canonical graph capability. The public surface should be high-level graph traversal,
+not transport-specific `remoteTraverse(...)` methods.
+
+Requirements:
+
+- expose normal `traverse(...)` / `watchTraverse(...)` graph operations across Rust, browser, Node,
+  and Python
+- enable on-demand peer fetch by default, with options to bound or disable it
+- avoid full graph sync before traversal begins
+- use node-addressed pull internally when a linked node is missing locally
+- merge fetched fragments into the local replica through the normal sync path
+- return completion metadata so applications can distinguish complete, partial, timed-out, and
+  limit-bounded results
 
 ## Test Matrix
 

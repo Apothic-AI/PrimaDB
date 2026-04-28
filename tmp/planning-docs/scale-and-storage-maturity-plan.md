@@ -23,7 +23,9 @@ to:
 - an incremental storage engine with targeted reads and range scans
 - page/segment-oriented persistence
 - pushdown for remote pull and query workloads
+- lazy graph traversal that can fetch missing linked nodes without full graph sync
 - tiered indexes for lexical and ordered traversal
+- relationship indexes for outbound/inbound edges and set membership
 - crash-safe manifests, journals, and compaction
 - browser and native backends that share the same logical storage contract
 
@@ -90,6 +92,8 @@ The engine should define logical reads/writes once, then map them onto filesyste
 
 3. Make reads incremental by default.
 Remote pull, lex traversal, and query should be able to stop early and stream.
+First-class graph traversal should follow the same rule: start with local state and fetch missing
+linked nodes from peers on demand instead of requiring full snapshot sync.
 
 4. Keep storage typed.
 Use versioned Rust-owned encodings instead of custom string grammars.
@@ -135,6 +139,8 @@ Suggested logical key families:
 - `r/{owner}/{path}` for auth ownership metadata
 - `c/{cert_id}` for certificates and delegated-authority material
 - `i/{index_name}/{encoded_term}/{node_id}` for secondary indexes
+- `e/out/{source_node}/{field}/{target_node}` for outbound relationship indexes
+- `e/in/{target_node}/{field}/{source_node}` for reverse relationship indexes
 - `m/...` for manifests and compaction metadata
 
 This gives us:

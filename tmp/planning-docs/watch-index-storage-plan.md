@@ -5,6 +5,7 @@
 1. Narrow watch invalidation so local and remote watchers do not recompute on unrelated writes.
 2. Broaden index pushdown to cover nested scalar paths and cheaper range/prefix scans.
 3. Improve native durable-storage hygiene with explicit vacuum/GC and denser hot-path encoding.
+4. Prepare watch and index internals for bounded graph traversal without broad recomputation.
 
 ### Constraints
 
@@ -12,6 +13,7 @@
 - Do not weaken current sync correctness.
 - Keep relay/mesh watch behavior identical at the API level.
 - Avoid automatic destructive GC for shared blob stores unless the live set is explicit.
+- Do not introduce traversal features that require full graph sync or unbounded network fetches.
 
 ### Work Plan
 
@@ -36,6 +38,10 @@
   - lower/upper range
 - Use bounded scans plus indexed filter grouping/intersection in query planning.
 - Push offset/limit earlier when the indexed scan already determines final ordering.
+- Add relationship indexes for traversal:
+  - outbound links by source node and field
+  - inbound links by target node and field
+  - set membership edges
 
 #### 3. Storage Vacuum / Denser Encoding / GC
 
@@ -57,3 +63,8 @@
   - range/prefix index scans
   - vacuum removing stale files without removing live state
 - Re-run native mesh/relay watch tests to confirm no behavior regression.
+- Add traversal-focused tests once traversal lands:
+  - bounded traversal over cycles
+  - on-demand missing-node fetch
+  - reverse-edge traversal from the relationship index
+  - watch traversal invalidation only on dependent nodes/edges
