@@ -72,6 +72,8 @@ class Primadb {
   constructor(replica_id: string | null);
   replicaId(): string;
   chain(root: string): Chain;
+  scope(root: string): Scope;
+  transaction(steps: any): any;
   snapshot(): any;
   snapshotForRoot(root: string | null): any;
   exportSnapshotJson(): string;
@@ -167,6 +169,18 @@ class RemoteWatch {
 }
 ```
 
+### `Scope`
+
+```ts
+class Scope {
+  root(): string;
+  configure(policy: any): void;
+  policy(): any;
+  proposals(): any;
+  transaction(steps: any, options: any): any;
+}
+```
+
 ### `IndexedDbPersistence`
 
 ```ts
@@ -215,6 +229,7 @@ class WebSocketSync {
   remoteLex(peer_id: string, path: any, spec: any): Promise<any>;
   remoteNode(peer_id: string, id: string): Promise<any>;
   remoteSnapshot(peer_id: string, root: string | null): Promise<any>;
+  remoteTransaction(peer_id: string, scope: string, steps: any, options: any): Promise<any>;
   flushPending(): number;
   retryInflight(): number;
   close(): void;
@@ -243,6 +258,20 @@ class WebRtcMesh {
   close(): void;
 }
 ```
+
+## Strict consistency and transactions
+
+PrimaDB is eventual/local-first by default. Strict consistency APIs are opt-in and scoped to a graph root.
+
+- `db.transaction(...)` applies a step array atomically on the local replica.
+- `db.scope(root).configure(...)` stores a scope policy for that root.
+- `scope.transaction(...)` runs a step array inside the scope and prefixes relative step paths with the scope root.
+- `consistency: "local_transactional"` marks the scope as a transaction boundary without adding network coordination.
+- `consistency: "coordinated"` requires the configured authority for canonical writes.
+- Non-authority peers use `offlineWrites: "reject"` to fail immediately or `offlineWrites: "queue_provisional"` to store a durable local proposal that normal reads and watches do not treat as committed graph state.
+- Relay sync clients expose `remoteTransaction(...)` to submit a coordinated transaction to an authority peer.
+
+The current coordinated implementation is a single-authority path. Quorum policies and strict authority read modes are represented in the policy model but are not full consensus or distributed multi-scope transactions yet.
 
 ## Traversal semantics
 

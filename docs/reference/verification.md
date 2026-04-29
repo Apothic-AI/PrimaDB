@@ -14,6 +14,7 @@ PrimaDB is not relying on a single smoke check. The repo currently exercises:
 - native mesh smokes
 - Node package smokes
 - Python package smokes
+- generated docs and Docusaurus build
 - cross-target all-build mesh and storage end-to-end tests
 
 ## Core Verification Commands
@@ -57,4 +58,13 @@ uv run python scripts/smoke_core.py
 uv run python scripts/smoke_hooks.py
 uv run python scripts/smoke_relay.py
 uv run python scripts/smoke_mesh.py
+```
+
+Docs site:
+
+```bash
+cd /home/bitnom/Code/gunport/primadb/website
+pnpm install
+pnpm run generate:api
+pnpm run build
 ```

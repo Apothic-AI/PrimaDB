@@ -1,6 +1,6 @@
 ---
 title: Routing And Mesh
-sidebar_position: 4
+sidebar_position: 5
 ---
 
 PrimaDB has a DAM-like routing layer, but not Gun’s exact wire format.
@@ -28,6 +28,8 @@ That means:
 - peer discovery still works
 - remote `get/query/lex/snapshot` still work
 - remote watches still work
+- relay `remoteTransaction(...)` / `remote_transaction(...)` can submit strict-scope proposals to
+  an authority peer
 - but peer-to-peer traffic continues through the relay
 
 ## Mesh Mode
@@ -39,6 +41,7 @@ That means:
 
 - same room plus relay-backed signaling is what triggers direct peering
 - sharing a relay alone does not automatically upgrade relay traffic into direct mesh traffic
+- current public mesh APIs expose remote watches, not a dedicated remote transaction helper
 
 This is close to how Gun behaves when its WebRTC plugin is active.
 

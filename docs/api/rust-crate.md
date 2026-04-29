@@ -58,6 +58,20 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `GunChain`
 - `GunCompatOptions`
 
+### `consistency`
+
+- `ProvisionalTransaction`
+- `ScopeAuthority`
+- `ScopeConsistency`
+- `ScopeIsolation`
+- `ScopeOfflineWrites`
+- `ScopePolicy`
+- `ScopeReadMode`
+- `TransactionOptions`
+- `TransactionReport`
+- `TransactionStatus`
+- `TransactionStep`
+
 ### `crypto`
 
 - `EncryptedPayload`
@@ -77,7 +91,10 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `NodeFetchScheduler`
 - `Primadb`
 - `QueryBuilder`
+- `Scope`
 - `Subscription`
+- `Transaction`
+- `TransactionChain`
 - `TraversalSubscription`
 - `VacuumReport`
 
@@ -237,6 +254,20 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `NodeId`
 - `NodeState`
 - `SetState`
+
+## Strict consistency and transactions
+
+PrimaDB is eventual/local-first by default. Strict consistency APIs are opt-in and scoped to a graph root.
+
+- `Primadb::transaction(...)` runs a closure transaction atomically on the local replica.
+- `Primadb::apply_transaction_steps(...)` applies serializable step payloads used by SDKs and transports.
+- `Primadb::scope(root).configure(...)` stores a `ScopePolicy` for that root.
+- `Scope::transaction(...)` runs a Rust closure transaction inside the scope.
+- `Scope::transaction_steps(...)` runs step payloads inside the scope and can queue provisional proposals when configured.
+- `ScopeConsistency::LocalTransactional` marks a transaction boundary without network coordination.
+- `ScopeConsistency::Coordinated` requires the configured authority for canonical writes.
+
+The current coordinated implementation is a single-authority path. Quorum policy types exist, but quorum consensus, authority sequence certificates, and distributed multi-scope transactions are not implemented yet.
 
 ## Traversal semantics
 

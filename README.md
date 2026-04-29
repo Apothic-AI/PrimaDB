@@ -44,6 +44,9 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - First-class small/medium binary fields via `put_bytes()` / `putBytes(...)` and `{"$bytes": "..."}` markers.
 - Separate content-addressed blob storage for larger binary payloads, with blob refs stored in-graph via `{"$blob": {...}}`.
 - Reactive subscriptions.
+- Local atomic transactions with preconditions, revision checks, and increment steps.
+- Strict scope policies for local-transactional and single-authority coordinated graph roots.
+- Durable provisional transaction proposals for coordinated scopes that choose queued offline writes.
 - Database-level change subscriptions for persistence/sync hooks.
 - Explicit outbound replication log via `pending_operations()` / `drain_pending_operations()`.
 - Sync envelopes and JSON wire helpers for custom transports.
@@ -82,6 +85,7 @@ This is intentionally not a 1:1 port of Gun internals.
 - Writes are turned into explicit operations.
 - Replication is transport-agnostic.
 - Nested objects become linked graph nodes with deterministic path-derived IDs, so replicas converge on the same intermediate graph structure.
+- The default graph path remains local-first/eventual; strict consistency is opt-in through scoped policies.
 - Browser auto-persistence ignores the transient “drained for transport” state so in-flight writes are not silently lost on reload before ack.
 - Persisted snapshot loads preserve the local replica identity and do not replay another tab's pending queue.
 - Browser support stays on stable `wasm32-unknown-unknown` patterns instead of assuming newer WebAssembly proposals are enabled by default.

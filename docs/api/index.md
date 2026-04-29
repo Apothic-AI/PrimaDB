@@ -19,6 +19,11 @@ rather than "how should I learn the product?"
 - `primadb-python`
 - the Rust crate, with bundled rustdoc
 
+The generated references include the current strict consistency surface: `Scope`, `ScopePolicy`,
+transaction step payloads, transaction reports, provisional proposals, and relay
+`remoteTransaction(...)` / `remote_transaction(...)` submission APIs where those bindings expose
+them.
+
 ## How To Use This Section
 
 - Start with the SDK guide pages if you need concepts or setup.

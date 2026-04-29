@@ -1,6 +1,6 @@
 ---
 title: Storage And Durability
-sidebar_position: 6
+sidebar_position: 7
 ---
 
 PrimaDB’s current storage path is incremental and segment-backed rather than “always load the full

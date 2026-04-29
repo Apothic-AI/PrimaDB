@@ -13,6 +13,7 @@ support.
 - set membership
 - first-class byte fields
 - blob references stored in-graph
+- scope policies attached to graph roots for opt-in strict transaction behavior
 
 ## Graph Markers
 

@@ -33,6 +33,7 @@ pnpm run build
 - relay transport
 - WebRTC mesh transport
 - remote watches
+- local transactions and strict scope policies
 - network hooks
 - experimental MoQ sync helpers through `primadb-node/moq`
 
@@ -54,6 +55,39 @@ db.setNetworkHooks({
     }
   },
 });
+```
+
+## Transactions And Strict Scopes
+
+```js
+const ledger = db.scope("ledger");
+ledger.configure({
+  consistency: "coordinated",
+  authority: { kind: "full_node", peerId: "native:node-a" },
+  offlineWrites: "reject",
+});
+
+const report = ledger.transaction([
+  {
+    kind: "increment",
+    path: { anchor: "alice", segments: ["balance"] },
+    by: 10,
+  },
+]);
+console.log(report.status);
+```
+
+When a different peer is the authority, submit over a relay sync client:
+
+```js
+const sync = await db.connectRelay({ url: "ws://127.0.0.1:9010" });
+await sync.remoteTransaction("native:ledger", "ledger", [
+  {
+    kind: "increment",
+    path: { anchor: "alice", segments: ["balance"] },
+    by: 10,
+  },
+]);
 ```
 
 ## Package Examples

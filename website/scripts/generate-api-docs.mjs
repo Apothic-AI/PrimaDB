@@ -254,9 +254,19 @@ function parsePythonStub(filePath) {
   const lines = readFileSync(filePath, "utf8").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   let current = null;
+  let pendingDecorators = [];
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
+    if (/^@\w/.test(line)) {
+      if (current) {
+        blocks.push(current);
+        current = null;
+      }
+      pendingDecorators.push(line);
+      continue;
+    }
+
     if (/^(class|def)\s+/.test(line)) {
       if (current) {
         blocks.push(current);
@@ -264,13 +274,16 @@ function parsePythonStub(filePath) {
       current = {
         name: line.replace(/^(class|def)\s+/, "").split(/[(:]/, 1)[0].trim(),
         kind: line.startsWith("class ") ? "class" : "function",
-        lines: [line],
+        lines: [...pendingDecorators, line],
       };
+      pendingDecorators = [];
       continue;
     }
 
     if (current) {
       current.lines.push(line);
+    } else if (line.trim()) {
+      pendingDecorators = [];
     }
   }
 
@@ -318,6 +331,34 @@ function renderPythonPage({ title, sidebarPosition, intro, sourcePath, extraSect
 
   return `${parts.join("\n").trim()}\n`;
 }
+
+const strictConsistencyApiBody = [
+  "PrimaDB is eventual/local-first by default. Strict consistency APIs are opt-in and scoped to a graph root.",
+  "",
+  "- `db.transaction(...)` applies a step array atomically on the local replica.",
+  "- `db.scope(root).configure(...)` stores a scope policy for that root.",
+  "- `scope.transaction(...)` runs a step array inside the scope and prefixes relative step paths with the scope root.",
+  "- `consistency: \"local_transactional\"` marks the scope as a transaction boundary without adding network coordination.",
+  "- `consistency: \"coordinated\"` requires the configured authority for canonical writes.",
+  "- Non-authority peers use `offlineWrites: \"reject\"` to fail immediately or `offlineWrites: \"queue_provisional\"` to store a durable local proposal that normal reads and watches do not treat as committed graph state.",
+  "- Relay sync clients expose `remoteTransaction(...)` / `remote_transaction(...)` to submit a coordinated transaction to an authority peer.",
+  "",
+  "The current coordinated implementation is a single-authority path. Quorum policies and strict authority read modes are represented in the policy model but are not full consensus or distributed multi-scope transactions yet.",
+].join("\n");
+
+const strictConsistencyRustBody = [
+  "PrimaDB is eventual/local-first by default. Strict consistency APIs are opt-in and scoped to a graph root.",
+  "",
+  "- `Primadb::transaction(...)` runs a closure transaction atomically on the local replica.",
+  "- `Primadb::apply_transaction_steps(...)` applies serializable step payloads used by SDKs and transports.",
+  "- `Primadb::scope(root).configure(...)` stores a `ScopePolicy` for that root.",
+  "- `Scope::transaction(...)` runs a Rust closure transaction inside the scope.",
+  "- `Scope::transaction_steps(...)` runs step payloads inside the scope and can queue provisional proposals when configured.",
+  "- `ScopeConsistency::LocalTransactional` marks a transaction boundary without network coordination.",
+  "- `ScopeConsistency::Coordinated` requires the configured authority for canonical writes.",
+  "",
+  "The current coordinated implementation is a single-authority path. Quorum policy types exist, but quorum consensus, authority sequence certificates, and distributed multi-scope transactions are not implemented yet.",
+].join("\n");
 
 function splitTopLevel(text, delimiter = ",") {
   const parts = [];
@@ -814,6 +855,13 @@ function generateApiDocs() {
       sourcePath: resolve(repoRoot, "src", "wasm.rs"),
       extraSections: [
         {
+          title: "Strict consistency and transactions",
+          body: strictConsistencyApiBody.replaceAll(
+            "`remoteTransaction(...)` / `remote_transaction(...)`",
+            "`remoteTransaction(...)`",
+          ),
+        },
+        {
           title: "Traversal semantics",
           body: [
             "`Chain.traverse(...)` returns the current local traversal result immediately. When connected relay or mesh transports are active, missing linked nodes are scheduled for bounded background fetch.",
@@ -894,6 +942,13 @@ function generateApiDocs() {
       ],
       extraSections: [
         {
+          title: "Strict consistency and transactions",
+          body: strictConsistencyApiBody.replaceAll(
+            "`remoteTransaction(...)` / `remote_transaction(...)`",
+            "`remoteTransaction(...)`",
+          ),
+        },
+        {
           title: "Traversal semantics",
           body: [
             "`Chain.traverse(...)` returns the current local traversal result immediately. With an active relay or mesh connection, missing linked nodes are scheduled for bounded background fetch.",
@@ -914,6 +969,10 @@ function generateApiDocs() {
         "This page covers the `primadb-python` package surface. It is generated directly from the public stub file shipped with the package.",
       sourcePath: resolve(repoRoot, "packages", "primadb-python", "python", "primadb", "__init__.pyi"),
       extraSections: [
+        {
+          title: "Strict consistency and transactions",
+          body: strictConsistencyApiBody.replaceAll("`remoteTransaction(...)` / `remote_transaction(...)`", "`remote_transaction(...)`"),
+        },
         {
           title: "Traversal semantics",
           body: [
@@ -936,6 +995,10 @@ function generateApiDocs() {
         "This page covers the public Rust crate surface. The site also serves the full bundled rustdoc so Rust consumers can browse the real crate API directly.",
       libPath: resolve(repoRoot, "src", "lib.rs"),
       extraSections: [
+        {
+          title: "Strict consistency and transactions",
+          body: strictConsistencyRustBody,
+        },
         {
           title: "Traversal semantics",
           body: [

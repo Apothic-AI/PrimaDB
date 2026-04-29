@@ -44,6 +44,47 @@ db.set_network_hooks(
 )
 ```
 
+## Transactions And Strict Scopes
+
+```python
+ledger = db.scope("ledger")
+ledger.configure(
+    {
+        "consistency": "coordinated",
+        "authority": {"kind": "full_node", "peerId": "native:py-a"},
+        "offlineWrites": "reject",
+    }
+)
+
+report = ledger.transaction(
+    [
+        {
+            "kind": "increment",
+            "path": {"anchor": "alice", "segments": ["balance"]},
+            "by": 10,
+        }
+    ]
+)
+print(report["status"])
+```
+
+When a different peer is the authority, submit over a relay sync client:
+
+```python
+sync = db.connect_relay({"url": "ws://127.0.0.1:9010"})
+sync.remote_transaction(
+    "native:ledger",
+    "ledger",
+    [
+        {
+            "kind": "increment",
+            "path": {"anchor": "alice", "segments": ["balance"]},
+            "by": 10,
+        }
+    ],
+)
+```
+
 ## Package Examples
 
 - [local_notes](https://github.com/Apothic-AI/PrimaDB/tree/master/packages/primadb-python/examples/local_notes)

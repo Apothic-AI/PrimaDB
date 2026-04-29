@@ -3,8 +3,8 @@ title: Replication And Convergence
 sidebar_position: 2
 ---
 
-PrimaDB is eventually consistent across replicas. More precisely, it is an asynchronously
-replicated, convergent, local-first datastore.
+PrimaDB is eventually consistent across replicas by default. More precisely, the normal graph path
+is an asynchronously replicated, convergent, local-first datastore.
 
 ## Core Replication Contract
 
@@ -15,9 +15,9 @@ replicated, convergent, local-first datastore.
 
 That makes convergence inspectable instead of hidden behind opaque transport behavior.
 
-## What This Is Not
+## What The Default Model Is Not
 
-PrimaDB is not:
+The default eventual path is not:
 
 - strongly consistent
 - linearizable
@@ -25,6 +25,17 @@ PrimaDB is not:
 
 A local replica sees its own accepted writes immediately. Cross-replica convergence is eventual and
 depends on peers eventually exchanging the relevant accepted operations.
+
+## Strict Scope Exception
+
+PrimaDB also has opt-in strict scope APIs for bounded graph roots. Local transactions provide
+atomic multi-step commits on one replica, and coordinated scopes can require a configured authority
+before canonical writes are accepted for that scope.
+
+That does not change the default replication contract. Writes outside coordinated scopes remain
+local-first and eventual. Current coordinated scopes are single-authority, not quorum consensus.
+
+See [Strict consistency](strict-consistency) for the exact scope and transaction semantics.
 
 ## Why This Model Was Chosen
 
@@ -38,5 +49,8 @@ Compared to Gun’s HAM-style graph merge, PrimaDB’s explicit operation model 
 
 ## Local-First Behavior
 
-A relay or mesh outage does not prevent local reads, writes, subscriptions, or durable storage from
-working. Network layers reconnect and replay as connectivity returns.
+A relay or mesh outage does not prevent normal local reads, writes, subscriptions, or durable
+storage from working. Network layers reconnect and replay as connectivity returns.
+
+For coordinated strict scopes, non-authority offline writes either fail immediately or become
+durable provisional proposals, depending on that scope's `offlineWrites` policy.

@@ -1,6 +1,6 @@
 ---
 title: Auth And Privacy
-sidebar_position: 5
+sidebar_position: 6
 ---
 
 PrimaDB has an SEA-like crypto/auth layer, but it does not try to turn the core graph into a full
@@ -40,3 +40,10 @@ If an application wants operational gating, PrimaDB now exposes optional network
 - served-result redaction
 
 Those hooks are intentionally lighter than universal graph read authorization.
+
+## Relation To Strict Scopes
+
+Strict scopes control write ordering and canonical commit authority for selected graph roots. They
+do not replace encryption or signed write certificates. Use encryption for read privacy, SEA-style
+signatures/certificates for authorship, and [strict consistency](strict-consistency) when a scoped
+part of the graph needs authority-gated ordering.

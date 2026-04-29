@@ -23,6 +23,7 @@ bridges.
 
 - graph-shaped documents with nested path traversal
 - deterministic merge behavior based on explicit operations and hybrid logical revisions
+- local transactions, scoped transaction boundaries, and opt-in coordinated strict scopes
 - query filters, ordering, limits, lexical traversal, and remote watches
 - relay-routed replication and relay-signaled mesh replication
 - browser and native WebRTC mesh support
@@ -44,6 +45,7 @@ bridges.
 
 - [Data model](concepts/data-model)
 - [Replication and convergence](concepts/replication)
+- [Strict consistency](concepts/strict-consistency)
 - [Routing and mesh](concepts/routing-and-mesh)
 - [Query and watch](concepts/query-and-watch)
 - [Auth and privacy](concepts/auth-and-privacy)

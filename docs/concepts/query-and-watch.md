@@ -1,6 +1,6 @@
 ---
 title: Query And Watch
-sidebar_position: 3
+sidebar_position: 4
 ---
 
 PrimaDB has both local subscriptions and remote live watches.
@@ -24,6 +24,9 @@ Relay and mesh transports support remote live interests for:
 - `snapshot`
 
 Each watch starts with an initial snapshot and then streams updates. Large results are chunked.
+
+Strict-scope `remoteTransaction(...)` / `remote_transaction(...)` calls are request/response pull
+operations, not live watches.
 
 ## Performance Model
 

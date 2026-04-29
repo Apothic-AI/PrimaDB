@@ -49,6 +49,42 @@ setNetworkHooks(db, {
 });
 ```
 
+## Transactions And Strict Scopes
+
+The browser runtime exposes the same step-based transaction payloads as the native packages:
+
+```ts
+db.transaction([
+  {
+    kind: "put",
+    path: { anchor: "drafts", segments: ["welcome"] },
+    value: { title: "Welcome" },
+  },
+]);
+
+db.scope("ledger").configure({
+  consistency: "coordinated",
+  authority: { kind: "full_node", peerId: "browser-ledger" },
+  offlineWrites: "queue_provisional",
+});
+
+const report = db.scope("ledger").transaction([
+  {
+    kind: "increment",
+    path: { anchor: "alice", segments: ["balance"] },
+    by: 10,
+  },
+]);
+
+if (report.status === "provisional") {
+  console.log(db.scope("ledger").proposals());
+}
+```
+
+Relay clients can submit strict-scope transactions to an authority peer with
+`remoteTransaction(...)`. Mesh transports currently expose remote watches, not a public remote
+transaction helper.
+
 ## Threaded Build
 
 Use `primadb/threads` when you want the threaded browser runtime. It still inherits the

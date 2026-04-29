@@ -331,6 +331,148 @@ export interface RemotePath {
 }
 ```
 
+#### `ScopeConsistency`
+
+Kind: type alias
+
+```ts
+export type ScopeConsistency = "eventual" | "local_transactional" | "coordinated";
+```
+
+#### `ScopeOfflineWrites`
+
+Kind: type alias
+
+```ts
+export type ScopeOfflineWrites = "reject" | "queue_provisional";
+```
+
+#### `ScopeIsolation`
+
+Kind: type alias
+
+```ts
+export type ScopeIsolation = "serializable";
+```
+
+#### `ScopeReadMode`
+
+Kind: type alias
+
+```ts
+export type ScopeReadMode = "cached" | "authority" | "quorum";
+```
+
+#### `ScopeAuthority`
+
+Kind: type alias
+
+```ts
+export type ScopeAuthority = {
+    kind: "peer";
+    peerId: string;
+} | {
+    kind: "full_node";
+    peerId: string;
+} | {
+    kind: "quorum";
+    peers: string[];
+    threshold: number;
+};
+```
+
+#### `ScopePolicy`
+
+Kind: interface
+
+```ts
+export interface ScopePolicy {
+    consistency?: ScopeConsistency;
+    authority?: ScopeAuthority | null;
+    isolation?: ScopeIsolation;
+    readMode?: ScopeReadMode;
+    offlineWrites?: ScopeOfflineWrites;
+}
+```
+
+#### `TransactionOptions`
+
+Kind: interface
+
+```ts
+export interface TransactionOptions {
+    offline?: ScopeOfflineWrites | null;
+}
+```
+
+#### `TransactionStep`
+
+Kind: type alias
+
+```ts
+export type TransactionStep = {
+    kind: "put";
+    path: RemotePath;
+    value: JsonValue;
+} | {
+    kind: "unset";
+    path: RemotePath;
+} | {
+    kind: "set";
+    path: RemotePath;
+    value: JsonValue;
+} | {
+    kind: "remove";
+    path: RemotePath;
+    value: JsonValue;
+} | {
+    kind: "assert_exists";
+    path: RemotePath;
+} | {
+    kind: "assert_absent";
+    path: RemotePath;
+} | {
+    kind: "assert_value";
+    path: RemotePath;
+    value: JsonValue;
+} | {
+    kind: "assert_revision";
+    path: RemotePath;
+    revision?: JsonValue | null;
+} | {
+    kind: "increment";
+    path: RemotePath;
+    by: number;
+};
+```
+
+#### `TransactionReport`
+
+Kind: interface
+
+```ts
+export interface TransactionReport {
+    status: "committed" | "provisional";
+    operationCount: number;
+    memberIds?: string[];
+    proposalId?: string | null;
+}
+```
+
+#### `ProvisionalTransaction`
+
+Kind: interface
+
+```ts
+export interface ProvisionalTransaction {
+    id: string;
+    scope: string;
+    createdAtMillis: number;
+    steps: TransactionStep[];
+    options?: TransactionOptions;
+}
+```
+
 #### `PullRequestKind`
 
 Kind: type alias
@@ -368,6 +510,11 @@ export type PullRequestKind = {
 } | {
     kind: "snapshot";
     root?: string | null;
+} | {
+    kind: "transaction";
+    scope: string;
+    steps: TransactionStep[];
+    options?: TransactionOptions;
 };
 ```
 
@@ -394,6 +541,9 @@ export type RemoteResult = {
 } | {
     kind: "snapshot";
     snapshot: JsonValue;
+} | {
+    kind: "transaction";
+    report: TransactionReport;
 };
 ```
 
@@ -494,7 +644,7 @@ Kind: interface
 export interface RemoteWatchMessage {
     done: boolean;
     initial?: boolean;
-    kind?: "get" | "map" | "query" | "lex" | "node" | "snapshot" | null;
+    kind?: "get" | "map" | "query" | "lex" | "node" | "snapshot" | "transaction" | null;
     value?: JsonValue | null;
     error?: string | null;
 }
@@ -509,6 +659,8 @@ export declare class Primadb {
     constructor(replicaId?: string | null);
     replicaId(): string;
     chain(root: string): Chain;
+    scope(root: string): Scope;
+    transaction(steps: TransactionStep[]): TransactionReport;
     snapshot(): JsonValue;
     snapshotForRoot(root?: string | null): JsonValue;
     nodeState(id: string): JsonValue | null;
@@ -530,6 +682,20 @@ export declare class Primadb {
     connectMesh(config: MeshConfig): Promise<WebRtcMesh>;
     setNetworkHooks(hooks: NetworkHooks): void;
     clearNetworkHooks(): void;
+}
+```
+
+#### `Scope`
+
+Kind: class
+
+```ts
+export declare class Scope {
+    root(): string;
+    configure(policy: ScopePolicy): void;
+    policy(): ScopePolicy | null;
+    proposals(): ProvisionalTransaction[];
+    transaction(steps: TransactionStep[], options?: TransactionOptions | null): TransactionReport;
 }
 ```
 
@@ -625,6 +791,7 @@ export declare class WebSocketSync {
     remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
     remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
     remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
+    remoteTransaction(peerId: string, scope: string, steps: TransactionStep[], options?: TransactionOptions | null): Promise<TransactionReport>;
     watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
     watchRemoteMap(peerId: string, path: RemotePath): RemoteWatch;
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
@@ -787,6 +954,20 @@ Kind: function
 ```ts
 export declare function createPrimadbMoqLoopback(options: PrimadbMoqLoopbackOptions): Promise<PrimadbMoqLoopback>;
 ```
+
+## Strict consistency and transactions
+
+PrimaDB is eventual/local-first by default. Strict consistency APIs are opt-in and scoped to a graph root.
+
+- `db.transaction(...)` applies a step array atomically on the local replica.
+- `db.scope(root).configure(...)` stores a scope policy for that root.
+- `scope.transaction(...)` runs a step array inside the scope and prefixes relative step paths with the scope root.
+- `consistency: "local_transactional"` marks the scope as a transaction boundary without adding network coordination.
+- `consistency: "coordinated"` requires the configured authority for canonical writes.
+- Non-authority peers use `offlineWrites: "reject"` to fail immediately or `offlineWrites: "queue_provisional"` to store a durable local proposal that normal reads and watches do not treat as committed graph state.
+- Relay sync clients expose `remoteTransaction(...)` to submit a coordinated transaction to an authority peer.
+
+The current coordinated implementation is a single-authority path. Quorum policies and strict authority read modes are represented in the policy model but are not full consensus or distributed multi-scope transactions yet.
 
 ## Traversal semantics
 
