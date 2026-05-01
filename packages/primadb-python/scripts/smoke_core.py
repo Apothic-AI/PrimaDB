@@ -7,13 +7,24 @@ import shutil
 import tempfile
 import time
 
-from primadb import Primadb
+from primadb import Primadb, derive_password_key
 
 
 def main() -> None:
     root = tempfile.mkdtemp(prefix="primadb-python-core-")
     try:
         db = Primadb("python-core-a")
+        password_key = derive_password_key(
+            "python smoke password",
+            {
+                "saltBase64": "MTIzNDU2Nzg5MGFiY2RlZg",
+                "memoryCostKiB": 32,
+                "timeCost": 1,
+                "parallelism": 1,
+            },
+        )
+        db.set_snapshot_encryption_key(password_key["keyBase64"])
+        db.set_transport_encryption_key(password_key["keyBase64"])
         binding = db.open_durable_storage(
             {
                 "kind": "segment_files",
@@ -91,6 +102,8 @@ def main() -> None:
             time.sleep(0.05)
 
         restored = Primadb("python-core-b")
+        restored.set_snapshot_encryption_key(password_key["keyBase64"])
+        restored.set_transport_encryption_key(password_key["keyBase64"])
         restored_binding = restored.open_durable_storage(
             {
                 "kind": "segment_files",
@@ -138,6 +151,11 @@ def main() -> None:
                 {
                     "binding": binding,
                     "blobBinding": blob_binding,
+                    "passwordKey": {
+                        "algorithm": password_key["algorithm"],
+                        "saltBase64": password_key["saltBase64"],
+                        "memoryCostKiB": password_key["params"]["memoryCostKiB"],
+                    },
                     "restoredBinding": restored_binding,
                     "restoredBlobBinding": restored_blob_binding,
                     "noteId": note_id,
@@ -175,6 +193,10 @@ def main() -> None:
                         and provisional_report["status"] == "provisional"
                         and provisional_canonical is None
                         and len(offline_ledger.proposals()) == 1
+                        and password_key["algorithm"] == "argon2id-v1.3"
+                        and password_key["saltBase64"] == "MTIzNDU2Nzg5MGFiY2RlZg"
+                        and isinstance(password_key["keyBase64"], str)
+                        and len(password_key["keyBase64"]) > 0
                     ),
                 },
                 indent=2,

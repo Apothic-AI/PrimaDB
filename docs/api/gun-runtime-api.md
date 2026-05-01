@@ -64,6 +64,7 @@ export interface PrimadbGunBindings {
     Subscription: typeof PrimadbBindings.Subscription;
     WebSocketSync: typeof PrimadbBindings.WebSocketSync;
     WebRtcMesh: typeof PrimadbBindings.WebRtcMesh;
+    derivePasswordKey: typeof PrimadbBindings.derivePasswordKey;
     generateSeaPair: typeof PrimadbBindings.generateSeaPair;
     seaDecrypt: typeof PrimadbBindings.seaDecrypt;
     seaEncrypt: typeof PrimadbBindings.seaEncrypt;

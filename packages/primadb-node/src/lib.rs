@@ -9,13 +9,14 @@ use primadb::{
     HookDecision, Identity, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
-    PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
-    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
-    RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, ServeRequestContext,
-    ServeResultContext, Scope as CoreScope, ScopePolicy, Subscription as CoreSubscription,
-    TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
-    TraversalSpec, UserGrant, parse_request_hook_json, parse_result_hook_json,
-    parse_void_hook_json,
+    PasswordKeyDerivationOptions, PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig,
+    RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
+    RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
+    RoomHookContext, SecretBoxKey, ServeRequestContext, ServeResultContext, Scope as CoreScope,
+    ScopePolicy, Subscription as CoreSubscription, TransactionOptions, TransactionStep,
+    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    derive_password_key as core_derive_password_key, parse_request_hook_json,
+    parse_result_hook_json, parse_void_hook_json,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,15 @@ pub fn generate_identity() -> Result<JsonValue> {
         "publicKey": identity.public_key_base64(),
         "secretKey": identity.secret_key_base64(),
     }))
+}
+
+#[napi(js_name = "derivePasswordKey")]
+pub fn derive_password_key(password: String, options: Option<JsonValue>) -> Result<JsonValue> {
+    let options = options
+        .map(from_json::<PasswordKeyDerivationOptions>)
+        .transpose()?
+        .unwrap_or_default();
+    to_json(core_derive_password_key(password, options).map_err(to_napi_error)?)
 }
 
 fn binding_to_json(binding: CoreDurableStorageBinding) -> JsonValue {
@@ -490,6 +500,20 @@ impl Primadb {
     #[napi(js_name = "setRequireSignedSync")]
     pub fn set_require_signed_sync(&self, required: bool) {
         self.inner.set_require_signed_sync(required);
+    }
+
+    #[napi(js_name = "setSnapshotEncryptionKey")]
+    pub fn set_snapshot_encryption_key(&self, key_base64: String) -> Result<()> {
+        let key = SecretBoxKey::from_base64(&key_base64).map_err(to_napi_error)?;
+        self.inner.set_snapshot_encryption_key(key);
+        Ok(())
+    }
+
+    #[napi(js_name = "setTransportEncryptionKey")]
+    pub fn set_transport_encryption_key(&self, key_base64: String) -> Result<()> {
+        let key = SecretBoxKey::from_base64(&key_base64).map_err(to_napi_error)?;
+        self.inner.set_transport_encryption_key(key);
+        Ok(())
     }
 
     #[napi(js_name = "connectRelay")]

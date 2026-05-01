@@ -18,6 +18,7 @@ Current surface:
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
 - authenticated relay/mesh session identity through `generateIdentity()`, `authenticateLocalUser(...)`, `sessionAuth` config, and `context.verifiedIdentity`
+- Argon2id password-derived secret-box keys through `derivePasswordKey(...)`, usable with `setSnapshotEncryptionKey(...)` and `setTransportEncryptionKey(...)`
 - network-boundary hooks through `setNetworkHooks(...)` / `clearNetworkHooks()`
 - experimental MoQ sync helpers through `primadb-node/moq`
 
@@ -41,9 +42,15 @@ pnpm run build
 ## Example
 
 ```js
-import { Primadb } from "primadb-node";
+import { Primadb, derivePasswordKey } from "primadb-node";
 
 const db = new Primadb("node-a");
+const key = derivePasswordKey("correct horse battery staple", {
+  memoryCostKiB: 64 * 1024,
+  timeCost: 3,
+  parallelism: 1,
+});
+db.setSnapshotEncryptionKey(key.keyBase64);
 db.openDurableStorage({
   kind: "segment_files",
   directory: "/tmp/primadb-node-demo",

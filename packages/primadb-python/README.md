@@ -18,6 +18,7 @@ Current surface:
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
 - authenticated relay/mesh session identity through `generate_identity()`, `authenticate_local_user(...)`, `sessionAuth` config, and `context["verifiedIdentity"]`
+- Argon2id password-derived secret-box keys through `derive_password_key(...)`, usable with `set_snapshot_encryption_key(...)` and `set_transport_encryption_key(...)`
 - network-boundary hooks through `set_network_hooks(...)` / `clear_network_hooks()`
 - experimental MoQ path/track/frame helpers through `primadb.moq`
 
@@ -46,9 +47,14 @@ uv run python -c "from primadb import Primadb; print(Primadb().replica_id())"
 ## Example
 
 ```python
-from primadb import Primadb
+from primadb import Primadb, derive_password_key
 
 db = Primadb("py-a")
+key = derive_password_key(
+    "correct horse battery staple",
+    {"memoryCostKiB": 64 * 1024, "timeCost": 3, "parallelism": 1},
+)
+db.set_snapshot_encryption_key(key["keyBase64"])
 db.open_durable_storage(
     {
         "kind": "segment_files",

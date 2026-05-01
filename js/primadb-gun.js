@@ -302,41 +302,22 @@ function tryDecodeBase64Url(value) {
   }
 }
 
-async function deriveProof(input, salt, iterations = 100_000) {
-  const key = await globalThis.crypto.subtle.importKey(
-    "raw",
-    textEncoder.encode(`${input}`),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const bits = await globalThis.crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt: textEncoder.encode(`${salt}`),
-      iterations,
-      hash: "SHA-256",
-    },
-    key,
-    256,
-  );
-  return base64UrlEncode(new Uint8Array(bits));
-}
-
 async function normalizeCipherKey(seed) {
+  if (seed && typeof seed === "object" && typeof seed.keyBase64 === "string") {
+    return seed.keyBase64;
+  }
   const decoded = tryDecodeBase64Url(seed);
   if (decoded?.length === 32) {
     return seed;
   }
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    textEncoder.encode(`${seed}`),
+  throw new Error(
+    "SEA.encrypt/decrypt expects a 32-byte base64url key; use SEA.work or derivePasswordKey for passwords",
   );
-  return base64UrlEncode(new Uint8Array(digest));
 }
 
 function createSea(bindings) {
   const {
+    derivePasswordKey,
     generateSeaPair,
     seaPairFromPrivateKeys,
     seaSign,
@@ -348,6 +329,7 @@ function createSea(bindings) {
 
   if (
     !generateSeaPair ||
+    !derivePasswordKey ||
     !seaPairFromPrivateKeys ||
     !seaSign ||
     !seaVerify ||
@@ -364,7 +346,14 @@ function createSea(bindings) {
     },
 
     async work(data, salt, opt = {}) {
-      return deriveProof(data, salt, opt.iterations ?? 100_000);
+      const options = {
+        ...(salt == null ? {} : { saltBase64: base64UrlEncode(textEncoder.encode(`${salt}`)) }),
+        ...(opt.memoryCostKiB == null ? {} : { memoryCostKiB: opt.memoryCostKiB }),
+        ...(opt.timeCost == null ? {} : { timeCost: opt.timeCost }),
+        ...(opt.parallelism == null ? {} : { parallelism: opt.parallelism }),
+      };
+      const derived = derivePasswordKey(`${data}`, options);
+      return opt.raw ? derived : derived.keyBase64;
     },
 
     sign(data, pair, cb, opt = {}) {

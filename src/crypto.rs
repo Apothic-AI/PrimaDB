@@ -1,5 +1,6 @@
 use crate::SyncFrame;
 use crate::error::{PrimadbError, Result};
+use argon2::{Algorithm, Argon2, Params, Version};
 use base64ct::{Base64UrlUnpadded, Encoding};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -12,6 +13,17 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSec
 
 const SECRET_BOX_HKDF_SALT_PREFIX: &[u8] = b"primadb:v1:sea:x25519:salt";
 const SECRET_BOX_HKDF_INFO: &[u8] = b"primadb:v1:sea:xchacha20poly1305:json";
+const PASSWORD_KEY_ALGORITHM: &str = "argon2id-v1.3";
+const PASSWORD_KEY_BYTES: usize = 32;
+const PASSWORD_SALT_BYTES: usize = 16;
+const MIN_PASSWORD_SALT_BYTES: usize = 8;
+const MAX_PASSWORD_SALT_BYTES: usize = 64;
+const DEFAULT_PASSWORD_MEMORY_COST_KIB: u32 = 64 * 1024;
+const DEFAULT_PASSWORD_TIME_COST: u32 = 3;
+const DEFAULT_PASSWORD_PARALLELISM: u32 = 1;
+const MAX_PASSWORD_MEMORY_COST_KIB: u32 = 1024 * 1024;
+const MAX_PASSWORD_TIME_COST: u32 = 10;
+const MAX_PASSWORD_PARALLELISM: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SignedPayload<T> {
@@ -39,6 +51,40 @@ pub struct PublicIdentity {
 #[derive(Debug, Clone)]
 pub struct SecretBoxKey {
     key_bytes: [u8; 32],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordKeyDerivationParams {
+    #[serde(
+        default = "default_password_memory_cost_kib",
+        rename = "memoryCostKiB",
+        alias = "memoryCostKib",
+        alias = "memory_cost_kib"
+    )]
+    pub memory_cost_kib: u32,
+    #[serde(default = "default_password_time_cost", alias = "time_cost")]
+    pub time_cost: u32,
+    #[serde(default = "default_password_parallelism")]
+    pub parallelism: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordKeyDerivationOptions {
+    #[serde(default, alias = "salt_base64")]
+    pub salt_base64: Option<String>,
+    #[serde(flatten)]
+    pub params: PasswordKeyDerivationParams,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordDerivedKey {
+    pub algorithm: String,
+    pub key_base64: String,
+    pub salt_base64: String,
+    pub params: PasswordKeyDerivationParams,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +207,30 @@ impl SecretBoxKey {
         Ok(Self { key_bytes })
     }
 
+    pub fn derive_from_password(
+        password: impl AsRef<[u8]>,
+        salt: &[u8],
+        params: PasswordKeyDerivationParams,
+    ) -> Result<Self> {
+        validate_password_salt(salt)?;
+        let params = params.to_argon2_params()?;
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let mut key_bytes = [0_u8; PASSWORD_KEY_BYTES];
+        argon2
+            .hash_password_into(password.as_ref(), salt, &mut key_bytes)
+            .map_err(|error| PrimadbError::Crypto(error.to_string()))?;
+        Ok(Self { key_bytes })
+    }
+
+    pub fn derive_from_password_base64(
+        password: impl AsRef<[u8]>,
+        salt_base64: &str,
+        params: PasswordKeyDerivationParams,
+    ) -> Result<Self> {
+        let salt = decode_base64(salt_base64)?;
+        Self::derive_from_password(password, &salt, params)
+    }
+
     pub fn to_base64(&self) -> String {
         Base64UrlUnpadded::encode_string(&self.key_bytes)
     }
@@ -260,6 +330,85 @@ impl Default for SecretBoxKey {
     }
 }
 
+impl Default for PasswordKeyDerivationParams {
+    fn default() -> Self {
+        Self {
+            memory_cost_kib: default_password_memory_cost_kib(),
+            time_cost: default_password_time_cost(),
+            parallelism: default_password_parallelism(),
+        }
+    }
+}
+
+impl PasswordKeyDerivationParams {
+    pub fn interactive() -> Self {
+        Self::default()
+    }
+
+    pub fn new(memory_cost_kib: u32, time_cost: u32, parallelism: u32) -> Self {
+        Self {
+            memory_cost_kib,
+            time_cost,
+            parallelism,
+        }
+    }
+
+    fn to_argon2_params(&self) -> Result<Params> {
+        if self.memory_cost_kib == 0 || self.memory_cost_kib > MAX_PASSWORD_MEMORY_COST_KIB {
+            return Err(PrimadbError::Crypto(format!(
+                "password KDF memoryCostKiB must be between 1 and {MAX_PASSWORD_MEMORY_COST_KIB}"
+            )));
+        }
+        if self.time_cost == 0 || self.time_cost > MAX_PASSWORD_TIME_COST {
+            return Err(PrimadbError::Crypto(format!(
+                "password KDF timeCost must be between 1 and {MAX_PASSWORD_TIME_COST}"
+            )));
+        }
+        if self.parallelism == 0 || self.parallelism > MAX_PASSWORD_PARALLELISM {
+            return Err(PrimadbError::Crypto(format!(
+                "password KDF parallelism must be between 1 and {MAX_PASSWORD_PARALLELISM}"
+            )));
+        }
+        Params::new(
+            self.memory_cost_kib,
+            self.time_cost,
+            self.parallelism,
+            Some(PASSWORD_KEY_BYTES),
+        )
+        .map_err(|error| PrimadbError::Crypto(error.to_string()))
+    }
+}
+
+impl PasswordKeyDerivationOptions {
+    pub fn with_salt_base64(salt_base64: impl Into<String>) -> Self {
+        Self {
+            salt_base64: Some(salt_base64.into()),
+            params: PasswordKeyDerivationParams::default(),
+        }
+    }
+}
+
+pub fn derive_password_key(
+    password: impl AsRef<[u8]>,
+    options: PasswordKeyDerivationOptions,
+) -> Result<PasswordDerivedKey> {
+    let salt = match options.salt_base64 {
+        Some(salt_base64) => decode_base64(&salt_base64)?,
+        None => {
+            let mut salt = vec![0_u8; PASSWORD_SALT_BYTES];
+            OsRng.fill_bytes(&mut salt);
+            salt
+        }
+    };
+    let key = SecretBoxKey::derive_from_password(password, &salt, options.params.clone())?;
+    Ok(PasswordDerivedKey {
+        algorithm: PASSWORD_KEY_ALGORITHM.to_owned(),
+        key_base64: key.to_base64(),
+        salt_base64: Base64UrlUnpadded::encode_string(&salt),
+        params: options.params,
+    })
+}
+
 fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N]> {
     let bytes = Base64UrlUnpadded::decode_vec(value)
         .map_err(|error| PrimadbError::Crypto(error.to_string()))?;
@@ -270,6 +419,31 @@ fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N]> {
             N, actual
         ))
     })
+}
+
+fn decode_base64(value: &str) -> Result<Vec<u8>> {
+    Base64UrlUnpadded::decode_vec(value).map_err(|error| PrimadbError::Crypto(error.to_string()))
+}
+
+fn validate_password_salt(salt: &[u8]) -> Result<()> {
+    if !(MIN_PASSWORD_SALT_BYTES..=MAX_PASSWORD_SALT_BYTES).contains(&salt.len()) {
+        return Err(PrimadbError::Crypto(format!(
+            "password KDF salt must be between {MIN_PASSWORD_SALT_BYTES} and {MAX_PASSWORD_SALT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn default_password_memory_cost_kib() -> u32 {
+    DEFAULT_PASSWORD_MEMORY_COST_KIB
+}
+
+fn default_password_time_cost() -> u32 {
+    DEFAULT_PASSWORD_TIME_COST
+}
+
+fn default_password_parallelism() -> u32 {
+    DEFAULT_PASSWORD_PARALLELISM
 }
 
 fn x25519_secret_from_base64(value: &str) -> Result<X25519StaticSecret> {
@@ -308,7 +482,8 @@ fn derive_secret_box_from_shared_secret(
 #[cfg(test)]
 mod tests {
     use super::{
-        Identity, SeaPair, SecretBoxKey, x25519_public_from_base64, x25519_secret_from_base64,
+        Identity, PasswordKeyDerivationOptions, PasswordKeyDerivationParams, SeaPair, SecretBoxKey,
+        derive_password_key, x25519_public_from_base64, x25519_secret_from_base64,
     };
     use crate::SyncFrame;
     use serde_json::json;
@@ -374,5 +549,45 @@ mod tests {
         let raw_key = SecretBoxKey::from_bytes(raw_shared);
 
         assert_ne!(derived.to_base64(), raw_key.to_base64());
+    }
+
+    #[test]
+    fn password_derived_keys_are_stable_for_same_salt_and_params() {
+        let params = PasswordKeyDerivationParams::new(32, 1, 1);
+        let salt = "1234567890abcdef";
+        let left =
+            SecretBoxKey::derive_from_password("correct horse", salt.as_bytes(), params.clone())
+                .unwrap();
+        let right =
+            SecretBoxKey::derive_from_password("correct horse", salt.as_bytes(), params).unwrap();
+        let changed = SecretBoxKey::derive_from_password(
+            "wrong horse",
+            salt.as_bytes(),
+            PasswordKeyDerivationParams::new(32, 1, 1),
+        )
+        .unwrap();
+
+        assert_eq!(left.to_base64(), right.to_base64());
+        assert_ne!(left.to_base64(), changed.to_base64());
+    }
+
+    #[test]
+    fn password_derived_keys_encrypt_and_decrypt_json() {
+        let params = PasswordKeyDerivationParams::new(32, 1, 1);
+        let derived = derive_password_key(
+            "correct horse battery staple",
+            PasswordKeyDerivationOptions {
+                salt_base64: Some("MTIzNDU2Nzg5MGFiY2RlZg".to_owned()),
+                params,
+            },
+        )
+        .unwrap();
+        assert_eq!(derived.algorithm, "argon2id-v1.3");
+        assert_eq!(derived.salt_base64, "MTIzNDU2Nzg5MGFiY2RlZg");
+
+        let key = SecretBoxKey::from_base64(&derived.key_base64).unwrap();
+        let encrypted = key.encrypt_json(&json!({"secret": true})).unwrap();
+        let decrypted: serde_json::Value = key.decrypt_json(&encrypted).unwrap();
+        assert_eq!(decrypted["secret"], true);
     }
 }

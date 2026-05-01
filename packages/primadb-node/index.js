@@ -17,6 +17,7 @@ export const {
   RemoteWatch,
   WebSocketSync,
   WebRtcMesh,
+  derivePasswordKey,
   generateIdentity,
 } = native;
 

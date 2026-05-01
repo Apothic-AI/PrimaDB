@@ -50,6 +50,38 @@ class IdentityKeyPair(TypedDict):
     secretKey: str
 ```
 
+## `PasswordKeyDerivationParams`
+
+Kind: class
+
+```py
+class PasswordKeyDerivationParams(TypedDict, total=False):
+    memoryCostKiB: int
+    timeCost: int
+    parallelism: int
+```
+
+## `PasswordKeyDerivationOptions`
+
+Kind: class
+
+```py
+class PasswordKeyDerivationOptions(PasswordKeyDerivationParams, total=False):
+    saltBase64: Optional[str]
+```
+
+## `PasswordDerivedKey`
+
+Kind: class
+
+```py
+class PasswordDerivedKey(TypedDict):
+    algorithm: str
+    keyBase64: str
+    saltBase64: str
+    params: PasswordKeyDerivationParams
+```
+
 ## `UserGrant`
 
 Kind: class
@@ -225,10 +257,20 @@ class Primadb:
     def register_user(self, alias: str, public_key: str, grants: list[UserGrant]) -> None: ...
     def authenticate_local_user(self, alias: str, secret_key: str, grants: list[UserGrant]) -> None: ...
     def set_require_signed_sync(self, required: bool) -> None: ...
+    def set_snapshot_encryption_key(self, key_base64: str) -> None: ...
+    def set_transport_encryption_key(self, key_base64: str) -> None: ...
     def connect_relay(self, config: RelayClientConfig | dict[str, Any]) -> WebSocketSync: ...
     def connect_mesh(self, config: MeshConfig | dict[str, Any]) -> WebRtcMesh: ...
     def set_network_hooks(self, hooks: NetworkHooks | dict[str, Any] | object | None) -> None: ...
     def clear_network_hooks(self) -> None: ...
+```
+
+## `derive_password_key`
+
+Kind: function
+
+```py
+def derive_password_key(password: str, options: Optional[PasswordKeyDerivationOptions | dict[str, Any]] = ...) -> PasswordDerivedKey: ...
 ```
 
 ## `generate_identity`

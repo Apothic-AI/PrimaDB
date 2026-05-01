@@ -26,11 +26,13 @@ The current `crypto` feature uses:
 - X25519 for SEA-style peer shared-secret agreement.
 - HKDF-SHA256 to derive a 32-byte secret-box key from the X25519 shared secret and both peers'
   X25519 public keys.
+- Argon2id v1.3 for password-derived secret-box keys.
 - XChaCha20-Poly1305 for authenticated JSON payload encryption.
 - BLAKE3 for blob content IDs and routed/watch content hashes.
 
-Password-derived keys are not currently part of the core crypto surface. If that changes, they
-should use a memory-hard password KDF such as Argon2 rather than a fast content hash.
+Password-derived keys are for encryption keys, not login verifiers. They use bounded parameters and
+return explicit salt and parameter metadata so applications can persist those values with encrypted
+data and rederive the same key later.
 
 ## Write Enforcement
 

@@ -9,6 +9,9 @@ This package wraps Primadb's Rust/WASM browser runtime and exposes three entrypo
 This is a browser-first package. The Rust core remains the source of truth for database semantics,
 sync, auth, and merge behavior.
 
+The browser crypto bindings expose `derivePasswordKey(...)` for Argon2id password-derived
+secret-box keys, plus SEA-style sign/verify/encrypt/decrypt helpers.
+
 The browser bindings also expose live remote watch helpers on relay and mesh transports:
 
 - `watchRemoteGet(...)`

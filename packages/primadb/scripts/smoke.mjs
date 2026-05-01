@@ -16,6 +16,7 @@ const report = {
     initPrimadb: typeof base.initPrimadb === "function",
     createPrimadb: typeof base.createPrimadb === "function",
     Primadb: typeof base.Primadb === "function",
+    derivePasswordKey: typeof base.derivePasswordKey === "function",
     scope: typeof base.Primadb?.prototype?.scope === "function",
     transaction: typeof base.Primadb?.prototype?.transaction === "function",
     Scope: typeof base.Scope === "function",
@@ -25,6 +26,7 @@ const report = {
   threads: {
     initPrimadbThreads: typeof threads.initPrimadbThreads === "function",
     bootstrapPrimadbThreads: typeof threads.bootstrapPrimadbThreads === "function",
+    derivePasswordKey: typeof threads.derivePasswordKey === "function",
     initThreadPool: typeof threads.initThreadPool === "function",
     setNetworkHooks: typeof threads.setNetworkHooks === "function",
     clearNetworkHooks: typeof threads.clearNetworkHooks === "function",

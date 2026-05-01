@@ -3,13 +3,15 @@ use primadb::{
     ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
     HookDecision, Identity, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
     NativeRelayServer as CoreRelayServer,
-    NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
-    PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
-    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
-    RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, Scope as CoreScope, ScopePolicy,
-    ServeRequestContext, ServeResultContext, Subscription as CoreSubscription, TransactionOptions,
-    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
-    parse_request_hook_json, parse_result_hook_json, parse_void_hook_json,
+    NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation,
+    PasswordKeyDerivationOptions, Primadb as CorePrimadb, PublicIdentity, PullRequestKind,
+    QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
+    RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
+    RoomHookContext, Scope as CoreScope, ScopePolicy, SecretBoxKey, ServeRequestContext,
+    ServeResultContext, Subscription as CoreSubscription, TransactionOptions, TransactionStep,
+    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    derive_password_key as core_derive_password_key, parse_request_hook_json,
+    parse_result_hook_json, parse_void_hook_json,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -456,6 +458,18 @@ impl Primadb {
 
     fn set_require_signed_sync(&self, required: bool) {
         self.inner.set_require_signed_sync(required);
+    }
+
+    fn set_snapshot_encryption_key(&self, key_base64: String) -> PyResult<()> {
+        let key = SecretBoxKey::from_base64(&key_base64).map_err(to_py_err)?;
+        self.inner.set_snapshot_encryption_key(key);
+        Ok(())
+    }
+
+    fn set_transport_encryption_key(&self, key_base64: String) -> PyResult<()> {
+        let key = SecretBoxKey::from_base64(&key_base64).map_err(to_py_err)?;
+        self.inner.set_transport_encryption_key(key);
+        Ok(())
     }
 
     fn connect_relay(&self, py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<WebSocketSync> {
@@ -1424,6 +1438,20 @@ fn generate_identity(py: Python<'_>) -> PyResult<Py<PyAny>> {
     )
 }
 
+#[pyfunction(signature = (password, options=None))]
+fn derive_password_key(
+    py: Python<'_>,
+    password: String,
+    options: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let options = match options {
+        Some(options) if !options.is_none() => from_py::<PasswordKeyDerivationOptions>(options)?,
+        _ => PasswordKeyDerivationOptions::default(),
+    };
+    let derived = core_derive_password_key(password, options).map_err(to_py_err)?;
+    to_py(py, derived)
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Primadb>()?;
@@ -1435,6 +1463,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<RemoteWatch>()?;
     module.add_class::<WebSocketSync>()?;
     module.add_class::<WebRtcMesh>()?;
+    module.add_function(wrap_pyfunction!(derive_password_key, module)?)?;
     module.add_function(wrap_pyfunction!(generate_identity, module)?)?;
     Ok(())
 }

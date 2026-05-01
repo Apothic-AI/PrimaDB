@@ -27,6 +27,12 @@ function parallelThreadCount(): number;
 function generateSeaPair(): any;
 ```
 
+### `derivePasswordKey`
+
+```ts
+function derivePasswordKey(password: string, options: any): any;
+```
+
 ### `seaPairFromPrivateKeys`
 
 ```ts

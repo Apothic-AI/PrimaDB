@@ -1386,6 +1386,22 @@ pub fn generate_sea_pair() -> std::result::Result<JsValue, JsValue> {
 }
 
 #[cfg(feature = "crypto")]
+#[wasm_bindgen(js_name = derivePasswordKey)]
+pub fn derive_password_key(
+    password: String,
+    options: JsValue,
+) -> std::result::Result<JsValue, JsValue> {
+    let options = if options.is_null() || options.is_undefined() {
+        crate::PasswordKeyDerivationOptions::default()
+    } else {
+        serde_wasm_bindgen::from_value(options)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?
+    };
+    let derived = crate::derive_password_key(password, options).map_err(to_js_error)?;
+    to_js(&derived)
+}
+
+#[cfg(feature = "crypto")]
 #[wasm_bindgen(js_name = seaPairFromPrivateKeys)]
 pub fn sea_pair_from_private_keys(
     secret_key_base64: String,

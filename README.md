@@ -68,7 +68,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Optional network-boundary hooks for connection gating, mesh room gating, pull/watch request rewriting or denial, and served-result redaction without turning the core graph into an ACL engine.
 - Gun-compatible browser runtime in [js/primadb-gun.js](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
-- SEA-style browser crypto surface with pair generation, sign/verify, encrypt/decrypt, HKDF-backed shared-secret derivation, and certificates.
+- SEA-style browser crypto surface with pair generation, password-derived keys, sign/verify, encrypt/decrypt, HKDF-backed shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
 - Incremental segment-backed native storage with lazy node restore, canonical node/index records, manifest metadata, nested scalar indexes, bounded direct-index scans, journaled transactions, and explicit vacuum/GC support.
 - Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
@@ -762,13 +762,14 @@ Available pieces include:
 - `SignedPayload<T>` for signed JSON payloads such as `SyncFrame`.
 - `SignedValueClaims` and `DataCertificate` for field-level auth in owned user graphs.
 - `SecretBoxKey` / `EncryptedPayload` for XChaCha20-Poly1305 JSON encryption.
+- `derive_password_key(...)` / package `derivePasswordKey(...)` for Argon2id password-derived secret-box keys.
 - `SeaPair::derive_secret_box(...)` / browser `seaSecret(...)` for X25519 plus HKDF-SHA256 shared-secret derivation.
 - BLAKE3-backed blob IDs and routed content hashes for fast cryptographic content addressing and dedupe.
 - `register_user(...)` / `authenticate_local_user(...)` on `Primadb`.
 - `Chain::put_signed(...)`, `Chain::set_signed(...)`, and `create_write_certificate(...)`.
 - `set_require_signed_sync(...)`, `set_transport_encryption_key(...)`, and `set_snapshot_encryption_key(...)`.
 - relay and mesh `sessionAuth` configs for challenge/response session identity and strict authenticated serving.
-- browser `generateSeaPair()`, `seaPairFromPrivateKeys()`, `seaSign()`, `seaVerify()`, `seaEncrypt()`, `seaDecrypt()`, and `seaSecret()` WASM exports behind `crypto`
+- browser `generateSeaPair()`, `derivePasswordKey()`, `seaPairFromPrivateKeys()`, `seaSign()`, `seaVerify()`, `seaEncrypt()`, `seaDecrypt()`, and `seaSecret()` WASM exports behind `crypto`
 
 ## Routing and Mesh
 

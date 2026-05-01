@@ -7,6 +7,7 @@ from ._native import (
     Subscription,
     WebRtcMesh,
     WebSocketSync,
+    derive_password_key,
     generate_identity,
 )
 from .moq import PrimadbMoqFrame, PrimadbMoqLoopback, PrimadbMoqSession, create_primadb_moq_loopback
@@ -24,5 +25,6 @@ __all__ = [
     "WebRtcMesh",
     "WebSocketSync",
     "create_primadb_moq_loopback",
+    "derive_password_key",
     "generate_identity",
 ]

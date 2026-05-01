@@ -31,6 +31,23 @@ export interface IdentityKeyPair {
   secretKey: string;
 }
 
+export interface PasswordKeyDerivationParams {
+  memoryCostKiB?: number;
+  timeCost?: number;
+  parallelism?: number;
+}
+
+export interface PasswordKeyDerivationOptions extends PasswordKeyDerivationParams {
+  saltBase64?: string | null;
+}
+
+export interface PasswordDerivedKey {
+  algorithm: "argon2id-v1.3";
+  keyBase64: string;
+  saltBase64: string;
+  params: Required<PasswordKeyDerivationParams>;
+}
+
 export interface UserGrant {
   root: string;
   read?: boolean;
@@ -38,6 +55,10 @@ export interface UserGrant {
 }
 
 export declare function generateIdentity(): IdentityKeyPair;
+export declare function derivePasswordKey(
+  password: string,
+  options?: PasswordKeyDerivationOptions | null,
+): PasswordDerivedKey;
 
 export interface ConnectHookContext {
   peer: {
@@ -379,6 +400,8 @@ export declare class Primadb {
   registerUser(alias: string, publicKey: string, grants: UserGrant[]): void;
   authenticateLocalUser(alias: string, secretKey: string, grants: UserGrant[]): void;
   setRequireSignedSync(required: boolean): void;
+  setSnapshotEncryptionKey(keyBase64: string): void;
+  setTransportEncryptionKey(keyBase64: string): void;
   connectRelay(config: RelayClientConfig): Promise<WebSocketSync>;
   connectMesh(config: MeshConfig): Promise<WebRtcMesh>;
   setNetworkHooks(hooks: NetworkHooks): void;

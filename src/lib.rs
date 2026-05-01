@@ -57,7 +57,9 @@ pub use consistency::{
 };
 #[cfg(feature = "crypto")]
 pub use crypto::{
-    EncryptedPayload, Identity, PublicIdentity, SeaPair, SecretBoxKey, SignedPayload,
+    EncryptedPayload, Identity, PasswordDerivedKey, PasswordKeyDerivationOptions,
+    PasswordKeyDerivationParams, PublicIdentity, SeaPair, SecretBoxKey, SignedPayload,
+    derive_password_key,
 };
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, NodeFetchScheduler, Primadb,

@@ -2,12 +2,20 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Primadb } from "../index.js";
+import { Primadb, derivePasswordKey } from "../index.js";
 
 const tempDir = mkdtempSync(join(tmpdir(), "primadb-node-core-"));
 
 try {
   const db = new Primadb("node-core-a");
+  const passwordKey = derivePasswordKey("node smoke password", {
+    saltBase64: "MTIzNDU2Nzg5MGFiY2RlZg",
+    memoryCostKiB: 32,
+    timeCost: 1,
+    parallelism: 1,
+  });
+  db.setSnapshotEncryptionKey(passwordKey.keyBase64);
+  db.setTransportEncryptionKey(passwordKey.keyBase64);
   const binding = db.openDurableStorage({
     kind: "segment_files",
     directory: tempDir,
@@ -78,6 +86,8 @@ try {
   });
 
   const restored = new Primadb("node-core-b");
+  restored.setSnapshotEncryptionKey(passwordKey.keyBase64);
+  restored.setTransportEncryptionKey(passwordKey.keyBase64);
   const restoredBinding = restored.openDurableStorage({
     kind: "segment_files",
     directory: tempDir,
@@ -118,6 +128,11 @@ try {
       {
         binding,
         blobBinding,
+        passwordKey: {
+          algorithm: passwordKey.algorithm,
+          saltBase64: passwordKey.saltBase64,
+          memoryCostKiB: passwordKey.params.memoryCostKiB,
+        },
         restoredBinding,
         restoredBlobBinding,
         subscriptionMessage: message,
@@ -151,7 +166,11 @@ try {
           restoredLedgerBalance === 10 &&
           provisionalReport.status === "provisional" &&
           provisionalCanonical === null &&
-          offlineLedger.proposals().length === 1,
+          offlineLedger.proposals().length === 1 &&
+          passwordKey.algorithm === "argon2id-v1.3" &&
+          passwordKey.saltBase64 === "MTIzNDU2Nzg5MGFiY2RlZg" &&
+          typeof passwordKey.keyBase64 === "string" &&
+          passwordKey.keyBase64.length > 0,
       },
       null,
       2,

@@ -74,8 +74,12 @@ This page covers the public Rust crate surface. The site also serves the full bu
 
 ### `crypto`
 
+- `derive_password_key`
 - `EncryptedPayload`
 - `Identity`
+- `PasswordDerivedKey`
+- `PasswordKeyDerivationOptions`
+- `PasswordKeyDerivationParams`
 - `PublicIdentity`
 - `SeaPair`
 - `SecretBoxKey`
