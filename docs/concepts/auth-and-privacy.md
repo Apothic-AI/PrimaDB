@@ -17,6 +17,21 @@ read-ACL engine.
 - browser SEA-style primitives
 - authenticated transport presence for relay and mesh sessions
 
+## Algorithms
+
+The current `crypto` feature uses:
+
+- Ed25519 for identity keys, signatures, signed values, signed sync frames, and session
+  challenge/response transcripts.
+- X25519 for SEA-style peer shared-secret agreement.
+- HKDF-SHA256 to derive a 32-byte secret-box key from the X25519 shared secret and both peers'
+  X25519 public keys.
+- XChaCha20-Poly1305 for authenticated JSON payload encryption.
+- BLAKE3 for blob content IDs and routed/watch content hashes.
+
+Password-derived keys are not currently part of the core crypto surface. If that changes, they
+should use a memory-hard password KDF such as Argon2 rather than a fast content hash.
+
 ## Write Enforcement
 
 Authenticated write restrictions are already real. Owned paths and delegated certificates are

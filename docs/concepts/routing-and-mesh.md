@@ -17,7 +17,7 @@ Transport messages move through typed route envelopes with:
 - watch events
 - signaling payloads
 - batching and chunking
-- dedupe metadata such as content hashes and seen-by hints
+- dedupe metadata such as BLAKE3 content hashes and seen-by hints
 
 ## Relay Mode
 

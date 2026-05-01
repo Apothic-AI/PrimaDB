@@ -29,6 +29,7 @@ The storage engine now supports:
 - nested scalar indexes
 - bounded journal retention
 - explicit vacuum/GC
+- BLAKE3-prefixed content-addressed blob references
 
 That closes a meaningful gap relative to the older snapshot-centered design.
 

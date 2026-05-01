@@ -6450,12 +6450,14 @@ mod tests {
             .connect_relay(crate::RelayClientConfig {
                 url: relay.url(),
                 retry_interval_ms: 50,
+                session_auth: crate::SessionAuthConfig::default(),
             })
             .await?;
         let mut client_sync = client_db
             .connect_relay(crate::RelayClientConfig {
                 url: relay.url(),
                 retry_interval_ms: 50,
+                session_auth: crate::SessionAuthConfig::default(),
             })
             .await?;
 

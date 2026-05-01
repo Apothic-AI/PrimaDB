@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .connect_relay(RelayClientConfig {
             url: options.relay.clone(),
             retry_interval_ms: 1_500,
+            session_auth: Default::default(),
         })
         .await?;
     let notes = db.root("boards").field(&options.board).field("notes");

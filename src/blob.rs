@@ -3,7 +3,6 @@ use crate::binary::BinaryBytes;
 use crate::error::PrimadbError;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
@@ -203,12 +202,28 @@ impl BlobStore for FileBlobStore {
 }
 
 pub fn blob_ref_for_data(data: &[u8], media_type: Option<&str>) -> BlobRef {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let digest = hasher.finalize();
+    let digest = blake3::hash(data);
     BlobRef {
-        id: format!("sha256:{digest:x}"),
+        id: format!("blake3:{}", digest.to_hex()),
         bytes: data.len(),
         media_type: media_type.map(str::to_owned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blob_ref_for_data;
+
+    #[test]
+    fn blob_refs_use_deterministic_blake3_ids() {
+        let left = blob_ref_for_data(b"primadb", Some("application/octet-stream"));
+        let right = blob_ref_for_data(b"primadb", Some("application/octet-stream"));
+        let changed = blob_ref_for_data(b"primadb!", Some("application/octet-stream"));
+
+        assert_eq!(left.id, right.id);
+        assert_ne!(left.id, changed.id);
+        assert!(left.id.starts_with("blake3:"));
+        assert_eq!(left.id.len(), "blake3:".len() + 64);
+        assert_eq!(left.bytes, 7);
     }
 }

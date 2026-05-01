@@ -265,12 +265,25 @@ where
     T: Serialize,
 {
     let bytes = serde_json::to_vec(value).ok()?;
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+    Some(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_content_hash;
+    use serde_json::json;
+
+    #[test]
+    fn stable_content_hash_uses_deterministic_blake3() {
+        let left = stable_content_hash(&json!({ "key": "value" })).unwrap();
+        let right = stable_content_hash(&json!({ "key": "value" })).unwrap();
+        let changed = stable_content_hash(&json!({ "key": "changed" })).unwrap();
+
+        assert_eq!(left, right);
+        assert_ne!(left, changed);
+        assert!(left.starts_with("blake3:"));
+        assert_eq!(left.len(), "blake3:".len() + 64);
     }
-    Some(format!("{hash:016x}"))
 }
 
 pub fn error_pull_response(request_id: &str, message: impl Into<String>) -> PullResponse {
