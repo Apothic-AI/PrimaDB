@@ -883,6 +883,11 @@ export declare class Chain {
     set(value: JsonValue): string;
     setSigned(value: JsonValue, certificate?: string | null): string;
     remove(value: JsonValue): string;
+    putBytes(value: Uint8Array): void;
+    onceBytes(): Uint8Array | null;
+    putBlob(value: Uint8Array, mediaType?: string | null): JsonValue;
+    blobRef(): JsonValue | null;
+    getBlob(): Uint8Array | null;
     map(): JsonValue;
     query(spec: QuerySpec): JsonValue;
     firstQuery(spec: QuerySpec): JsonValue | null;

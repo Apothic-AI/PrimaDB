@@ -34,11 +34,14 @@ pnpm run build
 ## Example
 
 ```ts
-import { Primadb, initPrimadb, setNetworkHooks } from "primadb";
+import { Primadb, derivePasswordKey, initPrimadb, setNetworkHooks } from "primadb";
 
 await initPrimadb();
 
 const db = new Primadb("browser-a");
+const key = derivePasswordKey("correct horse battery staple");
+db.setSnapshotEncryptionKey(key.keyBase64);
+
 setNetworkHooks(db, {
   onPull(context) {
     if (context.request.kind === "get" && context.request.path.anchor === "private") {
@@ -89,6 +92,13 @@ transaction helper.
 
 Use `primadb/threads` when you want the threaded browser runtime. It still inherits the
 `wasm-threads` runtime constraints.
+
+## Guides
+
+- [Auth, encryption, and password keys](../guides/auth-encryption)
+- [Relay, full node, and mesh](../guides/relay-full-node-and-mesh)
+- [Query, watch, and traversal](../guides/query-watch-and-traversal)
+- [Binary data, media, and MoQ](../guides/binary-media-and-moq)
 
 ## Package Examples
 

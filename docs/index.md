@@ -39,6 +39,7 @@ bridges.
 - [TypeScript package](sdk/typescript)
 - [Node package](sdk/node)
 - [Python package](sdk/python)
+- [Guides](category/guides)
 - [API reference](category/api-reference)
 
 ## Core Concepts
@@ -50,6 +51,14 @@ bridges.
 - [Query and watch](concepts/query-and-watch)
 - [Auth and privacy](concepts/auth-and-privacy)
 - [Storage and durability](concepts/storage)
+
+## Guides
+
+- [Auth, encryption, and password keys](guides/auth-encryption)
+- [Relay, full node, and mesh](guides/relay-full-node-and-mesh)
+- [Binary data, media, and MoQ](guides/binary-media-and-moq)
+- [Transactions and strict scopes](guides/transactions-and-strict-scopes)
+- [Query, watch, and traversal](guides/query-watch-and-traversal)
 
 ## Examples And Operations
 

@@ -40,9 +40,12 @@ pnpm run build
 ## Example
 
 ```js
-import { Primadb } from "primadb-node";
+import { Primadb, derivePasswordKey } from "primadb-node";
 
 const db = new Primadb("node-a");
+const key = derivePasswordKey("correct horse battery staple");
+db.setSnapshotEncryptionKey(key.keyBase64);
+
 db.openDurableStorage({
   kind: "segment_files",
   directory: "/tmp/primadb-node-demo",
@@ -89,6 +92,13 @@ await sync.remoteTransaction("native:ledger", "ledger", [
   },
 ]);
 ```
+
+## Guides
+
+- [Auth, encryption, and password keys](../guides/auth-encryption)
+- [Relay, full node, and mesh](../guides/relay-full-node-and-mesh)
+- [Transactions and strict scopes](../guides/transactions-and-strict-scopes)
+- [Binary data, media, and MoQ](../guides/binary-media-and-moq)
 
 ## Package Examples
 

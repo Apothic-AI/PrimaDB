@@ -24,9 +24,12 @@ uv sync
 ## Example
 
 ```python
-from primadb import Primadb
+from primadb import Primadb, derive_password_key
 
 db = Primadb("py-a")
+key = derive_password_key("correct horse battery staple")
+db.set_snapshot_encryption_key(key["keyBase64"])
+
 db.open_durable_storage(
     {
         "kind": "segment_files",
@@ -84,6 +87,13 @@ sync.remote_transaction(
     ],
 )
 ```
+
+## Guides
+
+- [Auth, encryption, and password keys](../guides/auth-encryption)
+- [Relay, full node, and mesh](../guides/relay-full-node-and-mesh)
+- [Transactions and strict scopes](../guides/transactions-and-strict-scopes)
+- [Binary data, media, and MoQ](../guides/binary-media-and-moq)
 
 ## Package Examples
 
