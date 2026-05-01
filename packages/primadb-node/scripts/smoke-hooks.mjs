@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { setTimeout as delay } from "node:timers/promises";
-import { Primadb, RelayServer } from "../index.js";
+import { Primadb, RelayServer, generateIdentity } from "../index.js";
 
 const relayAddress = "127.0.0.1:9024";
 const relayUrl = `ws://${relayAddress}`;
@@ -22,9 +22,23 @@ const relay = await RelayServer.listen({ bind: relayAddress });
 try {
   const serverDb = new Primadb("node-hook-server");
   const clientDb = new Primadb("node-hook-client");
+  const grants = [{ root: "*", read: true, write: true }];
+  const serverIdentity = generateIdentity();
+  const clientIdentity = generateIdentity();
+  serverDb.registerUser("server", serverIdentity.publicKey, grants);
+  serverDb.registerUser("client", clientIdentity.publicKey, grants);
+  serverDb.authenticateLocalUser("server", serverIdentity.secretKey, grants);
+  clientDb.registerUser("server", serverIdentity.publicKey, grants);
+  clientDb.registerUser("client", clientIdentity.publicKey, grants);
+  clientDb.authenticateLocalUser("client", clientIdentity.secretKey, grants);
+  let verifiedAlias = null;
 
   serverDb.setNetworkHooks({
     onPull(context) {
+      verifiedAlias = context.verifiedIdentity?.alias ?? null;
+      if (verifiedAlias !== "client") {
+        return "verified client identity required";
+      }
       if (context.request.kind === "get" && context.request.path.anchor === "private") {
         return "private root denied";
       }
@@ -38,8 +52,21 @@ try {
     },
   });
 
-  const server = await serverDb.connectRelay({ url: relayUrl, retryIntervalMs: 500 });
-  const client = await clientDb.connectRelay({ url: relayUrl, retryIntervalMs: 500 });
+  const server = await serverDb.connectRelay({
+    url: relayUrl,
+    retryIntervalMs: 500,
+    sessionAuth: {
+      requireAuthenticatedPeers: true,
+      trustedAliases: ["client"],
+    },
+  });
+  const client = await clientDb.connectRelay({
+    url: relayUrl,
+    retryIntervalMs: 500,
+    sessionAuth: {
+      trustedAliases: ["server"],
+    },
+  });
 
   const targetPeer = await waitFor(async () => {
     const peers = client.recommendedPeers();
@@ -51,8 +78,12 @@ try {
   await server.flushPending();
 
   const masked = await waitFor(async () => {
-    const value = await client.remoteGet(targetPeer, { anchor: "docs", segments: ["profile"] });
-    return value?.masked === true ? value : null;
+    try {
+      const value = await client.remoteGet(targetPeer, { anchor: "docs", segments: ["profile"] });
+      return value?.masked === true ? value : null;
+    } catch {
+      return null;
+    }
   });
 
   let denied = null;
@@ -79,6 +110,7 @@ try {
       {
         relayUrl,
         targetPeer,
+        verifiedAlias,
         masked,
         denied,
         unmasked,

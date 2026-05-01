@@ -64,6 +64,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Optional native WebSocket sync adapter behind the `native-websocket` feature, with disconnected startup and background relay retry on native.
 - Integrated auth/user policies behind the `crypto` feature, including trusted users, local user sessions, signed sync, encrypted sync, and encrypted snapshot persistence.
 - Data-level auth in the core database for signed user-owned fields, certificate-authorized delegated writes, and read-time signature verification/unwrapping.
+- Authenticated relay/mesh session presence with nonce challenge/response, verified peer identity in hooks, and optional strict `sessionAuth` transport mode.
 - Optional network-boundary hooks for connection gating, mesh room gating, pull/watch request rewriting or denial, and served-result redaction without turning the core graph into an ACL engine.
 - Gun-compatible browser runtime in [js/primadb-gun.js](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
@@ -764,6 +765,7 @@ Available pieces include:
 - `register_user(...)` / `authenticate_local_user(...)` on `Primadb`.
 - `Chain::put_signed(...)`, `Chain::set_signed(...)`, and `create_write_certificate(...)`.
 - `set_require_signed_sync(...)`, `set_transport_encryption_key(...)`, and `set_snapshot_encryption_key(...)`.
+- relay and mesh `sessionAuth` configs for challenge/response session identity and strict authenticated serving.
 - browser `generateSeaPair()`, `seaPairFromPrivateKeys()`, `seaSign()`, `seaVerify()`, `seaEncrypt()`, `seaDecrypt()`, and `seaSecret()` WASM exports behind `crypto`
 
 ## Routing and Mesh

@@ -17,6 +17,7 @@ Current surface:
 - remote strict-scope transaction submission through `remote_transaction(...)` on relay sync clients
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
+- authenticated relay/mesh session identity through `generate_identity()`, `authenticate_local_user(...)`, `sessionAuth` config, and `context["verifiedIdentity"]`
 - network-boundary hooks through `set_network_hooks(...)` / `clear_network_hooks()`
 - experimental MoQ path/track/frame helpers through `primadb.moq`
 
@@ -91,6 +92,8 @@ db.chain("assets").field("archive").put_blob(
 
 class PrivateDocsHooks:
     def on_pull(self, context):
+        if context.get("verifiedIdentity", {}).get("alias") == "team-a":
+            return None
         request = context["request"]
         if request["kind"] == "get" and request["path"]["anchor"] == "private":
             return "private root denied"

@@ -1,10 +1,41 @@
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, TypedDict
 
+class PresenceIdentity(TypedDict, total=False):
+    publicKey: str
+    alias: Optional[str]
+    keyScheme: str
+    sessionId: str
+    claims: dict[str, str]
+    issuedAtMillis: int
+    expiresAtMillis: Optional[int]
+
+class VerifiedIdentity(TypedDict, total=False):
+    publicKey: str
+    alias: Optional[str]
+    peerId: str
+    replicaId: str
+    transport: str
+    sessionId: str
+    claims: dict[str, str]
+    issuedAtMillis: int
+    expiresAtMillis: Optional[int]
+    trust: str
+
+class IdentityKeyPair(TypedDict):
+    publicKey: str
+    secretKey: str
+
+class UserGrant(TypedDict, total=False):
+    root: str
+    read: bool
+    write: bool
+
 class PeerHookContext(TypedDict, total=False):
     peerId: str
     replicaId: str
     transport: str
+    identity: Optional[PresenceIdentity]
     capabilities: list[str]
     topics: list[str]
     metadata: dict[str, str]
@@ -13,12 +44,14 @@ class ConnectHookContext(TypedDict, total=False):
     peer: PeerHookContext
     transport: str
     relayUrl: Optional[str]
+    verifiedIdentity: Optional[VerifiedIdentity]
 
 class RoomHookContext(TypedDict, total=False):
     peerId: str
     room: str
     transport: str
     peer: Optional[PeerHookContext]
+    verifiedIdentity: Optional[VerifiedIdentity]
 
 class ServeRequestContext(TypedDict, total=False):
     peerId: str
@@ -26,6 +59,7 @@ class ServeRequestContext(TypedDict, total=False):
     requestId: Optional[str]
     watchId: Optional[str]
     request: Any
+    verifiedIdentity: Optional[VerifiedIdentity]
 
 class ServeResultContext(TypedDict, total=False):
     peerId: str
@@ -34,6 +68,33 @@ class ServeResultContext(TypedDict, total=False):
     watchId: Optional[str]
     request: Any
     initial: bool
+    verifiedIdentity: Optional[VerifiedIdentity]
+
+class SessionAuthConfig(TypedDict, total=False):
+    requireAuthenticatedPeers: bool
+    trustedPublicKeys: list[str]
+    trustedAliases: list[str]
+    challengeTimeoutMs: int
+    sessionTtlMs: int
+    allowUnauthenticatedPresence: bool
+
+class RelayClientConfig(TypedDict, total=False):
+    url: str
+    retryIntervalMs: int
+    sessionAuth: SessionAuthConfig
+
+class IceServerConfig(TypedDict, total=False):
+    urls: str | list[str]
+    username: Optional[str]
+    credential: Optional[str]
+
+class MeshConfig(TypedDict, total=False):
+    room: str
+    signaling: str
+    relayUrl: Optional[str]
+    retryIntervalMs: int
+    iceServers: list[IceServerConfig]
+    sessionAuth: SessionAuthConfig
 
 class NetworkHooks(Protocol):
     def on_connect(self, context: ConnectHookContext, /) -> Any: ...
@@ -66,10 +127,15 @@ class Primadb:
     def apply_operations_json(self, payload: str) -> int: ...
     def open_durable_storage(self, config: Any) -> Any: ...
     def open_blob_storage(self, config: Any) -> Any: ...
-    def connect_relay(self, config: Any) -> WebSocketSync: ...
-    def connect_mesh(self, config: Any) -> WebRtcMesh: ...
+    def register_user(self, alias: str, public_key: str, grants: list[UserGrant]) -> None: ...
+    def authenticate_local_user(self, alias: str, secret_key: str, grants: list[UserGrant]) -> None: ...
+    def set_require_signed_sync(self, required: bool) -> None: ...
+    def connect_relay(self, config: RelayClientConfig | dict[str, Any]) -> WebSocketSync: ...
+    def connect_mesh(self, config: MeshConfig | dict[str, Any]) -> WebRtcMesh: ...
     def set_network_hooks(self, hooks: NetworkHooks | dict[str, Any] | object | None) -> None: ...
     def clear_network_hooks(self) -> None: ...
+
+def generate_identity() -> IdentityKeyPair: ...
 
 class Scope:
     def root(self) -> str: ...

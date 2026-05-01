@@ -211,6 +211,49 @@ Package-level hook helper types and registration utilities.
 
 ### Direct exports
 
+#### `PresenceIdentity`
+
+Kind: interface
+
+```ts
+export interface PresenceIdentity {
+    publicKey: string;
+    alias?: string | null;
+    keyScheme?: string;
+    sessionId: string;
+    claims?: Record<string, string>;
+    issuedAtMillis?: number;
+    expiresAtMillis?: number | null;
+}
+```
+
+#### `IdentityTrust`
+
+Kind: type alias
+
+```ts
+export type IdentityTrust = "verified" | "trusted_public_key" | "trusted_alias";
+```
+
+#### `VerifiedIdentity`
+
+Kind: interface
+
+```ts
+export interface VerifiedIdentity {
+    publicKey: string;
+    alias?: string | null;
+    peerId: string;
+    replicaId: string;
+    transport: string;
+    sessionId: string;
+    claims?: Record<string, string>;
+    issuedAtMillis: number;
+    expiresAtMillis?: number | null;
+    trust: IdentityTrust;
+}
+```
+
 #### `ConnectHookContext`
 
 Kind: interface
@@ -221,12 +264,14 @@ export interface ConnectHookContext {
         peerId: string;
         replicaId: string;
         transport: string;
+        identity?: PresenceIdentity | null;
         capabilities?: string[];
         topics?: string[];
         metadata?: Record<string, string>;
     };
     transport: "relay" | "mesh";
     relayUrl?: string | null;
+    verifiedIdentity?: VerifiedIdentity | null;
 }
 ```
 
@@ -240,6 +285,7 @@ export interface RoomHookContext {
     room: string;
     transport: "relay" | "mesh";
     peer?: ConnectHookContext["peer"] | null;
+    verifiedIdentity?: VerifiedIdentity | null;
 }
 ```
 
@@ -320,6 +366,7 @@ export interface ServeRequestContext {
     requestId?: string | null;
     watchId?: string | null;
     request: PullRequestKind;
+    verifiedIdentity?: VerifiedIdentity | null;
 }
 ```
 
@@ -335,6 +382,7 @@ export interface ServeResultContext {
     watchId?: string | null;
     request: PullRequestKind;
     initial: boolean;
+    verifiedIdentity?: VerifiedIdentity | null;
 }
 ```
 

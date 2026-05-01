@@ -9,9 +9,9 @@ use crate::{
     RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
     RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
     SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
-    TraversalSubscription as CoreTraversalSubscription, WatchEvent, WatchRequest, WatchRequestKind,
-    build_storage_metadata, build_storage_transaction, encode_component, error_pull_response,
-    error_watch_event,
+    TraversalSubscription as CoreTraversalSubscription, VerifiedIdentity, WatchEvent, WatchRequest,
+    WatchRequestKind, build_storage_metadata, build_storage_transaction, encode_component,
+    error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
@@ -121,12 +121,17 @@ struct WasmBlobStorageConfig {
 struct WebSocketSyncState {
     db: Primadb,
     router: Router,
+    session_id: String,
+    session_auth: crate::SessionAuthConfig,
     socket: web_sys::WebSocket,
     inflight: BTreeMap<String, OutboundSync>,
     pending_requests: BTreeMap<String, PendingPullRequest>,
     outgoing_watches: BTreeMap<String, OutgoingWatch>,
     incoming_watches: BTreeMap<String, IncomingWatch>,
     recommendations: BTreeMap<String, PeerRecommendation>,
+    pending_auth_challenges: BTreeMap<String, crate::AuthChallenge>,
+    pending_auth_peers: BTreeMap<String, crate::PeerPresence>,
+    verified_identities: BTreeMap<String, VerifiedIdentity>,
     next_message_seq: u64,
 }
 
@@ -249,12 +254,18 @@ struct WebRtcMeshState {
     router: Router,
     room: String,
     peer_id: String,
+    session_id: String,
+    session_auth: crate::SessionAuthConfig,
     signaling: MeshSignalingTransport,
     rtc_configuration: JsValue,
     peers: BTreeMap<String, MeshPeer>,
     inflight: BTreeMap<String, MeshOutbound>,
     outgoing_watches: BTreeMap<String, OutgoingWatch>,
     incoming_watches: BTreeMap<String, IncomingWatch>,
+    recommendations: BTreeMap<String, PeerRecommendation>,
+    pending_auth_challenges: BTreeMap<String, crate::AuthChallenge>,
+    pending_auth_peers: BTreeMap<String, crate::PeerPresence>,
+    verified_identities: BTreeMap<String, VerifiedIdentity>,
     next_message_seq: u64,
     relay_onmessage: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
     relay_onopen: Option<Closure<dyn FnMut(web_sys::Event)>>,
@@ -1032,6 +1043,7 @@ impl WasmPrimadb {
         self.connect_relay_config(RelayClientConfig {
             url,
             retry_interval_ms: retry_interval_ms.unwrap_or(2_000).max(1) as u64,
+            session_auth: crate::SessionAuthConfig::default(),
         })
     }
 
@@ -1085,6 +1097,7 @@ impl WasmPrimadb {
         config: RelayClientConfig,
     ) -> std::result::Result<WasmWebSocketSync, JsValue> {
         let url = config.url;
+        let session_auth = config.session_auth;
         let retry_interval_ms = config.retry_interval_ms.min(i32::MAX as u64) as i32;
         let socket = web_sys::WebSocket::new(&url)?;
         socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
@@ -1097,12 +1110,20 @@ impl WasmPrimadb {
                 default_ttl: 6,
                 max_seen_routes: self.inner.limits().max_seen_routes,
             }),
+            session_id: crate::session_auth::random_session_id(&format!(
+                "browser:{}",
+                self.inner.replica_id()
+            )),
+            session_auth,
             socket: socket.clone(),
             inflight: BTreeMap::new(),
             pending_requests: BTreeMap::new(),
             outgoing_watches: BTreeMap::new(),
             incoming_watches: BTreeMap::new(),
             recommendations: BTreeMap::new(),
+            pending_auth_challenges: BTreeMap::new(),
+            pending_auth_peers: BTreeMap::new(),
+            verified_identities: BTreeMap::new(),
             next_message_seq: 0,
         }));
 
@@ -1144,6 +1165,8 @@ impl WasmPrimadb {
             if let RoutePayload::Presence { peer } = &mut route.payload {
                 peer.metadata
                     .insert("relay_url".to_owned(), relay_url.clone());
+                let borrowed = onopen_state.borrow();
+                peer.identity = borrowed.db.session_presence_identity(&borrowed.session_id);
             }
             let _ = send_route_state(&onopen_state, &route);
             let _ = retry_inflight_state(&onopen_state);
@@ -1227,6 +1250,7 @@ impl WasmPrimadb {
         config: MeshConfig,
     ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
         let room = config.room.clone();
+        let session_auth = config.session_auth.clone();
         let rtc_configuration = build_web_rtc_configuration(&config.effective_ice_servers())?;
         let peer_id = format!(
             "mesh:{}:{}",
@@ -1260,12 +1284,21 @@ impl WasmPrimadb {
             }),
             room: room.clone(),
             peer_id: peer_id.clone(),
+            session_id: crate::session_auth::random_session_id(&format!(
+                "mesh:browser:{}",
+                self.inner.replica_id()
+            )),
+            session_auth,
             signaling,
             rtc_configuration,
             peers: BTreeMap::new(),
             inflight: BTreeMap::new(),
             outgoing_watches: BTreeMap::new(),
             incoming_watches: BTreeMap::new(),
+            recommendations: BTreeMap::new(),
+            pending_auth_challenges: BTreeMap::new(),
+            pending_auth_peers: BTreeMap::new(),
+            verified_identities: BTreeMap::new(),
             next_message_seq: 0,
             relay_onmessage: None,
             relay_onopen: None,
@@ -2391,28 +2424,23 @@ fn handle_route_payload(
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                let relay_url = peer.metadata.get("relay_url").cloned();
-                let allowed = state
-                    .borrow()
-                    .db
-                    .allow_peer_connection(&crate::ConnectHookContext {
-                        peer: peer.clone(),
-                        transport: HookTransport::Relay,
-                        relay_url,
-                    })
-                    .into_result();
-                if allowed.is_err() {
-                    state.borrow().router.forget_peer(&peer.peer_id);
-                    state.borrow_mut().recommendations.remove(&peer.peer_id);
+                maybe_send_auth_challenge_state(state, &peer)?;
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity_for_peer_state(state, &peer.peer_id).is_none()
+                {
                     continue;
                 }
-                let recommendation = peer_recommendation_from_presence(&peer);
-                let peer_id = recommendation.peer.peer_id.clone();
-                store_peer_recommendations_state(state, vec![recommendation]);
-                let _ = replay_outgoing_watches_state(state, &peer_id);
+                let verified_identity = verified_identity_for_peer_state(state, &peer.peer_id);
+                let _ = accept_relay_peer_state(state, peer, verified_identity.as_ref())?;
             }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
+                let verified_identity = verified_identity_for_peer_state(state, &from);
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
+                {
+                    continue;
+                }
                 let decision = state
                     .borrow()
                     .db
@@ -2421,6 +2449,7 @@ fn handle_route_payload(
                         HookTransport::Relay,
                         &format!("snapshot:{route_id}"),
                         &PullRequestKind::Snapshot { root: root.clone() },
+                        verified_identity.as_ref(),
                     )
                     .map_err(to_js_error)?;
                 if let crate::HookDecision::Allow {
@@ -2446,6 +2475,11 @@ fn handle_route_payload(
                     .map_err(to_js_error)?;
             }
             RoutePayload::Sync { encoding, payload } => {
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity_for_peer_state(state, &from).is_none()
+                {
+                    continue;
+                }
                 let frame = {
                     let borrowed = state.borrow();
                     decode_sync_payload(&borrowed.db, &encoding, payload)?
@@ -2461,24 +2495,37 @@ fn handle_route_payload(
                         borrowed.db.limits().max_batch_items_per_route.max(1),
                     )
                 };
-                let items = match db
-                    .serve_pull_request_for_peer(
-                        &from,
-                        HookTransport::Relay,
-                        &request.request_id,
-                        &request.request,
-                    )
-                    .map_err(to_js_error)?
+                let verified_identity = verified_identity_for_peer_state(state, &from);
+                let items = if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
                 {
-                    crate::HookDecision::Allow { value } => db
-                        .chunk_remote_result(&request.request_id, value)
-                        .into_iter()
-                        .map(|response| RouteBatchItem::PullResponse { response })
-                        .collect::<Vec<_>>(),
-                    crate::HookDecision::Deny { message } => {
-                        vec![RouteBatchItem::PullResponse {
-                            response: error_pull_response(&request.request_id, message),
-                        }]
+                    vec![RouteBatchItem::PullResponse {
+                        response: error_pull_response(
+                            &request.request_id,
+                            "peer is not authenticated",
+                        ),
+                    }]
+                } else {
+                    match db
+                        .serve_pull_request_for_peer(
+                            &from,
+                            HookTransport::Relay,
+                            &request.request_id,
+                            &request.request,
+                            verified_identity.as_ref(),
+                        )
+                        .map_err(to_js_error)?
+                    {
+                        crate::HookDecision::Allow { value } => db
+                            .chunk_remote_result(&request.request_id, value)
+                            .into_iter()
+                            .map(|response| RouteBatchItem::PullResponse { response })
+                            .collect::<Vec<_>>(),
+                        crate::HookDecision::Deny { message } => {
+                            vec![RouteBatchItem::PullResponse {
+                                response: error_pull_response(&request.request_id, message),
+                            }]
+                        }
                     }
                 };
                 for route in pack_batch_routes(
@@ -2502,27 +2549,27 @@ fn handle_route_payload(
             }
             RoutePayload::PeerExchange { peers } => {
                 for recommendation in peers {
-                    let relay_url = recommendation.relay_urls.first().cloned();
-                    let allowed = state
-                        .borrow()
-                        .db
-                        .allow_peer_connection(&crate::ConnectHookContext {
-                            peer: recommendation.peer.clone(),
-                            transport: HookTransport::Relay,
-                            relay_url,
-                        })
-                        .into_result();
-                    if allowed.is_err() {
-                        state
-                            .borrow()
-                            .router
-                            .forget_peer(&recommendation.peer.peer_id);
+                    maybe_send_auth_challenge_state(state, &recommendation.peer)?;
+                    if state.borrow().session_auth.require_authenticated_peers
+                        && verified_identity_for_peer_state(state, &recommendation.peer.peer_id)
+                            .is_none()
+                    {
                         continue;
                     }
-                    let peer_id = recommendation.peer.peer_id.clone();
-                    store_peer_recommendations_state(state, vec![recommendation]);
-                    let _ = replay_outgoing_watches_state(state, &peer_id);
+                    let verified_identity =
+                        verified_identity_for_peer_state(state, &recommendation.peer.peer_id);
+                    let _ = accept_relay_recommendation_state(
+                        state,
+                        recommendation,
+                        verified_identity.as_ref(),
+                    )?;
                 }
+            }
+            RoutePayload::AuthChallenge { challenge } => {
+                handle_auth_challenge_state(state, challenge)?;
+            }
+            RoutePayload::AuthResponse { response } => {
+                handle_auth_response_state(state, response)?;
             }
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {
@@ -2530,6 +2577,200 @@ fn handle_route_payload(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn verified_identity_for_peer_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    peer_id: &str,
+) -> Option<VerifiedIdentity> {
+    state.borrow().verified_identities.get(peer_id).cloned()
+}
+
+fn remove_relay_peer_state(state: &Rc<RefCell<WebSocketSyncState>>, peer_id: &str) {
+    state.borrow().router.forget_peer(peer_id);
+    let mut borrowed = state.borrow_mut();
+    borrowed.recommendations.remove(peer_id);
+    borrowed.verified_identities.remove(peer_id);
+}
+
+fn accept_relay_peer_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    peer: crate::PeerPresence,
+    verified_identity: Option<&VerifiedIdentity>,
+) -> std::result::Result<bool, JsValue> {
+    let relay_url = peer.metadata.get("relay_url").cloned();
+    let allowed = state
+        .borrow()
+        .db
+        .allow_peer_connection(&crate::ConnectHookContext {
+            peer: peer.clone(),
+            transport: HookTransport::Relay,
+            relay_url,
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if allowed.is_err() {
+        remove_relay_peer_state(state, &peer.peer_id);
+        return Ok(false);
+    }
+    let recommendation = peer_recommendation_from_presence(&peer);
+    let peer_id = recommendation.peer.peer_id.clone();
+    store_peer_recommendations_state(state, vec![recommendation]);
+    let _ = replay_outgoing_watches_state(state, &peer_id);
+    Ok(true)
+}
+
+fn accept_relay_recommendation_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    recommendation: PeerRecommendation,
+    verified_identity: Option<&VerifiedIdentity>,
+) -> std::result::Result<bool, JsValue> {
+    let relay_url = recommendation.relay_urls.first().cloned();
+    let allowed = state
+        .borrow()
+        .db
+        .allow_peer_connection(&crate::ConnectHookContext {
+            peer: recommendation.peer.clone(),
+            transport: HookTransport::Relay,
+            relay_url,
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if allowed.is_err() {
+        remove_relay_peer_state(state, &recommendation.peer.peer_id);
+        return Ok(false);
+    }
+    let peer_id = recommendation.peer.peer_id.clone();
+    store_peer_recommendations_state(state, vec![recommendation]);
+    let _ = replay_outgoing_watches_state(state, &peer_id);
+    Ok(true)
+}
+
+fn maybe_send_auth_challenge_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    peer: &crate::PeerPresence,
+) -> std::result::Result<(), JsValue> {
+    let should_skip = {
+        let borrowed = state.borrow();
+        peer.peer_id == borrowed.router.peer_id()
+            || borrowed.verified_identities.contains_key(&peer.peer_id)
+    };
+    if should_skip {
+        return Ok(());
+    }
+    let Some(identity) = peer.identity.as_ref() else {
+        if !state.borrow().session_auth.allow_unauthenticated_presence {
+            remove_relay_peer_state(state, &peer.peer_id);
+        }
+        return Ok(());
+    };
+
+    #[cfg(feature = "crypto")]
+    {
+        let (challenge, route) = {
+            let borrowed = state.borrow();
+            let challenge = crate::session_auth::create_auth_challenge(
+                borrowed.router.peer_id(),
+                &borrowed.db.replica_id(),
+                &borrowed.session_id,
+                &peer.peer_id,
+                &peer.replica_id,
+                identity,
+                "relay",
+                &borrowed.session_auth,
+            );
+            let route = borrowed
+                .router
+                .auth_challenge(challenge.clone(), RouteTarget::Peer(peer.peer_id.clone()));
+            (challenge, route)
+        };
+        send_route_state(state, &route)?;
+        let mut borrowed = state.borrow_mut();
+        borrowed
+            .pending_auth_challenges
+            .insert(challenge.challenge_id.clone(), challenge.clone());
+        borrowed
+            .pending_auth_peers
+            .insert(challenge.challenge_id.clone(), peer.clone());
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    {
+        let _ = identity;
+    }
+
+    Ok(())
+}
+
+fn handle_auth_challenge_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    challenge: crate::AuthChallenge,
+) -> std::result::Result<(), JsValue> {
+    if challenge.target_peer_id != state.borrow().router.peer_id() {
+        return Ok(());
+    }
+    let response = {
+        let borrowed = state.borrow();
+        borrowed
+            .db
+            .sign_session_auth_response(
+                &challenge,
+                borrowed.router.peer_id(),
+                &borrowed.session_id,
+                &borrowed.session_auth,
+            )
+            .map_err(to_js_error)?
+    };
+    let Some(response) = response else {
+        return Ok(());
+    };
+    let route = state
+        .borrow()
+        .router
+        .auth_response(response, RouteTarget::Peer(challenge.issuer_peer_id));
+    send_route_state(state, &route)
+}
+
+fn handle_auth_response_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    response: crate::AuthResponse,
+) -> std::result::Result<(), JsValue> {
+    let Some(challenge) = state
+        .borrow_mut()
+        .pending_auth_challenges
+        .remove(&response.challenge_id)
+    else {
+        return Ok(());
+    };
+    let peer = state
+        .borrow_mut()
+        .pending_auth_peers
+        .remove(&response.challenge_id)
+        .unwrap_or_else(|| crate::PeerPresence {
+            peer_id: response.responder_peer_id.clone(),
+            replica_id: response.responder_replica_id.clone(),
+            transport: challenge.transport.clone(),
+            identity: Some(response.responder_identity.clone()),
+            capabilities: Vec::new(),
+            topics: Vec::new(),
+            metadata: BTreeMap::new(),
+        });
+    let verified = {
+        let borrowed = state.borrow();
+        crate::session_auth::verify_auth_response(&challenge, &response, &borrowed.session_auth)
+            .map_err(to_js_error)?
+    };
+    state
+        .borrow_mut()
+        .verified_identities
+        .insert(verified.peer_id.clone(), verified.clone());
+    if !accept_relay_peer_state(state, peer, Some(&verified))? {
+        state
+            .borrow_mut()
+            .verified_identities
+            .remove(&verified.peer_id);
     }
     Ok(())
 }
@@ -2545,6 +2786,15 @@ fn handle_sync_frame(
             message_id,
             ops,
         } => {
+            if state.borrow().session_auth.require_authenticated_peers {
+                let authenticated = reply_peer
+                    .as_ref()
+                    .and_then(|peer_id| verified_identity_for_peer_state(state, peer_id))
+                    .is_some();
+                if !authenticated {
+                    return Ok(());
+                }
+            }
             let db = state.borrow().db.clone();
             let applied = db
                 .apply_sync_envelope(SyncEnvelope { from, ops })
@@ -2938,6 +3188,18 @@ fn handle_watch_request_state(
         WatchRequestKind::Subscribe {
             request: incoming_request_kind,
         } => {
+            let verified_identity = verified_identity_for_peer_state(state, from);
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_identity.is_none()
+            {
+                let route = state.borrow().router.wrap_watch_event(
+                    error_watch_event(&request.watch_id, 0, true, "peer is not authenticated"),
+                    RouteTarget::Peer(from.to_owned()),
+                    None,
+                );
+                send_route_state(state, &route)?;
+                return Ok(());
+            }
             let request_kind = match state
                 .borrow()
                 .db
@@ -2946,6 +3208,7 @@ fn handle_watch_request_state(
                     HookTransport::Relay,
                     &request.watch_id,
                     &incoming_request_kind,
+                    verified_identity.as_ref(),
                 )
                 .into_result()
             {
@@ -3097,6 +3360,22 @@ fn emit_single_incoming_watch_update_state(
     let Some(watch) = state.borrow().incoming_watches.get(watch_id).cloned() else {
         return Ok(false);
     };
+    let verified_identity = verified_identity_for_peer_state(state, &watch.target_peer_id);
+    if state.borrow().session_auth.require_authenticated_peers && verified_identity.is_none() {
+        let route = state.borrow().router.wrap_watch_event(
+            error_watch_event(
+                watch_id,
+                watch.next_sequence,
+                initial,
+                "peer is not authenticated",
+            ),
+            RouteTarget::Peer(watch.target_peer_id.clone()),
+            None,
+        );
+        send_route_state(state, &route)?;
+        state.borrow_mut().incoming_watches.remove(watch_id);
+        return Ok(true);
+    }
     let decision = state
         .borrow()
         .db
@@ -3106,6 +3385,7 @@ fn emit_single_incoming_watch_update_state(
             watch_id,
             &watch.request_kind,
             initial,
+            verified_identity.as_ref(),
         )
         .map_err(to_js_error)?;
     let (result, content_hash, denied_message) = match decision {
@@ -3291,6 +3571,18 @@ fn handle_mesh_watch_request_state(
         WatchRequestKind::Subscribe {
             request: incoming_request_kind,
         } => {
+            let verified_identity = verified_mesh_identity_for_peer_state(state, remote_peer);
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_identity.is_none()
+            {
+                let route = state.borrow().router.wrap_watch_event(
+                    error_watch_event(&request.watch_id, 0, true, "peer is not authenticated"),
+                    RouteTarget::Peer(remote_peer.to_owned()),
+                    None,
+                );
+                send_mesh_route_to_peer(state, remote_peer, &route)?;
+                return Ok(());
+            }
             let request_kind = match state
                 .borrow()
                 .db
@@ -3299,6 +3591,7 @@ fn handle_mesh_watch_request_state(
                     HookTransport::Mesh,
                     &request.watch_id,
                     &incoming_request_kind,
+                    verified_identity.as_ref(),
                 )
                 .into_result()
             {
@@ -3450,6 +3743,22 @@ fn emit_single_incoming_mesh_watch_update_state(
     let Some(watch) = state.borrow().incoming_watches.get(watch_id).cloned() else {
         return Ok(false);
     };
+    let verified_identity = verified_mesh_identity_for_peer_state(state, &watch.target_peer_id);
+    if state.borrow().session_auth.require_authenticated_peers && verified_identity.is_none() {
+        let route = state.borrow().router.wrap_watch_event(
+            error_watch_event(
+                watch_id,
+                watch.next_sequence,
+                initial,
+                "peer is not authenticated",
+            ),
+            RouteTarget::Peer(watch.target_peer_id.clone()),
+            None,
+        );
+        send_mesh_route_to_peer(state, &watch.target_peer_id, &route)?;
+        state.borrow_mut().incoming_watches.remove(watch_id);
+        return Ok(true);
+    }
     let decision = state
         .borrow()
         .db
@@ -3459,6 +3768,7 @@ fn emit_single_incoming_mesh_watch_update_state(
             watch_id,
             &watch.request_kind,
             initial,
+            verified_identity.as_ref(),
         )
         .map_err(to_js_error)?;
     let (result, content_hash, denied_message) = match decision {
@@ -3936,6 +4246,7 @@ fn send_mesh_presence_state(
                 .insert("mesh_room".to_owned(), borrowed.room.clone());
             peer.metadata
                 .insert("signaling".to_owned(), "relay".to_owned());
+            peer.identity = borrowed.db.session_presence_identity(&borrowed.session_id);
         }
         (
             socket.clone(),
@@ -3964,49 +4275,29 @@ fn handle_mesh_signaling_websocket_message(
     }
 
     let room = state.borrow().room.clone();
-    let channel = format!("mesh:{room}");
     let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                let relay_url = peer.metadata.get("relay_url").cloned();
-                let allowed = state
-                    .borrow()
-                    .db
-                    .allow_peer_connection(&crate::ConnectHookContext {
-                        peer: peer.clone(),
-                        transport: HookTransport::Mesh,
-                        relay_url,
-                    })
-                    .into_result();
-                if allowed.is_err() {
-                    state.borrow().router.forget_peer(&peer.peer_id);
+                maybe_send_mesh_auth_challenge_relay_state(state, &peer)?;
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_mesh_identity_for_peer_state(state, &peer.peer_id).is_none()
+                {
                     continue;
                 }
-                let in_room = peer.topics.iter().any(|topic| topic == &channel)
-                    || peer
-                        .metadata
-                        .get("mesh_room")
-                        .is_some_and(|candidate| candidate == &room);
-                if in_room {
-                    let room_allowed = state
-                        .borrow()
-                        .db
-                        .allow_room_join(&crate::RoomHookContext {
-                            peer_id: peer.peer_id.clone(),
-                            room: room.clone(),
-                            transport: HookTransport::Mesh,
-                            peer: Some(peer.clone()),
-                        })
-                        .into_result();
-                    if room_allowed.is_err() {
-                        continue;
-                    }
+                let recommendation = peer_recommendation_from_presence(&peer);
+                let verified_identity = verified_mesh_identity_for_peer_state(state, &peer.peer_id);
+                let (_, peer_to_join) = accept_mesh_recommendation_state(
+                    state,
+                    recommendation,
+                    verified_identity.as_ref(),
+                )?;
+                if let Some(peer_id) = peer_to_join {
                     handle_mesh_signal_state(
                         state,
                         MeshSignal::Join {
                             room: room.clone(),
-                            from: peer.peer_id,
+                            from: peer_id,
                         },
                     )?;
                 }
@@ -4023,50 +4314,44 @@ fn handle_mesh_signaling_websocket_message(
             }
             RoutePayload::PeerExchange { peers } => {
                 for recommendation in peers {
-                    let relay_url = recommendation.relay_urls.first().cloned();
-                    let allowed = state
-                        .borrow()
-                        .db
-                        .allow_peer_connection(&crate::ConnectHookContext {
-                            peer: recommendation.peer.clone(),
-                            transport: HookTransport::Mesh,
-                            relay_url,
-                        })
-                        .into_result();
-                    if allowed.is_err() {
-                        state
-                            .borrow()
-                            .router
-                            .forget_peer(&recommendation.peer.peer_id);
+                    maybe_send_mesh_auth_challenge_relay_state(state, &recommendation.peer)?;
+                    if state.borrow().session_auth.require_authenticated_peers
+                        && verified_mesh_identity_for_peer_state(
+                            state,
+                            &recommendation.peer.peer_id,
+                        )
+                        .is_none()
+                    {
                         continue;
                     }
-                    let peer = recommendation.peer;
-                    let in_room = peer.topics.iter().any(|topic| topic == &channel)
-                        || peer
-                            .metadata
-                            .get("mesh_room")
-                            .is_some_and(|candidate| candidate == &room);
-                    if !in_room {
-                        continue;
+                    let verified_identity =
+                        verified_mesh_identity_for_peer_state(state, &recommendation.peer.peer_id);
+                    let (_, peer_to_join) = accept_mesh_recommendation_state(
+                        state,
+                        recommendation,
+                        verified_identity.as_ref(),
+                    )?;
+                    if let Some(peer_id) = peer_to_join {
+                        handle_mesh_signal_state(
+                            state,
+                            MeshSignal::Join {
+                                room: room.clone(),
+                                from: peer_id,
+                            },
+                        )?;
                     }
-                    let room_allowed = state
-                        .borrow()
-                        .db
-                        .allow_room_join(&crate::RoomHookContext {
-                            peer_id: peer.peer_id.clone(),
-                            room: room.clone(),
-                            transport: HookTransport::Mesh,
-                            peer: Some(peer.clone()),
-                        })
-                        .into_result();
-                    if room_allowed.is_err() {
-                        continue;
-                    }
+                }
+            }
+            RoutePayload::AuthChallenge { challenge } => {
+                handle_mesh_auth_challenge_relay_state(state, challenge)?;
+            }
+            RoutePayload::AuthResponse { response } => {
+                if let Some(peer_id) = handle_mesh_auth_response_state(state, response)? {
                     handle_mesh_signal_state(
                         state,
                         MeshSignal::Join {
                             room: room.clone(),
-                            from: peer.peer_id,
+                            from: peer_id,
                         },
                     )?;
                 }
@@ -4080,6 +4365,328 @@ fn handle_mesh_signaling_websocket_message(
         }
     }
     Ok(())
+}
+
+fn send_mesh_signal_route_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    route: &RouteEnvelope,
+) -> std::result::Result<(), JsValue> {
+    let (socket, max_bytes) = {
+        let borrowed = state.borrow();
+        let MeshSignalingTransport::Relay { socket, .. } = &borrowed.signaling else {
+            return Ok(());
+        };
+        (socket.clone(), borrowed.db.limits().max_route_payload_bytes)
+    };
+    if socket.ready_state() != web_sys::WebSocket::OPEN {
+        return Err(JsValue::from_str("mesh relay websocket is not connected"));
+    }
+    send_websocket_route(&socket, max_bytes, route)
+}
+
+fn verified_mesh_identity_for_peer_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    peer_id: &str,
+) -> Option<VerifiedIdentity> {
+    state.borrow().verified_identities.get(peer_id).cloned()
+}
+
+fn remove_mesh_peer_identity_state(state: &Rc<RefCell<WebRtcMeshState>>, peer_id: &str) {
+    state.borrow().router.forget_peer(peer_id);
+    let mut borrowed = state.borrow_mut();
+    borrowed.recommendations.remove(peer_id);
+    borrowed.verified_identities.remove(peer_id);
+}
+
+fn accept_mesh_recommendation_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    recommendation: PeerRecommendation,
+    verified_identity: Option<&VerifiedIdentity>,
+) -> std::result::Result<(bool, Option<String>), JsValue> {
+    let relay_url = recommendation.relay_urls.first().cloned();
+    let allowed = state
+        .borrow()
+        .db
+        .allow_peer_connection(&crate::ConnectHookContext {
+            peer: recommendation.peer.clone(),
+            transport: HookTransport::Mesh,
+            relay_url,
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if allowed.is_err() {
+        remove_mesh_peer_identity_state(state, &recommendation.peer.peer_id);
+        return Ok((false, None));
+    }
+
+    let peer = recommendation.peer.clone();
+    store_mesh_recommendations_state(state, vec![recommendation]);
+
+    let room = state.borrow().room.clone();
+    let in_room = peer
+        .topics
+        .iter()
+        .any(|topic| topic == &format!("mesh:{room}"))
+        || peer
+            .metadata
+            .get("mesh_room")
+            .is_some_and(|candidate| candidate == &room);
+    if !in_room {
+        return Ok((true, None));
+    }
+
+    let room_allowed = state
+        .borrow()
+        .db
+        .allow_room_join(&crate::RoomHookContext {
+            peer_id: peer.peer_id.clone(),
+            room,
+            transport: HookTransport::Mesh,
+            peer: Some(peer.clone()),
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if room_allowed.is_err() {
+        return Ok((true, None));
+    }
+    Ok((true, Some(peer.peer_id)))
+}
+
+fn store_mesh_recommendations_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    peers: Vec<PeerRecommendation>,
+) {
+    let max = state.borrow().db.limits().max_peer_recommendations.max(1);
+    let mut borrowed = state.borrow_mut();
+    for peer in peers {
+        borrowed
+            .recommendations
+            .insert(peer.peer.peer_id.clone(), peer);
+    }
+    while borrowed.recommendations.len() > max {
+        let Some(oldest) = borrowed.recommendations.keys().next().cloned() else {
+            break;
+        };
+        borrowed.recommendations.remove(&oldest);
+    }
+}
+
+fn maybe_send_mesh_auth_challenge_relay_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    peer: &crate::PeerPresence,
+) -> std::result::Result<(), JsValue> {
+    let should_skip = {
+        let borrowed = state.borrow();
+        peer.peer_id == borrowed.router.peer_id()
+            || borrowed.verified_identities.contains_key(&peer.peer_id)
+    };
+    if should_skip {
+        return Ok(());
+    }
+    let Some(identity) = peer.identity.as_ref() else {
+        if !state.borrow().session_auth.allow_unauthenticated_presence {
+            remove_mesh_peer_identity_state(state, &peer.peer_id);
+        }
+        return Ok(());
+    };
+
+    #[cfg(feature = "crypto")]
+    {
+        let (challenge, route) = {
+            let borrowed = state.borrow();
+            let challenge = crate::session_auth::create_auth_challenge(
+                borrowed.router.peer_id(),
+                &borrowed.db.replica_id(),
+                &borrowed.session_id,
+                &peer.peer_id,
+                &peer.replica_id,
+                identity,
+                "mesh",
+                &borrowed.session_auth,
+            );
+            let route = borrowed
+                .router
+                .auth_challenge(challenge.clone(), RouteTarget::Peer(peer.peer_id.clone()));
+            (challenge, route)
+        };
+        send_mesh_signal_route_state(state, &route)?;
+        let mut borrowed = state.borrow_mut();
+        borrowed
+            .pending_auth_challenges
+            .insert(challenge.challenge_id.clone(), challenge.clone());
+        borrowed
+            .pending_auth_peers
+            .insert(challenge.challenge_id.clone(), peer.clone());
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    {
+        let _ = identity;
+    }
+
+    Ok(())
+}
+
+fn maybe_send_mesh_auth_challenge_to_peer_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+    peer: &crate::PeerPresence,
+) -> std::result::Result<(), JsValue> {
+    let should_skip = {
+        let borrowed = state.borrow();
+        peer.peer_id == borrowed.router.peer_id()
+            || borrowed.verified_identities.contains_key(&peer.peer_id)
+    };
+    if should_skip {
+        return Ok(());
+    }
+    let Some(identity) = peer.identity.as_ref() else {
+        if !state.borrow().session_auth.allow_unauthenticated_presence {
+            remove_mesh_peer_identity_state(state, &peer.peer_id);
+        }
+        return Ok(());
+    };
+
+    #[cfg(feature = "crypto")]
+    {
+        let (challenge, route) = {
+            let borrowed = state.borrow();
+            let challenge = crate::session_auth::create_auth_challenge(
+                borrowed.router.peer_id(),
+                &borrowed.db.replica_id(),
+                &borrowed.session_id,
+                &peer.peer_id,
+                &peer.replica_id,
+                identity,
+                "mesh",
+                &borrowed.session_auth,
+            );
+            let route = borrowed
+                .router
+                .auth_challenge(challenge.clone(), RouteTarget::Peer(peer.peer_id.clone()));
+            (challenge, route)
+        };
+        send_mesh_route_to_peer(state, remote_peer, &route)?;
+        let mut borrowed = state.borrow_mut();
+        borrowed
+            .pending_auth_challenges
+            .insert(challenge.challenge_id.clone(), challenge.clone());
+        borrowed
+            .pending_auth_peers
+            .insert(challenge.challenge_id.clone(), peer.clone());
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    {
+        let _ = identity;
+        let _ = remote_peer;
+    }
+
+    Ok(())
+}
+
+fn handle_mesh_auth_challenge_relay_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    challenge: crate::AuthChallenge,
+) -> std::result::Result<(), JsValue> {
+    if challenge.target_peer_id != state.borrow().router.peer_id() {
+        return Ok(());
+    }
+    let response = {
+        let borrowed = state.borrow();
+        borrowed
+            .db
+            .sign_session_auth_response(
+                &challenge,
+                borrowed.router.peer_id(),
+                &borrowed.session_id,
+                &borrowed.session_auth,
+            )
+            .map_err(to_js_error)?
+    };
+    let Some(response) = response else {
+        return Ok(());
+    };
+    let route = state
+        .borrow()
+        .router
+        .auth_response(response, RouteTarget::Peer(challenge.issuer_peer_id));
+    send_mesh_signal_route_state(state, &route)
+}
+
+fn handle_mesh_auth_challenge_to_peer_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    remote_peer: &str,
+    challenge: crate::AuthChallenge,
+) -> std::result::Result<(), JsValue> {
+    if challenge.target_peer_id != state.borrow().router.peer_id() {
+        return Ok(());
+    }
+    let response = {
+        let borrowed = state.borrow();
+        borrowed
+            .db
+            .sign_session_auth_response(
+                &challenge,
+                borrowed.router.peer_id(),
+                &borrowed.session_id,
+                &borrowed.session_auth,
+            )
+            .map_err(to_js_error)?
+    };
+    let Some(response) = response else {
+        return Ok(());
+    };
+    let route = state
+        .borrow()
+        .router
+        .auth_response(response, RouteTarget::Peer(challenge.issuer_peer_id));
+    send_mesh_route_to_peer(state, remote_peer, &route)
+}
+
+fn handle_mesh_auth_response_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    response: crate::AuthResponse,
+) -> std::result::Result<Option<String>, JsValue> {
+    let Some(challenge) = state
+        .borrow_mut()
+        .pending_auth_challenges
+        .remove(&response.challenge_id)
+    else {
+        return Ok(None);
+    };
+    let peer = state
+        .borrow_mut()
+        .pending_auth_peers
+        .remove(&response.challenge_id)
+        .unwrap_or_else(|| crate::PeerPresence {
+            peer_id: response.responder_peer_id.clone(),
+            replica_id: response.responder_replica_id.clone(),
+            transport: challenge.transport.clone(),
+            identity: Some(response.responder_identity.clone()),
+            capabilities: Vec::new(),
+            topics: Vec::new(),
+            metadata: BTreeMap::new(),
+        });
+    let verified = {
+        let borrowed = state.borrow();
+        crate::session_auth::verify_auth_response(&challenge, &response, &borrowed.session_auth)
+            .map_err(to_js_error)?
+    };
+    state
+        .borrow_mut()
+        .verified_identities
+        .insert(verified.peer_id.clone(), verified.clone());
+    let recommendation = peer_recommendation_from_presence(&peer);
+    let (accepted, peer_to_join) =
+        accept_mesh_recommendation_state(state, recommendation, Some(&verified))?;
+    if !accepted {
+        state
+            .borrow_mut()
+            .verified_identities
+            .remove(&verified.peer_id);
+    }
+    Ok(peer_to_join)
 }
 
 fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEvent) -> bool {
@@ -4119,6 +4726,12 @@ fn handle_mesh_signal_state(
             if join_room != room || from == peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer_state(state, &from);
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_identity.is_none()
+            {
+                return Ok(());
+            }
             if state
                 .borrow()
                 .db
@@ -4127,6 +4740,7 @@ fn handle_mesh_signal_state(
                     room: join_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -4180,6 +4794,12 @@ fn handle_mesh_signal_state(
             if offer_room != room || to != peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer_state(state, &from);
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_identity.is_none()
+            {
+                return Ok(());
+            }
             if state
                 .borrow()
                 .db
@@ -4188,6 +4808,7 @@ fn handle_mesh_signal_state(
                     room: offer_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -4208,6 +4829,12 @@ fn handle_mesh_signal_state(
             if answer_room != room || to != peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer_state(state, &from);
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_identity.is_none()
+            {
+                return Ok(());
+            }
             if state
                 .borrow()
                 .db
@@ -4216,6 +4843,7 @@ fn handle_mesh_signal_state(
                     room: answer_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -4238,6 +4866,12 @@ fn handle_mesh_signal_state(
             if ice_room != room || to != peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer_state(state, &from);
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_identity.is_none()
+            {
+                return Ok(());
+            }
             if state
                 .borrow()
                 .db
@@ -4246,6 +4880,7 @@ fn handle_mesh_signal_state(
                     room: ice_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -4265,6 +4900,12 @@ fn handle_mesh_signal_state(
             if leave_room != room || from == peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer_state(state, &from);
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_identity.is_none()
+            {
+                return Ok(());
+            }
             if state
                 .borrow()
                 .db
@@ -4273,6 +4914,7 @@ fn handle_mesh_signal_state(
                     room: leave_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -4551,9 +5193,29 @@ fn handle_mesh_route_message(
     let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
-            RoutePayload::Presence { .. } => {}
+            RoutePayload::Presence { peer } => {
+                maybe_send_mesh_auth_challenge_to_peer_state(state, remote_peer, &peer)?;
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_mesh_identity_for_peer_state(state, &peer.peer_id).is_none()
+                {
+                    continue;
+                }
+                let recommendation = peer_recommendation_from_presence(&peer);
+                let verified_identity = verified_mesh_identity_for_peer_state(state, &peer.peer_id);
+                let _ = accept_mesh_recommendation_state(
+                    state,
+                    recommendation,
+                    verified_identity.as_ref(),
+                )?;
+            }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
+                let verified_identity = verified_mesh_identity_for_peer_state(state, remote_peer);
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
+                {
+                    continue;
+                }
                 let decision = state
                     .borrow()
                     .db
@@ -4562,6 +5224,7 @@ fn handle_mesh_route_message(
                         HookTransport::Mesh,
                         &format!("snapshot:{remote_peer}"),
                         &PullRequestKind::Snapshot { root: root.clone() },
+                        verified_identity.as_ref(),
                     )
                     .map_err(to_js_error)?;
                 if let crate::HookDecision::Allow {
@@ -4587,6 +5250,11 @@ fn handle_mesh_route_message(
                     .map_err(to_js_error)?;
             }
             RoutePayload::Sync { encoding, payload } => {
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_mesh_identity_for_peer_state(state, remote_peer).is_none()
+                {
+                    continue;
+                }
                 let frame = {
                     let borrowed = state.borrow();
                     decode_sync_payload(&borrowed.db, &encoding, payload)?
@@ -4602,24 +5270,37 @@ fn handle_mesh_route_message(
                         borrowed.db.limits().max_batch_items_per_route.max(1),
                     )
                 };
-                let items = match db
-                    .serve_pull_request_for_peer(
-                        remote_peer,
-                        HookTransport::Mesh,
-                        &request.request_id,
-                        &request.request,
-                    )
-                    .map_err(to_js_error)?
+                let verified_identity = verified_mesh_identity_for_peer_state(state, remote_peer);
+                let items = if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
                 {
-                    crate::HookDecision::Allow { value } => db
-                        .chunk_remote_result(&request.request_id, value)
-                        .into_iter()
-                        .map(|response| RouteBatchItem::PullResponse { response })
-                        .collect::<Vec<_>>(),
-                    crate::HookDecision::Deny { message } => {
-                        vec![RouteBatchItem::PullResponse {
-                            response: error_pull_response(&request.request_id, message),
-                        }]
+                    vec![RouteBatchItem::PullResponse {
+                        response: error_pull_response(
+                            &request.request_id,
+                            "peer is not authenticated",
+                        ),
+                    }]
+                } else {
+                    match db
+                        .serve_pull_request_for_peer(
+                            remote_peer,
+                            HookTransport::Mesh,
+                            &request.request_id,
+                            &request.request,
+                            verified_identity.as_ref(),
+                        )
+                        .map_err(to_js_error)?
+                    {
+                        crate::HookDecision::Allow { value } => db
+                            .chunk_remote_result(&request.request_id, value)
+                            .into_iter()
+                            .map(|response| RouteBatchItem::PullResponse { response })
+                            .collect::<Vec<_>>(),
+                        crate::HookDecision::Deny { message } => {
+                            vec![RouteBatchItem::PullResponse {
+                                response: error_pull_response(&request.request_id, message),
+                            }]
+                        }
                     }
                 };
                 for route in pack_batch_routes(
@@ -4639,7 +5320,37 @@ fn handle_mesh_route_message(
             RoutePayload::WatchEvent { event } => {
                 accept_mesh_watch_event_state(state, event)?;
             }
-            RoutePayload::PeerExchange { .. } => {}
+            RoutePayload::PeerExchange { peers } => {
+                for recommendation in peers {
+                    maybe_send_mesh_auth_challenge_to_peer_state(
+                        state,
+                        remote_peer,
+                        &recommendation.peer,
+                    )?;
+                    if state.borrow().session_auth.require_authenticated_peers
+                        && verified_mesh_identity_for_peer_state(
+                            state,
+                            &recommendation.peer.peer_id,
+                        )
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    let verified_identity =
+                        verified_mesh_identity_for_peer_state(state, &recommendation.peer.peer_id);
+                    let _ = accept_mesh_recommendation_state(
+                        state,
+                        recommendation,
+                        verified_identity.as_ref(),
+                    )?;
+                }
+            }
+            RoutePayload::AuthChallenge { challenge } => {
+                handle_mesh_auth_challenge_to_peer_state(state, remote_peer, challenge)?;
+            }
+            RoutePayload::AuthResponse { response } => {
+                let _ = handle_mesh_auth_response_state(state, response)?;
+            }
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {
                     pending.push(RoutePayload::from_batch_item(item));
@@ -4661,6 +5372,11 @@ fn handle_mesh_sync_frame(
             message_id,
             ops,
         } => {
+            if state.borrow().session_auth.require_authenticated_peers
+                && verified_mesh_identity_for_peer_state(state, remote_peer).is_none()
+            {
+                return Ok(());
+            }
             let db = state.borrow().db.clone();
             let applied = db
                 .apply_sync_envelope(SyncEnvelope { from, ops })

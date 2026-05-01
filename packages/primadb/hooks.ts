@@ -1,16 +1,43 @@
 import type { Primadb } from "./vendor/default/primadb.js";
 
+export interface PresenceIdentity {
+  publicKey: string;
+  alias?: string | null;
+  keyScheme?: string;
+  sessionId: string;
+  claims?: Record<string, string>;
+  issuedAtMillis?: number;
+  expiresAtMillis?: number | null;
+}
+
+export type IdentityTrust = "verified" | "trusted_public_key" | "trusted_alias";
+
+export interface VerifiedIdentity {
+  publicKey: string;
+  alias?: string | null;
+  peerId: string;
+  replicaId: string;
+  transport: string;
+  sessionId: string;
+  claims?: Record<string, string>;
+  issuedAtMillis: number;
+  expiresAtMillis?: number | null;
+  trust: IdentityTrust;
+}
+
 export interface ConnectHookContext {
   peer: {
     peerId: string;
     replicaId: string;
     transport: string;
+    identity?: PresenceIdentity | null;
     capabilities?: string[];
     topics?: string[];
     metadata?: Record<string, string>;
   };
   transport: "relay" | "mesh";
   relayUrl?: string | null;
+  verifiedIdentity?: VerifiedIdentity | null;
 }
 
 export interface RoomHookContext {
@@ -18,6 +45,7 @@ export interface RoomHookContext {
   room: string;
   transport: "relay" | "mesh";
   peer?: ConnectHookContext["peer"] | null;
+  verifiedIdentity?: VerifiedIdentity | null;
 }
 
 export type PullRequestKind =
@@ -42,6 +70,7 @@ export interface ServeRequestContext {
   requestId?: string | null;
   watchId?: string | null;
   request: PullRequestKind;
+  verifiedIdentity?: VerifiedIdentity | null;
 }
 
 export interface ServeResultContext {
@@ -51,6 +80,7 @@ export interface ServeResultContext {
   watchId?: string | null;
   request: PullRequestKind;
   initial: boolean;
+  verifiedIdentity?: VerifiedIdentity | null;
 }
 
 export type VoidHookDecision =

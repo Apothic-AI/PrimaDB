@@ -24,6 +24,7 @@ use crate::hooks::{
 use crate::operation::{Operation, OperationAction, OperationValue};
 use crate::persistence::{PersistenceTarget, load_snapshot_payload, store_snapshot_payload};
 use crate::query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QuerySpec};
+use crate::session_auth::{PresenceIdentity, SessionAuthConfig, VerifiedIdentity};
 use crate::snapshot::DatabaseSnapshot;
 use crate::storage::StorageAdapter;
 use crate::sync::{
@@ -922,6 +923,66 @@ impl Primadb {
         inner.security.decode_sync_frame(frame)
     }
 
+    #[cfg(feature = "crypto")]
+    pub(crate) fn session_presence_identity(&self, session_id: &str) -> Option<PresenceIdentity> {
+        let inner = self.inner.lock().unwrap();
+        let local_user = inner.security.local_user.as_ref()?;
+        let mut claims = BTreeMap::new();
+        claims.insert("replicaId".to_owned(), inner.clock.actor().to_owned());
+        Some(PresenceIdentity {
+            public_key: local_user.public_key(),
+            alias: Some(local_user.alias.clone()),
+            key_scheme: "ed25519".to_owned(),
+            session_id: session_id.to_owned(),
+            claims,
+            issued_at_millis: now_millis(),
+            expires_at_millis: None,
+        })
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    pub(crate) fn session_presence_identity(&self, _session_id: &str) -> Option<PresenceIdentity> {
+        None
+    }
+
+    #[cfg(feature = "crypto")]
+    pub(crate) fn sign_session_auth_response(
+        &self,
+        challenge: &crate::AuthChallenge,
+        responder_peer_id: &str,
+        responder_session_id: &str,
+        config: &SessionAuthConfig,
+    ) -> Result<Option<crate::AuthResponse>> {
+        let inner = self.inner.lock().unwrap();
+        let Some(local_user) = inner.security.local_user.as_ref() else {
+            return Ok(None);
+        };
+        let mut claims = BTreeMap::new();
+        claims.insert("replicaId".to_owned(), inner.clock.actor().to_owned());
+        crate::session_auth::sign_auth_response(
+            &local_user.identity,
+            Some(local_user.alias.clone()),
+            claims,
+            challenge,
+            responder_peer_id,
+            inner.clock.actor(),
+            responder_session_id,
+            config,
+        )
+        .map(Some)
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    pub(crate) fn sign_session_auth_response(
+        &self,
+        _challenge: &crate::AuthChallenge,
+        _responder_peer_id: &str,
+        _responder_session_id: &str,
+        _config: &SessionAuthConfig,
+    ) -> Result<Option<crate::AuthResponse>> {
+        Ok(None)
+    }
+
     pub fn get_path(&self, path: &RemotePath) -> Result<Option<JsonValue>> {
         self.materialize(&path.anchor, &path.segments)
     }
@@ -1120,6 +1181,7 @@ impl Primadb {
         transport: HookTransport,
         request_id: Option<&str>,
         request: &PullRequestKind,
+        verified_identity: Option<&VerifiedIdentity>,
     ) -> HookDecision<PullRequestKind> {
         let hooks = self.inner.lock().unwrap().network_hooks.clone();
         let Some(hooks) = hooks else {
@@ -1131,6 +1193,7 @@ impl Primadb {
             request_id: request_id.map(str::to_owned),
             watch_id: None,
             request: request.clone(),
+            verified_identity: verified_identity.cloned(),
         })
     }
 
@@ -1140,6 +1203,7 @@ impl Primadb {
         transport: HookTransport,
         watch_id: &str,
         request: &PullRequestKind,
+        verified_identity: Option<&VerifiedIdentity>,
     ) -> HookDecision<PullRequestKind> {
         let hooks = self.inner.lock().unwrap().network_hooks.clone();
         let Some(hooks) = hooks else {
@@ -1151,6 +1215,7 @@ impl Primadb {
             request_id: None,
             watch_id: Some(watch_id.to_owned()),
             request: request.clone(),
+            verified_identity: verified_identity.cloned(),
         })
     }
 
@@ -1163,6 +1228,7 @@ impl Primadb {
         request: &PullRequestKind,
         initial: bool,
         result: RemoteResult,
+        verified_identity: Option<&VerifiedIdentity>,
     ) -> HookDecision<RemoteResult> {
         let hooks = self.inner.lock().unwrap().network_hooks.clone();
         let Some(hooks) = hooks else {
@@ -1176,6 +1242,7 @@ impl Primadb {
                 watch_id: watch_id.map(str::to_owned),
                 request: request.clone(),
                 initial,
+                verified_identity: verified_identity.cloned(),
             },
             result,
         )
@@ -1187,9 +1254,16 @@ impl Primadb {
         transport: HookTransport,
         request_id: &str,
         request: &PullRequestKind,
+        verified_identity: Option<&VerifiedIdentity>,
     ) -> Result<HookDecision<RemoteResult>> {
         let request = match self
-            .authorize_pull_request_for_peer(peer_id, transport, Some(request_id), request)
+            .authorize_pull_request_for_peer(
+                peer_id,
+                transport,
+                Some(request_id),
+                request,
+                verified_identity,
+            )
             .into_result()
         {
             Ok(request) => request,
@@ -1204,6 +1278,7 @@ impl Primadb {
             &request,
             true,
             result,
+            verified_identity,
         ))
     }
 
@@ -1214,6 +1289,7 @@ impl Primadb {
         watch_id: &str,
         request: &PullRequestKind,
         initial: bool,
+        verified_identity: Option<&VerifiedIdentity>,
     ) -> Result<HookDecision<RemoteResult>> {
         let result = self.execute_pull_request_kind(request)?;
         Ok(self.filter_served_result_for_peer(
@@ -1224,6 +1300,7 @@ impl Primadb {
             request,
             initial,
             result,
+            verified_identity,
         ))
     }
 
@@ -7135,6 +7212,24 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct VerifiedOnlyHooks;
+
+    impl NetworkHooks for VerifiedOnlyHooks {
+        fn on_pull(&self, context: &ServeRequestContext) -> HookDecision<PullRequestKind> {
+            if context
+                .verified_identity
+                .as_ref()
+                .and_then(|identity| identity.alias.as_deref())
+                == Some("team-a")
+            {
+                HookDecision::allow(context.request.clone())
+            } else {
+                HookDecision::deny("verified team identity required")
+            }
+        }
+    }
+
     #[test]
     fn network_hooks_can_gate_peer_discovery_and_room_joins() {
         let db = Primadb::with_replica_id("hooks-a");
@@ -7144,6 +7239,7 @@ mod tests {
             peer_id: "peer-denied".to_owned(),
             replica_id: "peer-denied".to_owned(),
             transport: "websocket".to_owned(),
+            identity: None,
             capabilities: Vec::new(),
             topics: Vec::new(),
             metadata: [("deny_connect".to_owned(), "true".to_owned())]
@@ -7155,6 +7251,7 @@ mod tests {
                 peer: denied_peer,
                 transport: HookTransport::Relay,
                 relay_url: Some("ws://127.0.0.1:9010".to_owned()),
+                verified_identity: None,
             }),
             HookDecision::Deny { .. }
         ));
@@ -7165,6 +7262,7 @@ mod tests {
                 room: "private-room".to_owned(),
                 transport: HookTransport::Mesh,
                 peer: None,
+                verified_identity: None,
             }),
             HookDecision::Deny { .. }
         ));
@@ -7174,6 +7272,7 @@ mod tests {
             peer_id: "peer-ok".to_owned(),
             replica_id: "peer-ok".to_owned(),
             transport: "websocket".to_owned(),
+            identity: None,
             capabilities: Vec::new(),
             topics: Vec::new(),
             metadata: Default::default(),
@@ -7183,6 +7282,7 @@ mod tests {
                 peer: allowed_peer,
                 transport: HookTransport::Relay,
                 relay_url: None,
+                verified_identity: None,
             }),
             HookDecision::Allow { .. }
         ));
@@ -7218,6 +7318,7 @@ mod tests {
                     offset: 0,
                 },
             },
+            None,
         )?;
         match query {
             HookDecision::Allow {
@@ -7233,6 +7334,7 @@ mod tests {
             &PullRequestKind::Get {
                 path: RemotePath::new("docs", vec!["secret".to_owned()]),
             },
+            None,
         )?;
         match redacted {
             HookDecision::Allow {
@@ -7248,8 +7350,50 @@ mod tests {
             &PullRequestKind::Get {
                 path: RemotePath::new("private", vec!["secret".to_owned()]),
             },
+            None,
         )?;
         assert!(matches!(denied, HookDecision::Deny { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn network_hooks_receive_verified_identity_context() -> Result<()> {
+        let db = Primadb::with_replica_id("hooks-verified");
+        db.root("docs").field("public").put(json!("visible"))?;
+        db.set_network_hooks(Arc::new(VerifiedOnlyHooks));
+
+        let request = PullRequestKind::Get {
+            path: RemotePath::new("docs", vec!["public".to_owned()]),
+        };
+        let denied = db.serve_pull_request_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "get-1",
+            &request,
+            None,
+        )?;
+        assert!(matches!(denied, HookDecision::Deny { .. }));
+
+        let verified_identity = crate::VerifiedIdentity {
+            public_key: "public-key".to_owned(),
+            alias: Some("team-a".to_owned()),
+            peer_id: "peer-1".to_owned(),
+            replica_id: "replica-1".to_owned(),
+            transport: "relay".to_owned(),
+            session_id: "session-1".to_owned(),
+            claims: Default::default(),
+            issued_at_millis: 1,
+            expires_at_millis: None,
+            trust: crate::IdentityTrust::Verified,
+        };
+        let allowed = db.serve_pull_request_for_peer(
+            "peer-1",
+            HookTransport::Relay,
+            "get-2",
+            &request,
+            Some(&verified_identity),
+        )?;
+        assert!(matches!(allowed, HookDecision::Allow { .. }));
         Ok(())
     }
 
@@ -7266,6 +7410,7 @@ mod tests {
             &PullRequestKind::Get {
                 path: RemotePath::new("private", vec!["secret".to_owned()]),
             },
+            None,
         );
         assert!(matches!(denied, HookDecision::Deny { .. }));
 
@@ -7276,6 +7421,7 @@ mod tests {
             &PullRequestKind::Get {
                 path: RemotePath::new("docs", vec!["public".to_owned()]),
             },
+            None,
         );
         assert!(matches!(allowed, HookDecision::Allow { .. }));
 
@@ -7287,6 +7433,7 @@ mod tests {
                 path: RemotePath::new("docs", vec!["public".to_owned()]),
             },
             true,
+            None,
         )?;
         match result {
             HookDecision::Allow {

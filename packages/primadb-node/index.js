@@ -11,10 +11,13 @@ const native = require(bindingPath);
 export const {
   Primadb,
   Chain,
+  Scope,
   Subscription,
   RelayServer,
+  RemoteWatch,
   WebSocketSync,
   WebRtcMesh,
+  generateIdentity,
 } = native;
 
 export default native;

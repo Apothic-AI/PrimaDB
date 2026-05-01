@@ -36,6 +36,10 @@ signatures for:
 - `onWatch(...)`
 - `onServeResult(...)`
 
+Relay and relay-signaled mesh transports can also use `sessionAuth` config. When a peer has an
+authenticated local user, presence advertises its public key and the transport verifies it with a
+nonce challenge/response before exposing `context.verifiedIdentity` to hooks.
+
 ## Build From The Repo
 
 From the repo root:
@@ -88,6 +92,9 @@ await initPrimadb();
 const db = new Primadb("browser-a");
 setNetworkHooks(db, {
   onPull(context) {
+    if (context.verifiedIdentity?.alias === "team-a") {
+      return undefined;
+    }
     if (context.request.kind === "get" && context.request.path.anchor === "private") {
       return "private root denied";
     }

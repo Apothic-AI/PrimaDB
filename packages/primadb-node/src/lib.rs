@@ -6,15 +6,16 @@ use napi_derive::napi;
 use primadb::{
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
     ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
-    HookDecision, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    HookDecision, Identity, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
-    PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
+    PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
     RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
     RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, ServeRequestContext,
     ServeResultContext, Scope as CoreScope, ScopePolicy, Subscription as CoreSubscription,
     TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
-    TraversalSpec, parse_request_hook_json, parse_result_hook_json, parse_void_hook_json,
+    TraversalSpec, UserGrant, parse_request_hook_json, parse_result_hook_json,
+    parse_void_hook_json,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,15 @@ fn to_json<T: Serialize>(value: T) -> Result<JsonValue> {
 
 fn from_json<T: DeserializeOwned>(value: JsonValue) -> Result<T> {
     serde_json::from_value(value).map_err(to_napi_error)
+}
+
+#[napi(js_name = "generateIdentity")]
+pub fn generate_identity() -> Result<JsonValue> {
+    let identity = Identity::generate();
+    Ok(json!({
+        "publicKey": identity.public_key_base64(),
+        "secretKey": identity.secret_key_base64(),
+    }))
 }
 
 fn binding_to_json(binding: CoreDurableStorageBinding) -> JsonValue {
@@ -447,6 +457,39 @@ impl Primadb {
         let config: BlobStorageConfig = from_json(config)?;
         let binding = self.inner.open_blob_storage(config).map_err(to_napi_error)?;
         Ok(blob_binding_to_json(binding))
+    }
+
+    #[napi(js_name = "registerUser")]
+    pub fn register_user(
+        &self,
+        alias: String,
+        public_key: String,
+        grants: JsonValue,
+    ) -> Result<()> {
+        let public_identity = PublicIdentity::from_base64(&public_key).map_err(to_napi_error)?;
+        let grants: Vec<UserGrant> = from_json(grants)?;
+        self.inner
+            .register_user(alias, public_identity, grants)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "authenticateLocalUser")]
+    pub fn authenticate_local_user(
+        &self,
+        alias: String,
+        secret_key: String,
+        grants: JsonValue,
+    ) -> Result<()> {
+        let identity = Identity::from_secret_key_base64(&secret_key).map_err(to_napi_error)?;
+        let grants: Vec<UserGrant> = from_json(grants)?;
+        self.inner
+            .authenticate_local_user(alias, identity, grants)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "setRequireSignedSync")]
+    pub fn set_require_signed_sync(&self, required: bool) {
+        self.inner.set_require_signed_sync(required);
     }
 
     #[napi(js_name = "connectRelay")]

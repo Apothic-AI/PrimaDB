@@ -1,4 +1,4 @@
-use crate::{PeerPresence, PullRequestKind, RemoteResult};
+use crate::{PeerPresence, PullRequestKind, RemoteResult, VerifiedIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -16,6 +16,8 @@ pub struct ConnectHookContext {
     pub transport: HookTransport,
     #[serde(default)]
     pub relay_url: Option<String>,
+    #[serde(default)]
+    pub verified_identity: Option<VerifiedIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,6 +28,8 @@ pub struct RoomHookContext {
     pub transport: HookTransport,
     #[serde(default)]
     pub peer: Option<PeerPresence>,
+    #[serde(default)]
+    pub verified_identity: Option<VerifiedIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,6 +42,8 @@ pub struct ServeRequestContext {
     #[serde(default)]
     pub watch_id: Option<String>,
     pub request: PullRequestKind,
+    #[serde(default)]
+    pub verified_identity: Option<VerifiedIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -52,6 +58,8 @@ pub struct ServeResultContext {
     pub request: PullRequestKind,
     #[serde(default)]
     pub initial: bool,
+    #[serde(default)]
+    pub verified_identity: Option<VerifiedIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

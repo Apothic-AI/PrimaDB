@@ -17,6 +17,7 @@ Current surface:
 - remote strict-scope transaction submission through `remoteTransaction(...)` on relay sync clients
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
+- authenticated relay/mesh session identity through `generateIdentity()`, `authenticateLocalUser(...)`, `sessionAuth` config, and `context.verifiedIdentity`
 - network-boundary hooks through `setNetworkHooks(...)` / `clearNetworkHooks()`
 - experimental MoQ sync helpers through `primadb-node/moq`
 
@@ -76,6 +77,9 @@ await db
 
 db.setNetworkHooks({
   onPull(context) {
+    if (context.verifiedIdentity?.alias === "team-a") {
+      return undefined;
+    }
     if (context.request.kind === "get" && context.request.path.anchor === "private") {
       return "private root denied";
     }

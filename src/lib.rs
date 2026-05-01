@@ -25,6 +25,7 @@ mod parallel;
 mod persistence;
 mod query;
 mod router;
+mod session_auth;
 mod snapshot;
 mod storage;
 mod sync;
@@ -96,6 +97,10 @@ pub use query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QueryOrder, Quer
 pub use router::{
     PeerPresence, PeerRecommendation, RouteBatchItem, RouteDecision, RouteEnvelope, RoutePayload,
     RouteTarget, Router, RouterConfig, RouterStats,
+};
+pub use session_auth::{
+    AuthChallenge, AuthResponse, AuthTranscript, IdentityTrust, PresenceIdentity,
+    SessionAuthConfig, VerifiedIdentity,
 };
 pub use snapshot::DatabaseSnapshot;
 pub use storage::{MemoryStorageAdapter, StorageAdapter, StorageReport};

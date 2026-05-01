@@ -1,14 +1,14 @@
 use primadb::{
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
     ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
-    HookDecision, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
+    HookDecision, Identity, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
-    PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
+    PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath,
     RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
     RemoteWatchSubscription as CoreRemoteWatch, RoomHookContext, Scope as CoreScope, ScopePolicy,
     ServeRequestContext, ServeResultContext, Subscription as CoreSubscription, TransactionOptions,
-    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec,
+    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
     parse_request_hook_json, parse_result_hook_json, parse_void_hook_json,
 };
 use pyo3::exceptions::PyRuntimeError;
@@ -426,6 +426,36 @@ impl Primadb {
         let config: BlobStorageConfig = from_py(config)?;
         let binding = self.inner.open_blob_storage(config).map_err(to_py_err)?;
         to_py(py, blob_binding_to_json(binding))
+    }
+
+    fn register_user(
+        &self,
+        alias: String,
+        public_key: String,
+        grants: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let public_identity = PublicIdentity::from_base64(&public_key).map_err(to_py_err)?;
+        let grants: Vec<UserGrant> = from_py(grants)?;
+        self.inner
+            .register_user(alias, public_identity, grants)
+            .map_err(to_py_err)
+    }
+
+    fn authenticate_local_user(
+        &self,
+        alias: String,
+        secret_key: String,
+        grants: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let identity = Identity::from_secret_key_base64(&secret_key).map_err(to_py_err)?;
+        let grants: Vec<UserGrant> = from_py(grants)?;
+        self.inner
+            .authenticate_local_user(alias, identity, grants)
+            .map_err(to_py_err)
+    }
+
+    fn set_require_signed_sync(&self, required: bool) {
+        self.inner.set_require_signed_sync(required);
     }
 
     fn connect_relay(&self, py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<WebSocketSync> {
@@ -1382,6 +1412,18 @@ impl WebRtcMesh {
     }
 }
 
+#[pyfunction]
+fn generate_identity(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let identity = Identity::generate();
+    to_py(
+        py,
+        json!({
+            "publicKey": identity.public_key_base64(),
+            "secretKey": identity.secret_key_base64(),
+        }),
+    )
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Primadb>()?;
@@ -1393,5 +1435,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<RemoteWatch>()?;
     module.add_class::<WebSocketSync>()?;
     module.add_class::<WebRtcMesh>()?;
+    module.add_function(wrap_pyfunction!(generate_identity, module)?)?;
     Ok(())
 }

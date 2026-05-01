@@ -1,4 +1,14 @@
-from ._native import Chain, Primadb, RelayServer, RemoteWatch, Scope, Subscription, WebRtcMesh, WebSocketSync
+from ._native import (
+    Chain,
+    Primadb,
+    RelayServer,
+    RemoteWatch,
+    Scope,
+    Subscription,
+    WebRtcMesh,
+    WebSocketSync,
+    generate_identity,
+)
 from .moq import PrimadbMoqFrame, PrimadbMoqLoopback, PrimadbMoqSession, create_primadb_moq_loopback
 
 __all__ = [
@@ -14,4 +24,5 @@ __all__ = [
     "WebRtcMesh",
     "WebSocketSync",
     "create_primadb_moq_loopback",
+    "generate_identity",
 ]

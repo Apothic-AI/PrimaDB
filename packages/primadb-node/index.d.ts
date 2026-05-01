@@ -1,17 +1,57 @@
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
+export interface PresenceIdentity {
+  publicKey: string;
+  alias?: string | null;
+  keyScheme?: string;
+  sessionId: string;
+  claims?: Record<string, string>;
+  issuedAtMillis?: number;
+  expiresAtMillis?: number | null;
+}
+
+export type IdentityTrust = "verified" | "trusted_public_key" | "trusted_alias";
+
+export interface VerifiedIdentity {
+  publicKey: string;
+  alias?: string | null;
+  peerId: string;
+  replicaId: string;
+  transport: string;
+  sessionId: string;
+  claims?: Record<string, string>;
+  issuedAtMillis: number;
+  expiresAtMillis?: number | null;
+  trust: IdentityTrust;
+}
+
+export interface IdentityKeyPair {
+  publicKey: string;
+  secretKey: string;
+}
+
+export interface UserGrant {
+  root: string;
+  read?: boolean;
+  write?: boolean;
+}
+
+export declare function generateIdentity(): IdentityKeyPair;
+
 export interface ConnectHookContext {
   peer: {
     peerId: string;
     replicaId: string;
     transport: string;
+    identity?: PresenceIdentity | null;
     capabilities?: string[];
     topics?: string[];
     metadata?: Record<string, string>;
   };
   transport: "relay" | "mesh";
   relayUrl?: string | null;
+  verifiedIdentity?: VerifiedIdentity | null;
 }
 
 export interface RoomHookContext {
@@ -19,11 +59,22 @@ export interface RoomHookContext {
   room: string;
   transport: "relay" | "mesh";
   peer?: ConnectHookContext["peer"] | null;
+  verifiedIdentity?: VerifiedIdentity | null;
+}
+
+export interface SessionAuthConfig {
+  requireAuthenticatedPeers?: boolean;
+  trustedPublicKeys?: string[];
+  trustedAliases?: string[];
+  challengeTimeoutMs?: number;
+  sessionTtlMs?: number;
+  allowUnauthenticatedPresence?: boolean;
 }
 
 export interface RelayClientConfig {
   url: string;
   retryIntervalMs?: number;
+  sessionAuth?: SessionAuthConfig;
 }
 
 export interface RelayServerConfig {
@@ -44,6 +95,7 @@ export interface MeshConfig {
   relayUrl?: string | null;
   retryIntervalMs?: number;
   iceServers?: IceServerConfig[];
+  sessionAuth?: SessionAuthConfig;
 }
 
 export type DurableStorageConfig =
@@ -62,6 +114,18 @@ export interface DurableStorageBinding {
   incremental: boolean;
   loadedExisting: boolean;
   autoPersist: boolean;
+}
+
+export type BlobStorageConfig =
+  | { kind: "memory" }
+  | {
+      kind: "files";
+      directory: string;
+    };
+
+export interface BlobStorageBinding {
+  backend: string;
+  contentAddressed: boolean;
 }
 
 export interface QueryOrder {
@@ -226,6 +290,7 @@ export interface ServeRequestContext {
   requestId?: string | null;
   watchId?: string | null;
   request: PullRequestKind;
+  verifiedIdentity?: VerifiedIdentity | null;
 }
 
 export interface ServeResultContext {
@@ -235,6 +300,7 @@ export interface ServeResultContext {
   watchId?: string | null;
   request: PullRequestKind;
   initial: boolean;
+  verifiedIdentity?: VerifiedIdentity | null;
 }
 
 export type VoidHookDecision =
@@ -309,6 +375,10 @@ export declare class Primadb {
   applyEnvelope(envelope: JsonValue): number;
   applyOperationsJson(payload: string): number;
   openDurableStorage(config: DurableStorageConfig): DurableStorageBinding;
+  openBlobStorage(config: BlobStorageConfig): BlobStorageBinding;
+  registerUser(alias: string, publicKey: string, grants: UserGrant[]): void;
+  authenticateLocalUser(alias: string, secretKey: string, grants: UserGrant[]): void;
+  setRequireSignedSync(required: boolean): void;
   connectRelay(config: RelayClientConfig): Promise<WebSocketSync>;
   connectMesh(config: MeshConfig): Promise<WebRtcMesh>;
   setNetworkHooks(hooks: NetworkHooks): void;

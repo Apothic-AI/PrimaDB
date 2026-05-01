@@ -1,5 +1,6 @@
 use crate::DatabaseSnapshot;
 use crate::clock::now_millis;
+use crate::session_auth::{AuthChallenge, AuthResponse, PresenceIdentity};
 use crate::sync::{PullRequest, PullResponse, WatchEvent, WatchRequest, stable_content_hash};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -19,6 +20,8 @@ pub struct PeerPresence {
     pub peer_id: String,
     pub replica_id: String,
     pub transport: String,
+    #[serde(default)]
+    pub identity: Option<PresenceIdentity>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
@@ -74,6 +77,12 @@ pub enum RouteBatchItem {
     PeerExchange {
         peers: Vec<PeerRecommendation>,
     },
+    AuthChallenge {
+        challenge: AuthChallenge,
+    },
+    AuthResponse {
+        response: AuthResponse,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -111,6 +120,12 @@ pub enum RoutePayload {
     },
     PeerExchange {
         peers: Vec<PeerRecommendation>,
+    },
+    AuthChallenge {
+        challenge: AuthChallenge,
+    },
+    AuthResponse {
+        response: AuthResponse,
     },
     Batch {
         items: Vec<RouteBatchItem>,
@@ -340,6 +355,7 @@ impl Router {
             capabilities,
             topics,
             metadata: BTreeMap::new(),
+            identity: None,
         };
         self.wrap_payload(
             RoutePayload::Presence { peer },
@@ -359,6 +375,14 @@ impl Router {
             target,
             reply_to.into(),
         )
+    }
+
+    pub fn auth_challenge(&self, challenge: AuthChallenge, target: RouteTarget) -> RouteEnvelope {
+        self.wrap_payload(RoutePayload::AuthChallenge { challenge }, target, None)
+    }
+
+    pub fn auth_response(&self, response: AuthResponse, target: RouteTarget) -> RouteEnvelope {
+        self.wrap_payload(RoutePayload::AuthResponse { response }, target, None)
     }
 
     pub fn snapshot_request(&self, root: Option<String>, target: RouteTarget) -> RouteEnvelope {
@@ -494,6 +518,8 @@ impl RoutePayload {
             RouteBatchItem::WatchRequest { request } => Self::WatchRequest { request },
             RouteBatchItem::WatchEvent { event } => Self::WatchEvent { event },
             RouteBatchItem::PeerExchange { peers } => Self::PeerExchange { peers },
+            RouteBatchItem::AuthChallenge { challenge } => Self::AuthChallenge { challenge },
+            RouteBatchItem::AuthResponse { response } => Self::AuthResponse { response },
         }
     }
 }
@@ -595,6 +621,7 @@ mod tests {
             peer_id: "peer-b".to_owned(),
             replica_id: "replica-b".to_owned(),
             transport: "websocket".to_owned(),
+            identity: None,
             capabilities: Vec::new(),
             topics: Vec::new(),
             metadata: BTreeMap::new(),

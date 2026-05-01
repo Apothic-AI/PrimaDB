@@ -4,8 +4,8 @@ use crate::{
     ChangeSubscription, HookTransport, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
     NodeFetchScheduler, PeerRecommendation, Primadb, PrimadbError, RemoteWatchMessage,
     RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
-    Router, RouterConfig, SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind,
-    error_watch_event,
+    Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity, WatchEvent, WatchRequest,
+    WatchRequestKind, error_watch_event,
 };
 use async_channel::{Sender, unbounded};
 use futures_util::stream::SplitSink;
@@ -118,6 +118,8 @@ struct NativeWebRtcMeshState {
     router: Router,
     room: String,
     peer_id: String,
+    session_id: String,
+    session_auth: crate::SessionAuthConfig,
     relay_url: String,
     rtc_configuration: RTCConfiguration,
     closed: AtomicBool,
@@ -130,6 +132,9 @@ struct NativeWebRtcMeshState {
     outgoing_watches: Mutex<BTreeMap<String, OutgoingWatch>>,
     incoming_watches: Mutex<BTreeMap<String, IncomingWatch>>,
     recommendations: Mutex<BTreeMap<String, PeerRecommendation>>,
+    pending_auth_challenges: Mutex<BTreeMap<String, crate::AuthChallenge>>,
+    pending_auth_peers: Mutex<BTreeMap<String, crate::PeerPresence>>,
+    verified_identities: Mutex<BTreeMap<String, VerifiedIdentity>>,
 }
 
 pub struct NativeWebRtcMesh {
@@ -172,6 +177,11 @@ impl NativeWebRtcMesh {
             }),
             room: config.room,
             peer_id,
+            session_id: crate::session_auth::random_session_id(&format!(
+                "mesh:native:{}",
+                db.replica_id()
+            )),
+            session_auth: config.session_auth,
             relay_url: relay_url.clone(),
             rtc_configuration,
             closed: AtomicBool::new(false),
@@ -184,6 +194,9 @@ impl NativeWebRtcMesh {
             outgoing_watches: Mutex::new(BTreeMap::new()),
             incoming_watches: Mutex::new(BTreeMap::new()),
             recommendations: Mutex::new(BTreeMap::new()),
+            pending_auth_challenges: Mutex::new(BTreeMap::new()),
+            pending_auth_peers: Mutex::new(BTreeMap::new()),
+            verified_identities: Mutex::new(BTreeMap::new()),
         });
 
         let change_subscription = db.subscribe_changes();
@@ -438,53 +451,30 @@ async fn handle_mesh_signaling_message(
     }
 
     let room = state.room.clone();
-    let channel = format!("mesh:{room}");
     let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                let relay_url = peer.metadata.get("relay_url").cloned();
-                let connect_allowed = state
-                    .db
-                    .allow_peer_connection(&crate::ConnectHookContext {
-                        peer: peer.clone(),
-                        transport: HookTransport::Mesh,
-                        relay_url,
-                    })
-                    .into_result();
-                if connect_allowed.is_err() {
-                    state.router.forget_peer(&peer.peer_id);
-                    state.recommendations.lock().await.remove(&peer.peer_id);
+                maybe_send_mesh_auth_challenge_via_relay(state, &peer).await?;
+                if state.session_auth.require_authenticated_peers
+                    && verified_mesh_identity_for_peer(state, &peer.peer_id)
+                        .await
+                        .is_none()
+                {
                     continue;
                 }
-                store_peer_recommendations(
-                    state,
-                    vec![peer_recommendation_from_presence(&peer, &state.relay_url)],
-                )
-                .await;
-                let in_room = peer.topics.iter().any(|topic| topic == &channel)
-                    || peer
-                        .metadata
-                        .get("mesh_room")
-                        .is_some_and(|candidate| candidate == &room);
-                if in_room {
-                    let room_allowed = state
-                        .db
-                        .allow_room_join(&crate::RoomHookContext {
-                            peer_id: peer.peer_id.clone(),
-                            room: room.clone(),
-                            transport: HookTransport::Mesh,
-                            peer: Some(peer.clone()),
-                        })
-                        .into_result();
-                    if room_allowed.is_err() {
-                        continue;
-                    }
+                let recommendation = peer_recommendation_from_presence(&peer, &state.relay_url);
+                let verified_identity =
+                    verified_mesh_identity_for_peer(state, &recommendation.peer.peer_id).await;
+                let (_, peer_to_join) =
+                    accept_mesh_recommendation(state, recommendation, verified_identity.as_ref())
+                        .await?;
+                if let Some(peer_id) = peer_to_join {
                     handle_mesh_signal(
                         state,
                         MeshSignal::Join {
                             room: room.clone(),
-                            from: peer.peer_id,
+                            from: peer_id,
                         },
                     )
                     .await?;
@@ -501,58 +491,48 @@ async fn handle_mesh_signaling_message(
                 handle_mesh_signal(state, signal).await?;
             }
             RoutePayload::PeerExchange { peers } => {
-                let mut accepted = Vec::new();
                 for recommendation in peers {
-                    let relay_url = recommendation.relay_urls.first().cloned();
-                    let connect_allowed = state
-                        .db
-                        .allow_peer_connection(&crate::ConnectHookContext {
-                            peer: recommendation.peer.clone(),
-                            transport: HookTransport::Mesh,
-                            relay_url,
-                        })
-                        .into_result();
-                    if connect_allowed.is_err() {
-                        state.router.forget_peer(&recommendation.peer.peer_id);
-                        state
-                            .recommendations
-                            .lock()
+                    maybe_send_mesh_auth_challenge_via_relay(state, &recommendation.peer).await?;
+                    if state.session_auth.require_authenticated_peers
+                        && verified_mesh_identity_for_peer(state, &recommendation.peer.peer_id)
                             .await
-                            .remove(&recommendation.peer.peer_id);
+                            .is_none()
+                    {
                         continue;
                     }
-                    accepted.push(recommendation.clone());
-                    let peer = recommendation.peer;
-                    let in_room = peer.topics.iter().any(|topic| topic == &channel)
-                        || peer
-                            .metadata
-                            .get("mesh_room")
-                            .is_some_and(|candidate| candidate == &room);
-                    if in_room {
-                        let room_allowed = state
-                            .db
-                            .allow_room_join(&crate::RoomHookContext {
-                                peer_id: peer.peer_id.clone(),
-                                room: room.clone(),
-                                transport: HookTransport::Mesh,
-                                peer: Some(peer.clone()),
-                            })
-                            .into_result();
-                        if room_allowed.is_err() {
-                            continue;
-                        }
+                    let verified_identity =
+                        verified_mesh_identity_for_peer(state, &recommendation.peer.peer_id).await;
+                    let (_, peer_to_join) = accept_mesh_recommendation(
+                        state,
+                        recommendation,
+                        verified_identity.as_ref(),
+                    )
+                    .await?;
+                    if let Some(peer_id) = peer_to_join {
                         handle_mesh_signal(
                             state,
                             MeshSignal::Join {
                                 room: room.clone(),
-                                from: peer.peer_id,
+                                from: peer_id,
                             },
                         )
                         .await?;
                     }
                 }
-                if !accepted.is_empty() {
-                    store_peer_recommendations(state, accepted).await;
+            }
+            RoutePayload::AuthChallenge { challenge } => {
+                handle_mesh_auth_challenge_via_relay(state, challenge).await?;
+            }
+            RoutePayload::AuthResponse { response } => {
+                if let Some(peer_id) = handle_mesh_auth_response(state, response).await? {
+                    handle_mesh_signal(
+                        state,
+                        MeshSignal::Join {
+                            room: room.clone(),
+                            from: peer_id,
+                        },
+                    )
+                    .await?;
                 }
             }
             RoutePayload::Batch { items } => {
@@ -566,6 +546,270 @@ async fn handle_mesh_signaling_message(
     Ok(())
 }
 
+async fn verified_mesh_identity_for_peer(
+    state: &Arc<NativeWebRtcMeshState>,
+    peer_id: &str,
+) -> Option<VerifiedIdentity> {
+    state.verified_identities.lock().await.get(peer_id).cloned()
+}
+
+async fn remove_mesh_peer_identity_state(state: &Arc<NativeWebRtcMeshState>, peer_id: &str) {
+    state.router.forget_peer(peer_id);
+    state.recommendations.lock().await.remove(peer_id);
+    state.verified_identities.lock().await.remove(peer_id);
+}
+
+async fn accept_mesh_recommendation(
+    state: &Arc<NativeWebRtcMeshState>,
+    recommendation: PeerRecommendation,
+    verified_identity: Option<&VerifiedIdentity>,
+) -> Result<(bool, Option<String>)> {
+    let relay_url = recommendation.relay_urls.first().cloned();
+    let connect_allowed = state
+        .db
+        .allow_peer_connection(&crate::ConnectHookContext {
+            peer: recommendation.peer.clone(),
+            transport: HookTransport::Mesh,
+            relay_url,
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if connect_allowed.is_err() {
+        remove_mesh_peer_identity_state(state, &recommendation.peer.peer_id).await;
+        return Ok((false, None));
+    }
+
+    let peer = recommendation.peer.clone();
+    store_peer_recommendations(state, vec![recommendation]).await;
+
+    let in_room = peer
+        .topics
+        .iter()
+        .any(|topic| topic == &format!("mesh:{}", state.room))
+        || peer
+            .metadata
+            .get("mesh_room")
+            .is_some_and(|candidate| candidate == &state.room);
+    if !in_room {
+        return Ok((true, None));
+    }
+
+    let room_allowed = state
+        .db
+        .allow_room_join(&crate::RoomHookContext {
+            peer_id: peer.peer_id.clone(),
+            room: state.room.clone(),
+            transport: HookTransport::Mesh,
+            peer: Some(peer.clone()),
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if room_allowed.is_err() {
+        return Ok((true, None));
+    }
+    Ok((true, Some(peer.peer_id)))
+}
+
+async fn maybe_send_mesh_auth_challenge_via_relay(
+    state: &Arc<NativeWebRtcMeshState>,
+    peer: &crate::PeerPresence,
+) -> Result<()> {
+    if peer.peer_id == state.router.peer_id()
+        || verified_mesh_identity_for_peer(state, &peer.peer_id)
+            .await
+            .is_some()
+    {
+        return Ok(());
+    }
+    let Some(identity) = peer.identity.as_ref() else {
+        if !state.session_auth.allow_unauthenticated_presence {
+            remove_mesh_peer_identity_state(state, &peer.peer_id).await;
+        }
+        return Ok(());
+    };
+
+    #[cfg(feature = "crypto")]
+    {
+        let challenge = crate::session_auth::create_auth_challenge(
+            state.router.peer_id(),
+            &state.db.replica_id(),
+            &state.session_id,
+            &peer.peer_id,
+            &peer.replica_id,
+            identity,
+            "mesh",
+            &state.session_auth,
+        );
+        let route = state
+            .router
+            .auth_challenge(challenge.clone(), RouteTarget::Peer(peer.peer_id.clone()));
+        send_route(state, &route).await?;
+        state
+            .pending_auth_challenges
+            .lock()
+            .await
+            .insert(challenge.challenge_id.clone(), challenge.clone());
+        state
+            .pending_auth_peers
+            .lock()
+            .await
+            .insert(challenge.challenge_id.clone(), peer.clone());
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    {
+        let _ = identity;
+    }
+
+    Ok(())
+}
+
+async fn maybe_send_mesh_auth_challenge_to_peer(
+    state: &Arc<NativeWebRtcMeshState>,
+    remote_peer: &str,
+    peer: &crate::PeerPresence,
+) -> Result<()> {
+    if peer.peer_id == state.router.peer_id()
+        || verified_mesh_identity_for_peer(state, &peer.peer_id)
+            .await
+            .is_some()
+    {
+        return Ok(());
+    }
+    let Some(identity) = peer.identity.as_ref() else {
+        if !state.session_auth.allow_unauthenticated_presence {
+            remove_mesh_peer_identity_state(state, &peer.peer_id).await;
+        }
+        return Ok(());
+    };
+
+    #[cfg(feature = "crypto")]
+    {
+        let challenge = crate::session_auth::create_auth_challenge(
+            state.router.peer_id(),
+            &state.db.replica_id(),
+            &state.session_id,
+            &peer.peer_id,
+            &peer.replica_id,
+            identity,
+            "mesh",
+            &state.session_auth,
+        );
+        let route = state
+            .router
+            .auth_challenge(challenge.clone(), RouteTarget::Peer(peer.peer_id.clone()));
+        send_mesh_route_to_peer(state, remote_peer, &route).await?;
+        state
+            .pending_auth_challenges
+            .lock()
+            .await
+            .insert(challenge.challenge_id.clone(), challenge.clone());
+        state
+            .pending_auth_peers
+            .lock()
+            .await
+            .insert(challenge.challenge_id.clone(), peer.clone());
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    {
+        let _ = identity;
+    }
+
+    Ok(())
+}
+
+async fn handle_mesh_auth_challenge_via_relay(
+    state: &Arc<NativeWebRtcMeshState>,
+    challenge: crate::AuthChallenge,
+) -> Result<()> {
+    if challenge.target_peer_id != state.router.peer_id() {
+        return Ok(());
+    }
+    let Some(response) = state.db.sign_session_auth_response(
+        &challenge,
+        state.router.peer_id(),
+        &state.session_id,
+        &state.session_auth,
+    )?
+    else {
+        return Ok(());
+    };
+    let route = state
+        .router
+        .auth_response(response, RouteTarget::Peer(challenge.issuer_peer_id));
+    send_route(state, &route).await
+}
+
+async fn handle_mesh_auth_challenge_to_peer(
+    state: &Arc<NativeWebRtcMeshState>,
+    remote_peer: &str,
+    challenge: crate::AuthChallenge,
+) -> Result<()> {
+    if challenge.target_peer_id != state.router.peer_id() {
+        return Ok(());
+    }
+    let Some(response) = state.db.sign_session_auth_response(
+        &challenge,
+        state.router.peer_id(),
+        &state.session_id,
+        &state.session_auth,
+    )?
+    else {
+        return Ok(());
+    };
+    let route = state
+        .router
+        .auth_response(response, RouteTarget::Peer(challenge.issuer_peer_id));
+    send_mesh_route_to_peer(state, remote_peer, &route).await
+}
+
+async fn handle_mesh_auth_response(
+    state: &Arc<NativeWebRtcMeshState>,
+    response: crate::AuthResponse,
+) -> Result<Option<String>> {
+    let Some(challenge) = state
+        .pending_auth_challenges
+        .lock()
+        .await
+        .remove(&response.challenge_id)
+    else {
+        return Ok(None);
+    };
+    let peer = state
+        .pending_auth_peers
+        .lock()
+        .await
+        .remove(&response.challenge_id)
+        .unwrap_or_else(|| crate::PeerPresence {
+            peer_id: response.responder_peer_id.clone(),
+            replica_id: response.responder_replica_id.clone(),
+            transport: challenge.transport.clone(),
+            identity: Some(response.responder_identity.clone()),
+            capabilities: Vec::new(),
+            topics: Vec::new(),
+            metadata: BTreeMap::new(),
+        });
+    let verified =
+        crate::session_auth::verify_auth_response(&challenge, &response, &state.session_auth)?;
+    state
+        .verified_identities
+        .lock()
+        .await
+        .insert(verified.peer_id.clone(), verified.clone());
+    let recommendation = peer_recommendation_from_presence(&peer, &state.relay_url);
+    let (accepted, peer_to_join) =
+        accept_mesh_recommendation(state, recommendation, Some(&verified)).await?;
+    if !accepted {
+        state
+            .verified_identities
+            .lock()
+            .await
+            .remove(&verified.peer_id);
+    }
+    Ok(peer_to_join)
+}
+
 async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSignal) -> Result<()> {
     let room = state.room.clone();
     let peer_id = state.peer_id.clone();
@@ -577,6 +821,10 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
             if join_room != room || from == peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer(state, &from).await;
+            if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                return Ok(());
+            }
             if state
                 .db
                 .allow_room_join(&crate::RoomHookContext {
@@ -584,6 +832,7 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
                     room: join_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -624,6 +873,10 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
             if offer_room != room || to != peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer(state, &from).await;
+            if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                return Ok(());
+            }
             if state
                 .db
                 .allow_room_join(&crate::RoomHookContext {
@@ -631,6 +884,7 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
                     room: offer_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -648,6 +902,10 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
             if answer_room != room || to != peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer(state, &from).await;
+            if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                return Ok(());
+            }
             if state
                 .db
                 .allow_room_join(&crate::RoomHookContext {
@@ -655,6 +913,7 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
                     room: answer_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -674,6 +933,10 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
             if ice_room != room || to != peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer(state, &from).await;
+            if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                return Ok(());
+            }
             if state
                 .db
                 .allow_room_join(&crate::RoomHookContext {
@@ -681,6 +944,7 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
                     room: ice_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -696,6 +960,10 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
             if leave_room != room || from == peer_id {
                 return Ok(());
             }
+            let verified_identity = verified_mesh_identity_for_peer(state, &from).await;
+            if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                return Ok(());
+            }
             if state
                 .db
                 .allow_room_join(&crate::RoomHookContext {
@@ -703,6 +971,7 @@ async fn handle_mesh_signal(state: &Arc<NativeWebRtcMeshState>, signal: MeshSign
                     room: leave_room.clone(),
                     transport: HookTransport::Mesh,
                     peer: None,
+                    verified_identity,
                 })
                 .into_result()
                 .is_err()
@@ -1036,13 +1305,34 @@ async fn handle_mesh_route_message(
     let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
-            RoutePayload::Presence { .. } | RoutePayload::Signal { .. } => {}
+            RoutePayload::Presence { peer } => {
+                maybe_send_mesh_auth_challenge_to_peer(state, remote_peer, &peer).await?;
+                if state.session_auth.require_authenticated_peers
+                    && verified_mesh_identity_for_peer(state, &peer.peer_id)
+                        .await
+                        .is_none()
+                {
+                    continue;
+                }
+                let recommendation = peer_recommendation_from_presence(&peer, &state.relay_url);
+                let verified_identity =
+                    verified_mesh_identity_for_peer(state, &recommendation.peer.peer_id).await;
+                let _ =
+                    accept_mesh_recommendation(state, recommendation, verified_identity.as_ref())
+                        .await?;
+            }
+            RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
+                let verified_identity = verified_mesh_identity_for_peer(state, remote_peer).await;
+                if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                    continue;
+                }
                 match state.db.serve_pull_request_for_peer(
                     remote_peer,
                     HookTransport::Mesh,
                     &format!("snapshot:{remote_peer}"),
                     &crate::PullRequestKind::Snapshot { root: root.clone() },
+                    verified_identity.as_ref(),
                 )? {
                     crate::HookDecision::Allow {
                         value: crate::RemoteResult::Snapshot { snapshot },
@@ -1062,35 +1352,46 @@ async fn handle_mesh_route_message(
                 state.db.load_snapshot(snapshot)?;
             }
             RoutePayload::Sync { encoding, payload } => {
+                if state.session_auth.require_authenticated_peers
+                    && verified_mesh_identity_for_peer(state, remote_peer)
+                        .await
+                        .is_none()
+                {
+                    continue;
+                }
                 let frame = decode_sync_payload(&state.db, &encoding, payload)?;
                 handle_mesh_sync_frame(state, remote_peer, frame).await?;
             }
             RoutePayload::PeerExchange { peers } => {
-                let mut accepted = Vec::new();
                 for recommendation in peers {
-                    let relay_url = recommendation.relay_urls.first().cloned();
-                    if state
-                        .db
-                        .allow_peer_connection(&crate::ConnectHookContext {
-                            peer: recommendation.peer.clone(),
-                            transport: HookTransport::Mesh,
-                            relay_url,
-                        })
-                        .into_result()
-                        .is_ok()
-                    {
-                        accepted.push(recommendation);
-                    } else {
-                        state
-                            .recommendations
-                            .lock()
+                    maybe_send_mesh_auth_challenge_to_peer(
+                        state,
+                        remote_peer,
+                        &recommendation.peer,
+                    )
+                    .await?;
+                    if state.session_auth.require_authenticated_peers
+                        && verified_mesh_identity_for_peer(state, &recommendation.peer.peer_id)
                             .await
-                            .remove(&recommendation.peer.peer_id);
+                            .is_none()
+                    {
+                        continue;
                     }
+                    let verified_identity =
+                        verified_mesh_identity_for_peer(state, &recommendation.peer.peer_id).await;
+                    let _ = accept_mesh_recommendation(
+                        state,
+                        recommendation,
+                        verified_identity.as_ref(),
+                    )
+                    .await?;
                 }
-                if !accepted.is_empty() {
-                    store_peer_recommendations(state, accepted).await;
-                }
+            }
+            RoutePayload::AuthChallenge { challenge } => {
+                handle_mesh_auth_challenge_to_peer(state, remote_peer, challenge).await?;
+            }
+            RoutePayload::AuthResponse { response } => {
+                let _ = handle_mesh_auth_response(state, response).await?;
             }
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {
@@ -1120,6 +1421,13 @@ async fn handle_mesh_sync_frame(
             message_id,
             ops,
         } => {
+            if state.session_auth.require_authenticated_peers
+                && verified_mesh_identity_for_peer(state, remote_peer)
+                    .await
+                    .is_none()
+            {
+                return Ok(());
+            }
             let applied = state.db.apply_sync_envelope(SyncEnvelope { from, ops })?;
             let ack = SyncFrame::Ack {
                 from: state.db.replica_id(),
@@ -1255,6 +1563,16 @@ async fn handle_mesh_watch_request(
         WatchRequestKind::Subscribe {
             request: incoming_request_kind,
         } => {
+            let verified_identity = verified_mesh_identity_for_peer(state, remote_peer).await;
+            if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                let route = state.router.wrap_watch_event(
+                    error_watch_event(&request.watch_id, 0, true, "peer is not authenticated"),
+                    RouteTarget::Peer(remote_peer.to_owned()),
+                    None,
+                );
+                send_mesh_route_to_peer(state, remote_peer, &route).await?;
+                return Ok(());
+            }
             let request_kind = match state
                 .db
                 .authorize_watch_request_for_peer(
@@ -1262,6 +1580,7 @@ async fn handle_mesh_watch_request(
                     HookTransport::Mesh,
                     &request.watch_id,
                     &incoming_request_kind,
+                    verified_identity.as_ref(),
                 )
                 .into_result()
             {
@@ -1409,12 +1728,29 @@ async fn emit_single_incoming_mesh_watch_update(
     let Some(watch) = state.incoming_watches.lock().await.get(watch_id).cloned() else {
         return Ok(false);
     };
+    let verified_identity = verified_mesh_identity_for_peer(state, &watch.target_peer_id).await;
+    if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+        let route = state.router.wrap_watch_event(
+            error_watch_event(
+                watch_id,
+                watch.next_sequence,
+                initial,
+                "peer is not authenticated",
+            ),
+            RouteTarget::Peer(watch.target_peer_id.clone()),
+            None,
+        );
+        send_mesh_route_to_peer(state, &watch.target_peer_id, &route).await?;
+        state.incoming_watches.lock().await.remove(watch_id);
+        return Ok(true);
+    }
     let decision = state.db.serve_watch_result_for_peer(
         &watch.target_peer_id,
         HookTransport::Mesh,
         watch_id,
         &watch.request_kind,
         initial,
+        verified_identity.as_ref(),
     )?;
     let (result, content_hash, denied_message) = match decision {
         crate::HookDecision::Allow { value } => {
@@ -1800,6 +2136,7 @@ async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
             .insert("mesh_room".to_owned(), state.room.clone());
         peer.metadata
             .insert("signaling".to_owned(), "relay".to_owned());
+        peer.identity = state.db.session_presence_identity(&state.session_id);
     }
     send_route(state, &route).await
 }

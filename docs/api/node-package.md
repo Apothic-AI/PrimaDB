@@ -31,6 +31,80 @@ export type JsonValue = JsonPrimitive | JsonValue[] | {
 };
 ```
 
+#### `PresenceIdentity`
+
+Kind: interface
+
+```ts
+export interface PresenceIdentity {
+    publicKey: string;
+    alias?: string | null;
+    keyScheme?: string;
+    sessionId: string;
+    claims?: Record<string, string>;
+    issuedAtMillis?: number;
+    expiresAtMillis?: number | null;
+}
+```
+
+#### `IdentityTrust`
+
+Kind: type alias
+
+```ts
+export type IdentityTrust = "verified" | "trusted_public_key" | "trusted_alias";
+```
+
+#### `VerifiedIdentity`
+
+Kind: interface
+
+```ts
+export interface VerifiedIdentity {
+    publicKey: string;
+    alias?: string | null;
+    peerId: string;
+    replicaId: string;
+    transport: string;
+    sessionId: string;
+    claims?: Record<string, string>;
+    issuedAtMillis: number;
+    expiresAtMillis?: number | null;
+    trust: IdentityTrust;
+}
+```
+
+#### `IdentityKeyPair`
+
+Kind: interface
+
+```ts
+export interface IdentityKeyPair {
+    publicKey: string;
+    secretKey: string;
+}
+```
+
+#### `UserGrant`
+
+Kind: interface
+
+```ts
+export interface UserGrant {
+    root: string;
+    read?: boolean;
+    write?: boolean;
+}
+```
+
+#### `generateIdentity`
+
+Kind: function
+
+```ts
+export declare function generateIdentity(): IdentityKeyPair;
+```
+
 #### `ConnectHookContext`
 
 Kind: interface
@@ -41,12 +115,14 @@ export interface ConnectHookContext {
         peerId: string;
         replicaId: string;
         transport: string;
+        identity?: PresenceIdentity | null;
         capabilities?: string[];
         topics?: string[];
         metadata?: Record<string, string>;
     };
     transport: "relay" | "mesh";
     relayUrl?: string | null;
+    verifiedIdentity?: VerifiedIdentity | null;
 }
 ```
 
@@ -60,6 +136,22 @@ export interface RoomHookContext {
     room: string;
     transport: "relay" | "mesh";
     peer?: ConnectHookContext["peer"] | null;
+    verifiedIdentity?: VerifiedIdentity | null;
+}
+```
+
+#### `SessionAuthConfig`
+
+Kind: interface
+
+```ts
+export interface SessionAuthConfig {
+    requireAuthenticatedPeers?: boolean;
+    trustedPublicKeys?: string[];
+    trustedAliases?: string[];
+    challengeTimeoutMs?: number;
+    sessionTtlMs?: number;
+    allowUnauthenticatedPresence?: boolean;
 }
 ```
 
@@ -71,6 +163,7 @@ Kind: interface
 export interface RelayClientConfig {
     url: string;
     retryIntervalMs?: number;
+    sessionAuth?: SessionAuthConfig;
 }
 ```
 
@@ -115,6 +208,7 @@ export interface MeshConfig {
     relayUrl?: string | null;
     retryIntervalMs?: number;
     iceServers?: IceServerConfig[];
+    sessionAuth?: SessionAuthConfig;
 }
 ```
 
@@ -143,6 +237,30 @@ export interface DurableStorageBinding {
     incremental: boolean;
     loadedExisting: boolean;
     autoPersist: boolean;
+}
+```
+
+#### `BlobStorageConfig`
+
+Kind: type alias
+
+```ts
+export type BlobStorageConfig = {
+    kind: "memory";
+} | {
+    kind: "files";
+    directory: string;
+};
+```
+
+#### `BlobStorageBinding`
+
+Kind: interface
+
+```ts
+export interface BlobStorageBinding {
+    backend: string;
+    contentAddressed: boolean;
 }
 ```
 
@@ -558,6 +676,7 @@ export interface ServeRequestContext {
     requestId?: string | null;
     watchId?: string | null;
     request: PullRequestKind;
+    verifiedIdentity?: VerifiedIdentity | null;
 }
 ```
 
@@ -573,6 +692,7 @@ export interface ServeResultContext {
     watchId?: string | null;
     request: PullRequestKind;
     initial: boolean;
+    verifiedIdentity?: VerifiedIdentity | null;
 }
 ```
 
@@ -678,6 +798,10 @@ export declare class Primadb {
     applyEnvelope(envelope: JsonValue): number;
     applyOperationsJson(payload: string): number;
     openDurableStorage(config: DurableStorageConfig): DurableStorageBinding;
+    openBlobStorage(config: BlobStorageConfig): BlobStorageBinding;
+    registerUser(alias: string, publicKey: string, grants: UserGrant[]): void;
+    authenticateLocalUser(alias: string, secretKey: string, grants: UserGrant[]): void;
+    setRequireSignedSync(required: boolean): void;
     connectRelay(config: RelayClientConfig): Promise<WebSocketSync>;
     connectMesh(config: MeshConfig): Promise<WebRtcMesh>;
     setNetworkHooks(hooks: NetworkHooks): void;

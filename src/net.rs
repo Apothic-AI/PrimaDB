@@ -1,3 +1,4 @@
+use crate::SessionAuthConfig;
 use serde::{Deserialize, Serialize};
 
 fn default_retry_interval_ms() -> u64 {
@@ -62,6 +63,8 @@ pub struct RelayClientConfig {
     pub url: String,
     #[serde(default = "default_retry_interval_ms")]
     pub retry_interval_ms: u64,
+    #[serde(default, alias = "sessionAuth")]
+    pub session_auth: SessionAuthConfig,
 }
 
 impl RelayClientConfig {
@@ -69,6 +72,7 @@ impl RelayClientConfig {
         Self {
             url: url.into(),
             retry_interval_ms: default_retry_interval_ms(),
+            session_auth: SessionAuthConfig::default(),
         }
     }
 }
@@ -97,6 +101,8 @@ pub struct MeshConfig {
     pub retry_interval_ms: u64,
     #[serde(default, alias = "iceServers")]
     pub ice_servers: Vec<IceServerConfig>,
+    #[serde(default, alias = "sessionAuth")]
+    pub session_auth: SessionAuthConfig,
 }
 
 impl MeshConfig {
@@ -107,6 +113,7 @@ impl MeshConfig {
             relay_url: Some(relay_url.into()),
             retry_interval_ms: default_retry_interval_ms(),
             ice_servers: IceServerConfig::default_stun_servers(),
+            session_auth: SessionAuthConfig::default(),
         }
     }
 
@@ -117,6 +124,7 @@ impl MeshConfig {
             relay_url: None,
             retry_interval_ms: default_retry_interval_ms(),
             ice_servers: IceServerConfig::default_stun_servers(),
+            session_auth: SessionAuthConfig::default(),
         }
     }
 

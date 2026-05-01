@@ -7,6 +7,60 @@ This page covers the `primadb-python` package surface. It is generated directly 
 
 > Generated from `packages/primadb-python/python/primadb/__init__.pyi`.
 
+## `PresenceIdentity`
+
+Kind: class
+
+```py
+class PresenceIdentity(TypedDict, total=False):
+    publicKey: str
+    alias: Optional[str]
+    keyScheme: str
+    sessionId: str
+    claims: dict[str, str]
+    issuedAtMillis: int
+    expiresAtMillis: Optional[int]
+```
+
+## `VerifiedIdentity`
+
+Kind: class
+
+```py
+class VerifiedIdentity(TypedDict, total=False):
+    publicKey: str
+    alias: Optional[str]
+    peerId: str
+    replicaId: str
+    transport: str
+    sessionId: str
+    claims: dict[str, str]
+    issuedAtMillis: int
+    expiresAtMillis: Optional[int]
+    trust: str
+```
+
+## `IdentityKeyPair`
+
+Kind: class
+
+```py
+class IdentityKeyPair(TypedDict):
+    publicKey: str
+    secretKey: str
+```
+
+## `UserGrant`
+
+Kind: class
+
+```py
+class UserGrant(TypedDict, total=False):
+    root: str
+    read: bool
+    write: bool
+```
+
 ## `PeerHookContext`
 
 Kind: class
@@ -16,6 +70,7 @@ class PeerHookContext(TypedDict, total=False):
     peerId: str
     replicaId: str
     transport: str
+    identity: Optional[PresenceIdentity]
     capabilities: list[str]
     topics: list[str]
     metadata: dict[str, str]
@@ -30,6 +85,7 @@ class ConnectHookContext(TypedDict, total=False):
     peer: PeerHookContext
     transport: str
     relayUrl: Optional[str]
+    verifiedIdentity: Optional[VerifiedIdentity]
 ```
 
 ## `RoomHookContext`
@@ -42,6 +98,7 @@ class RoomHookContext(TypedDict, total=False):
     room: str
     transport: str
     peer: Optional[PeerHookContext]
+    verifiedIdentity: Optional[VerifiedIdentity]
 ```
 
 ## `ServeRequestContext`
@@ -55,6 +112,7 @@ class ServeRequestContext(TypedDict, total=False):
     requestId: Optional[str]
     watchId: Optional[str]
     request: Any
+    verifiedIdentity: Optional[VerifiedIdentity]
 ```
 
 ## `ServeResultContext`
@@ -69,6 +127,57 @@ class ServeResultContext(TypedDict, total=False):
     watchId: Optional[str]
     request: Any
     initial: bool
+    verifiedIdentity: Optional[VerifiedIdentity]
+```
+
+## `SessionAuthConfig`
+
+Kind: class
+
+```py
+class SessionAuthConfig(TypedDict, total=False):
+    requireAuthenticatedPeers: bool
+    trustedPublicKeys: list[str]
+    trustedAliases: list[str]
+    challengeTimeoutMs: int
+    sessionTtlMs: int
+    allowUnauthenticatedPresence: bool
+```
+
+## `RelayClientConfig`
+
+Kind: class
+
+```py
+class RelayClientConfig(TypedDict, total=False):
+    url: str
+    retryIntervalMs: int
+    sessionAuth: SessionAuthConfig
+```
+
+## `IceServerConfig`
+
+Kind: class
+
+```py
+class IceServerConfig(TypedDict, total=False):
+    urls: str | list[str]
+    username: Optional[str]
+    credential: Optional[str]
+```
+
+## `MeshConfig`
+
+Kind: class
+
+```py
+class MeshConfig(TypedDict, total=False):
+    room: str
+    signaling: str
+    relayUrl: Optional[str]
+    retryIntervalMs: int
+    iceServers: list[IceServerConfig]
+    sessionAuth: SessionAuthConfig
 ```
 
 ## `NetworkHooks`
@@ -113,10 +222,21 @@ class Primadb:
     def apply_operations_json(self, payload: str) -> int: ...
     def open_durable_storage(self, config: Any) -> Any: ...
     def open_blob_storage(self, config: Any) -> Any: ...
-    def connect_relay(self, config: Any) -> WebSocketSync: ...
-    def connect_mesh(self, config: Any) -> WebRtcMesh: ...
+    def register_user(self, alias: str, public_key: str, grants: list[UserGrant]) -> None: ...
+    def authenticate_local_user(self, alias: str, secret_key: str, grants: list[UserGrant]) -> None: ...
+    def set_require_signed_sync(self, required: bool) -> None: ...
+    def connect_relay(self, config: RelayClientConfig | dict[str, Any]) -> WebSocketSync: ...
+    def connect_mesh(self, config: MeshConfig | dict[str, Any]) -> WebRtcMesh: ...
     def set_network_hooks(self, hooks: NetworkHooks | dict[str, Any] | object | None) -> None: ...
     def clear_network_hooks(self) -> None: ...
+```
+
+## `generate_identity`
+
+Kind: function
+
+```py
+def generate_identity() -> IdentityKeyPair: ...
 ```
 
 ## `Scope`

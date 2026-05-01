@@ -5,7 +5,8 @@ use crate::{
     Operation, PeerRecommendation, Primadb, PrimadbError, RelayClientConfig, RemotePath,
     RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem,
     RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
-    WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
+    VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response,
+    error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
@@ -89,6 +90,8 @@ enum PullAccumulator {
 struct NativeWebSocketSyncState {
     db: Primadb,
     router: Router,
+    session_id: String,
+    session_auth: crate::SessionAuthConfig,
     closed: AtomicBool,
     connected: AtomicBool,
     next_message_seq: AtomicU64,
@@ -97,6 +100,9 @@ struct NativeWebSocketSyncState {
     outgoing_watches: Mutex<BTreeMap<String, OutgoingWatch>>,
     incoming_watches: Mutex<BTreeMap<String, IncomingWatch>>,
     recommendations: Mutex<BTreeMap<String, PeerRecommendation>>,
+    pending_auth_challenges: Mutex<BTreeMap<String, crate::AuthChallenge>>,
+    pending_auth_peers: Mutex<BTreeMap<String, crate::PeerPresence>>,
+    verified_identities: Mutex<BTreeMap<String, VerifiedIdentity>>,
     outbound: UnboundedSender<Message>,
 }
 
@@ -116,13 +122,28 @@ struct NativeWebSocketNodeFetchScheduler {
 impl NativeWebSocketSync {
     pub async fn connect_with_config(db: Primadb, config: RelayClientConfig) -> Result<Self> {
         let retry_interval = Duration::from_millis(config.retry_interval_ms.max(1));
-        Self::connect(db, config.url, retry_interval).await
+        Self::connect_with_session_auth(db, config.url, retry_interval, config.session_auth).await
     }
 
     pub async fn connect(
         db: Primadb,
         url: impl AsRef<str>,
         retry_interval: Duration,
+    ) -> Result<Self> {
+        Self::connect_with_session_auth(
+            db,
+            url,
+            retry_interval,
+            crate::SessionAuthConfig::default(),
+        )
+        .await
+    }
+
+    pub async fn connect_with_session_auth(
+        db: Primadb,
+        url: impl AsRef<str>,
+        retry_interval: Duration,
+        session_auth: crate::SessionAuthConfig,
     ) -> Result<Self> {
         let url = url.as_ref().to_owned();
         let (outbound, mut outbound_rx) = unbounded_channel::<Message>();
@@ -137,6 +158,11 @@ impl NativeWebSocketSync {
         let state = Arc::new(NativeWebSocketSyncState {
             db: db.clone(),
             router,
+            session_id: crate::session_auth::random_session_id(&format!(
+                "native:{}",
+                db.replica_id()
+            )),
+            session_auth,
             closed: AtomicBool::new(false),
             connected: AtomicBool::new(false),
             next_message_seq: AtomicU64::new(0),
@@ -145,6 +171,9 @@ impl NativeWebSocketSync {
             outgoing_watches: Mutex::new(BTreeMap::new()),
             incoming_watches: Mutex::new(BTreeMap::new()),
             recommendations: Mutex::new(BTreeMap::new()),
+            pending_auth_challenges: Mutex::new(BTreeMap::new()),
+            pending_auth_peers: Mutex::new(BTreeMap::new()),
+            verified_identities: Mutex::new(BTreeMap::new()),
             outbound,
         });
 
@@ -720,32 +749,27 @@ async fn handle_route_payload(
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
-                let relay_url = peer.metadata.get("relay_url").cloned();
-                let connect_allowed = state
-                    .db
-                    .allow_peer_connection(&crate::ConnectHookContext {
-                        peer: peer.clone(),
-                        transport: HookTransport::Relay,
-                        relay_url,
-                    })
-                    .into_result();
-                if let Err(_) = connect_allowed {
-                    state.router.forget_peer(&peer.peer_id);
-                    state.recommendations.lock().unwrap().remove(&peer.peer_id);
+                maybe_send_relay_auth_challenge(state, &peer)?;
+                if state.session_auth.require_authenticated_peers
+                    && verified_identity_for_peer(state, &peer.peer_id).is_none()
+                {
                     continue;
                 }
-                let recommendation = peer_recommendation_from_presence(&peer);
-                let peer_id = recommendation.peer.peer_id.clone();
-                store_peer_recommendations(state, vec![recommendation]);
-                let _ = replay_outgoing_watches_for_peer(state, &peer_id);
+                let verified_identity = verified_identity_for_peer(state, &peer.peer_id);
+                let _ = accept_relay_peer(state, peer, verified_identity.as_ref())?;
             }
             RoutePayload::Signal { .. } => {}
             RoutePayload::SnapshotRequest { root } => {
+                let verified_identity = verified_identity_for_peer(state, &from);
+                if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                    continue;
+                }
                 match state.db.serve_pull_request_for_peer(
                     &from,
                     HookTransport::Relay,
                     &format!("snapshot:{route_id}"),
                     &crate::PullRequestKind::Snapshot { root: root.clone() },
+                    verified_identity.as_ref(),
                 )? {
                     crate::HookDecision::Allow {
                         value: crate::RemoteResult::Snapshot { snapshot },
@@ -765,26 +789,44 @@ async fn handle_route_payload(
                 state.db.load_snapshot(snapshot)?;
             }
             RoutePayload::Sync { encoding, payload } => {
+                if state.session_auth.require_authenticated_peers
+                    && verified_identity_for_peer(state, &from).is_none()
+                {
+                    continue;
+                }
                 let frame = decode_sync_payload(&state.db, &encoding, payload)?;
                 handle_sync_frame(state, frame, Some(from.clone())).await?;
             }
             RoutePayload::PullRequest { request } => {
-                let items = match state.db.serve_pull_request_for_peer(
-                    &from,
-                    HookTransport::Relay,
-                    &request.request_id,
-                    &request.request,
-                )? {
-                    crate::HookDecision::Allow { value } => state
-                        .db
-                        .chunk_remote_result(&request.request_id, value)
-                        .into_iter()
-                        .map(|response| RouteBatchItem::PullResponse { response })
-                        .collect::<Vec<_>>(),
-                    crate::HookDecision::Deny { message } => {
-                        vec![RouteBatchItem::PullResponse {
-                            response: error_pull_response(&request.request_id, message),
-                        }]
+                let verified_identity = verified_identity_for_peer(state, &from);
+                let items = if state.session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
+                {
+                    vec![RouteBatchItem::PullResponse {
+                        response: error_pull_response(
+                            &request.request_id,
+                            "peer is not authenticated",
+                        ),
+                    }]
+                } else {
+                    match state.db.serve_pull_request_for_peer(
+                        &from,
+                        HookTransport::Relay,
+                        &request.request_id,
+                        &request.request,
+                        verified_identity.as_ref(),
+                    )? {
+                        crate::HookDecision::Allow { value } => state
+                            .db
+                            .chunk_remote_result(&request.request_id, value)
+                            .into_iter()
+                            .map(|response| RouteBatchItem::PullResponse { response })
+                            .collect::<Vec<_>>(),
+                        crate::HookDecision::Deny { message } => {
+                            vec![RouteBatchItem::PullResponse {
+                                response: error_pull_response(&request.request_id, message),
+                            }]
+                        }
                     }
                 };
                 for route in pack_batch_routes(
@@ -808,28 +850,26 @@ async fn handle_route_payload(
             }
             RoutePayload::PeerExchange { peers } => {
                 for recommendation in peers {
-                    let relay_url = recommendation.relay_urls.first().cloned();
-                    let connect_allowed = state
-                        .db
-                        .allow_peer_connection(&crate::ConnectHookContext {
-                            peer: recommendation.peer.clone(),
-                            transport: HookTransport::Relay,
-                            relay_url,
-                        })
-                        .into_result();
-                    if connect_allowed.is_err() {
-                        state.router.forget_peer(&recommendation.peer.peer_id);
-                        state
-                            .recommendations
-                            .lock()
-                            .unwrap()
-                            .remove(&recommendation.peer.peer_id);
+                    maybe_send_relay_auth_challenge(state, &recommendation.peer)?;
+                    if state.session_auth.require_authenticated_peers
+                        && verified_identity_for_peer(state, &recommendation.peer.peer_id).is_none()
+                    {
                         continue;
                     }
-                    let peer_id = recommendation.peer.peer_id.clone();
-                    store_peer_recommendations(state, vec![recommendation]);
-                    let _ = replay_outgoing_watches_for_peer(state, &peer_id);
+                    let verified_identity =
+                        verified_identity_for_peer(state, &recommendation.peer.peer_id);
+                    let _ = accept_relay_recommendation(
+                        state,
+                        recommendation,
+                        verified_identity.as_ref(),
+                    )?;
                 }
+            }
+            RoutePayload::AuthChallenge { challenge } => {
+                handle_relay_auth_challenge(state, challenge)?;
+            }
+            RoutePayload::AuthResponse { response } => {
+                handle_relay_auth_response(state, response)?;
             }
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {
@@ -837,6 +877,192 @@ async fn handle_route_payload(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn verified_identity_for_peer(
+    state: &Arc<NativeWebSocketSyncState>,
+    peer_id: &str,
+) -> Option<VerifiedIdentity> {
+    state
+        .verified_identities
+        .lock()
+        .unwrap()
+        .get(peer_id)
+        .cloned()
+}
+
+fn remove_relay_peer_state(state: &Arc<NativeWebSocketSyncState>, peer_id: &str) {
+    state.router.forget_peer(peer_id);
+    state.recommendations.lock().unwrap().remove(peer_id);
+    state.verified_identities.lock().unwrap().remove(peer_id);
+}
+
+fn accept_relay_peer(
+    state: &Arc<NativeWebSocketSyncState>,
+    peer: crate::PeerPresence,
+    verified_identity: Option<&VerifiedIdentity>,
+) -> Result<bool> {
+    let relay_url = peer.metadata.get("relay_url").cloned();
+    let connect_allowed = state
+        .db
+        .allow_peer_connection(&crate::ConnectHookContext {
+            peer: peer.clone(),
+            transport: HookTransport::Relay,
+            relay_url,
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if connect_allowed.is_err() {
+        remove_relay_peer_state(state, &peer.peer_id);
+        return Ok(false);
+    }
+    let recommendation = peer_recommendation_from_presence(&peer);
+    let peer_id = recommendation.peer.peer_id.clone();
+    store_peer_recommendations(state, vec![recommendation]);
+    let _ = replay_outgoing_watches_for_peer(state, &peer_id);
+    Ok(true)
+}
+
+fn accept_relay_recommendation(
+    state: &Arc<NativeWebSocketSyncState>,
+    recommendation: PeerRecommendation,
+    verified_identity: Option<&VerifiedIdentity>,
+) -> Result<bool> {
+    let relay_url = recommendation.relay_urls.first().cloned();
+    let connect_allowed = state
+        .db
+        .allow_peer_connection(&crate::ConnectHookContext {
+            peer: recommendation.peer.clone(),
+            transport: HookTransport::Relay,
+            relay_url,
+            verified_identity: verified_identity.cloned(),
+        })
+        .into_result();
+    if connect_allowed.is_err() {
+        remove_relay_peer_state(state, &recommendation.peer.peer_id);
+        return Ok(false);
+    }
+    let peer_id = recommendation.peer.peer_id.clone();
+    store_peer_recommendations(state, vec![recommendation]);
+    let _ = replay_outgoing_watches_for_peer(state, &peer_id);
+    Ok(true)
+}
+
+fn maybe_send_relay_auth_challenge(
+    state: &Arc<NativeWebSocketSyncState>,
+    peer: &crate::PeerPresence,
+) -> Result<()> {
+    if peer.peer_id == state.router.peer_id()
+        || verified_identity_for_peer(state, &peer.peer_id).is_some()
+    {
+        return Ok(());
+    }
+    let Some(identity) = peer.identity.as_ref() else {
+        if !state.session_auth.allow_unauthenticated_presence {
+            remove_relay_peer_state(state, &peer.peer_id);
+        }
+        return Ok(());
+    };
+
+    #[cfg(feature = "crypto")]
+    {
+        let challenge = crate::session_auth::create_auth_challenge(
+            state.router.peer_id(),
+            &state.db.replica_id(),
+            &state.session_id,
+            &peer.peer_id,
+            &peer.replica_id,
+            identity,
+            "relay",
+            &state.session_auth,
+        );
+        let route = state
+            .router
+            .auth_challenge(challenge.clone(), RouteTarget::Peer(peer.peer_id.clone()));
+        send_route(state, &route)?;
+        state
+            .pending_auth_challenges
+            .lock()
+            .unwrap()
+            .insert(challenge.challenge_id.clone(), challenge.clone());
+        state
+            .pending_auth_peers
+            .lock()
+            .unwrap()
+            .insert(challenge.challenge_id.clone(), peer.clone());
+    }
+
+    #[cfg(not(feature = "crypto"))]
+    {
+        let _ = identity;
+    }
+
+    Ok(())
+}
+
+fn handle_relay_auth_challenge(
+    state: &Arc<NativeWebSocketSyncState>,
+    challenge: crate::AuthChallenge,
+) -> Result<()> {
+    if challenge.target_peer_id != state.router.peer_id() {
+        return Ok(());
+    }
+    let Some(response) = state.db.sign_session_auth_response(
+        &challenge,
+        state.router.peer_id(),
+        &state.session_id,
+        &state.session_auth,
+    )?
+    else {
+        return Ok(());
+    };
+    let route = state
+        .router
+        .auth_response(response, RouteTarget::Peer(challenge.issuer_peer_id));
+    send_route(state, &route)
+}
+
+fn handle_relay_auth_response(
+    state: &Arc<NativeWebSocketSyncState>,
+    response: crate::AuthResponse,
+) -> Result<()> {
+    let Some(challenge) = state
+        .pending_auth_challenges
+        .lock()
+        .unwrap()
+        .remove(&response.challenge_id)
+    else {
+        return Ok(());
+    };
+    let peer = state
+        .pending_auth_peers
+        .lock()
+        .unwrap()
+        .remove(&response.challenge_id)
+        .unwrap_or_else(|| crate::PeerPresence {
+            peer_id: response.responder_peer_id.clone(),
+            replica_id: response.responder_replica_id.clone(),
+            transport: challenge.transport.clone(),
+            identity: Some(response.responder_identity.clone()),
+            capabilities: Vec::new(),
+            topics: Vec::new(),
+            metadata: BTreeMap::new(),
+        });
+    let verified =
+        crate::session_auth::verify_auth_response(&challenge, &response, &state.session_auth)?;
+    state
+        .verified_identities
+        .lock()
+        .unwrap()
+        .insert(verified.peer_id.clone(), verified.clone());
+    if !accept_relay_peer(state, peer, Some(&verified))? {
+        state
+            .verified_identities
+            .lock()
+            .unwrap()
+            .remove(&verified.peer_id);
     }
     Ok(())
 }
@@ -852,6 +1078,15 @@ async fn handle_sync_frame(
             message_id,
             ops,
         } => {
+            if state.session_auth.require_authenticated_peers {
+                let authenticated = reply_peer
+                    .as_ref()
+                    .and_then(|peer_id| verified_identity_for_peer(state, peer_id))
+                    .is_some();
+                if !authenticated {
+                    return Ok(());
+                }
+            }
             let applied = state.db.apply_sync_envelope(SyncEnvelope { from, ops })?;
             let ack = SyncFrame::Ack {
                 from: state.db.replica_id(),
@@ -974,6 +1209,7 @@ fn build_relay_presence_route(state: &Arc<NativeWebSocketSyncState>, url: &str) 
     );
     if let RoutePayload::Presence { peer } = &mut presence.payload {
         peer.metadata.insert("relay_url".to_owned(), url.to_owned());
+        peer.identity = state.db.session_presence_identity(&state.session_id);
     }
     presence
 }
@@ -1063,6 +1299,16 @@ fn handle_watch_request(
         WatchRequestKind::Subscribe {
             request: incoming_request_kind,
         } => {
+            let verified_identity = verified_identity_for_peer(state, from);
+            if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                let route = state.router.wrap_watch_event(
+                    error_watch_event(&request.watch_id, 0, true, "peer is not authenticated"),
+                    RouteTarget::Peer(from.to_owned()),
+                    None,
+                );
+                send_route(state, &route)?;
+                return Ok(());
+            }
             let request_kind = match state
                 .db
                 .authorize_watch_request_for_peer(
@@ -1070,6 +1316,7 @@ fn handle_watch_request(
                     HookTransport::Relay,
                     &request.watch_id,
                     &incoming_request_kind,
+                    verified_identity.as_ref(),
                 )
                 .into_result()
             {
@@ -1221,12 +1468,30 @@ fn emit_single_incoming_watch_update(
         return Ok(false);
     };
 
+    let verified_identity = verified_identity_for_peer(state, &watch.target_peer_id);
+    if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+        let route = state.router.wrap_watch_event(
+            error_watch_event(
+                watch_id,
+                watch.next_sequence,
+                initial,
+                "peer is not authenticated",
+            ),
+            RouteTarget::Peer(watch.target_peer_id.clone()),
+            None,
+        );
+        send_route(state, &route)?;
+        state.incoming_watches.lock().unwrap().remove(watch_id);
+        return Ok(true);
+    }
+
     let decision = state.db.serve_watch_result_for_peer(
         &watch.target_peer_id,
         HookTransport::Relay,
         watch_id,
         &watch.request_kind,
         initial,
+        verified_identity.as_ref(),
     )?;
     let (result, content_hash, denied_message) = match decision {
         crate::HookDecision::Allow { value } => {
