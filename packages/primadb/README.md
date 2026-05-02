@@ -25,6 +25,10 @@ The browser bindings also expose `db.scope(...)`, `db.transaction(...)`, and
 Relay sync clients can submit strict-scope transactions to an authority peer with
 `remoteTransaction(...)`.
 
+The browser package build includes node-attached scripting through `attachNodeScript(...)`,
+`nodeScripts(...)`, `removeNodeScript(...)`, and `executeNodeScripts(...)`. Script execution is
+explicit and capability-scoped; scripts do not receive encryption keys or host/network access.
+
 They also now expose typed network-boundary hook helpers through:
 
 - `setNetworkHooks(db, hooks)`
@@ -55,8 +59,8 @@ pnpm run build
 
 That build:
 
-- runs the repo's default WASM build with `crypto`
-- runs the repo's threaded WASM build with `crypto`
+- runs the repo's default WASM build with `crypto,scripting`
+- runs the repo's threaded WASM build with `crypto,scripting`
 - vendors the generated bindings into the package
 - compiles the TypeScript entrypoints into `dist/`
 

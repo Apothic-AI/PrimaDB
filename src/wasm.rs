@@ -13,6 +13,8 @@ use crate::{
     WatchRequestKind, build_storage_metadata, build_storage_transaction, encode_component,
     error_pull_response, error_watch_event,
 };
+#[cfg(feature = "scripting")]
+use crate::{NodeScript, ScriptExecutionOptions};
 use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -500,6 +502,67 @@ impl WasmPrimadb {
             &self
                 .inner
                 .apply_transaction_steps(steps)
+                .map_err(to_js_error)?,
+        )
+    }
+
+    #[cfg(feature = "scripting")]
+    #[wasm_bindgen(js_name = attachNodeScript)]
+    pub fn attach_node_script(
+        &self,
+        path: JsValue,
+        script: JsValue,
+    ) -> std::result::Result<(), JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let script: NodeScript = serde_wasm_bindgen::from_value(script)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.inner
+            .attach_node_script(path, script)
+            .map_err(to_js_error)
+    }
+
+    #[cfg(feature = "scripting")]
+    #[wasm_bindgen(js_name = removeNodeScript)]
+    pub fn remove_node_script(
+        &self,
+        path: JsValue,
+        script_id: String,
+    ) -> std::result::Result<(), JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.inner
+            .remove_node_script(&path, &script_id)
+            .map_err(to_js_error)
+    }
+
+    #[cfg(feature = "scripting")]
+    #[wasm_bindgen(js_name = nodeScripts)]
+    pub fn node_scripts(&self, path: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        to_js(&self.inner.node_scripts(&path).map_err(to_js_error)?)
+    }
+
+    #[cfg(feature = "scripting")]
+    #[wasm_bindgen(js_name = executeNodeScripts)]
+    pub fn execute_node_scripts(
+        &self,
+        path: JsValue,
+        options: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let options = if options.is_null() || options.is_undefined() {
+            ScriptExecutionOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?
+        };
+        to_js(
+            &self
+                .inner
+                .execute_node_scripts(path, options)
                 .map_err(to_js_error)?,
         )
     }

@@ -13,8 +13,8 @@ use primadb::{
     RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
     RoomHookContext, SecretBoxKey, ServeRequestContext, ServeResultContext, Scope as CoreScope,
-    ScopePolicy, Subscription as CoreSubscription, TransactionOptions, TransactionStep,
-    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    ScopePolicy, ScriptExecutionOptions, Subscription as CoreSubscription, TransactionOptions,
+    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
     derive_password_key as core_derive_password_key, parse_request_hook_json,
     parse_result_hook_json, parse_void_hook_json,
 };
@@ -467,6 +467,43 @@ impl Primadb {
         let config: BlobStorageConfig = from_json(config)?;
         let binding = self.inner.open_blob_storage(config).map_err(to_napi_error)?;
         Ok(blob_binding_to_json(binding))
+    }
+
+    #[napi(js_name = "attachNodeScript")]
+    pub fn attach_node_script(&self, path: JsonValue, script: JsonValue) -> Result<()> {
+        let path: RemotePath = from_json(path)?;
+        let script = from_json(script)?;
+        self.inner
+            .attach_node_script(path, script)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "removeNodeScript")]
+    pub fn remove_node_script(&self, path: JsonValue, script_id: String) -> Result<()> {
+        let path: RemotePath = from_json(path)?;
+        self.inner
+            .remove_node_script(&path, &script_id)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "nodeScripts")]
+    pub fn node_scripts(&self, path: JsonValue) -> Result<JsonValue> {
+        let path: RemotePath = from_json(path)?;
+        to_json(self.inner.node_scripts(&path).map_err(to_napi_error)?)
+    }
+
+    #[napi(js_name = "executeNodeScripts")]
+    pub fn execute_node_scripts(&self, path: JsonValue, options: Option<JsonValue>) -> Result<JsonValue> {
+        let path: RemotePath = from_json(path)?;
+        let options = options
+            .map(from_json::<ScriptExecutionOptions>)
+            .transpose()?
+            .unwrap_or_default();
+        to_json(
+            self.inner
+                .execute_node_scripts(path, options)
+                .map_err(to_napi_error)?,
+        )
     }
 
     #[napi(js_name = "registerUser")]

@@ -209,6 +209,17 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `RouterStats`
 - `RouteTarget`
 
+### `scripting`
+
+- `NodeScript`
+- `ScriptCapabilities`
+- `ScriptExecutionContext`
+- `ScriptExecutionOptions`
+- `ScriptExecutionResult`
+- `ScriptLimits`
+- `ScriptPathGrant`
+- `ScriptRuntime`
+
 ### `session_auth`
 
 - `AuthChallenge`

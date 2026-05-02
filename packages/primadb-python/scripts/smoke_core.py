@@ -46,6 +46,12 @@ def main() -> None:
         offline_ledger = db.scope("offline-ledger")
         subscription = notes.subscribe()
         payload = bytes([1, 2, 3, 5, 8, 13])
+        script_path = {"anchor": "notes", "segments": ["scripted"]}
+        script_capabilities = {
+            "read": [{"root": "notes", "recursive": True}],
+            "write": [{"root": "derived", "recursive": True}],
+            "transaction": [{"root": "derived", "recursive": True}],
+        }
 
         note_id = notes.set(
             {
@@ -54,6 +60,26 @@ def main() -> None:
                 "done": False,
             }
         )
+        db.chain("notes").field("scripted").put({"title": "Scripted note"})
+        db.attach_node_script(
+            script_path,
+            {
+                "id": "derive-title",
+                "source": """
+                    fn main(ctx) {
+                        let note = db_get("notes/scripted");
+                        db_put("derived/scripted", #{ title: note.title, source: ctx.path.display });
+                        return #{ title: note.title };
+                    }
+                """,
+                "capabilities": script_capabilities,
+            },
+        )
+        script_results = db.execute_node_scripts(
+            script_path,
+            {"capabilities": script_capabilities},
+        )
+        scripted = db.chain("derived").field("scripted").once()
         graph_alice.put({"name": "Alice", "friend": {"$link": "graph/bob"}})
         ledger.configure(
             {
@@ -167,6 +193,8 @@ def main() -> None:
                     "traversal": traversal,
                     "traversalInitial": traversal_initial,
                     "traversalUpdate": traversal_update,
+                    "scriptResults": script_results,
+                    "scripted": scripted,
                     "ledgerReport": ledger_report,
                     "provisionalReport": provisional_report,
                     "restoredLedgerBalance": restored_ledger_balance,
@@ -176,6 +204,9 @@ def main() -> None:
                     "restoredCount": len(results),
                     "python_package_core_confirmed": (
                         len(results) == 1
+                        and script_results[0]["report"]["status"] == "committed"
+                        and scripted["title"] == "Scripted note"
+                        and scripted["source"] == "notes/scripted"
                         and any(
                             entry["nodeId"] == "graph/bob" and entry["value"]["name"] == "Bob"
                             for entry in traversal["entries"]

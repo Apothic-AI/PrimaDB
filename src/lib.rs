@@ -25,6 +25,8 @@ mod parallel;
 mod persistence;
 mod query;
 mod router;
+#[cfg(feature = "scripting")]
+mod scripting;
 mod session_auth;
 mod snapshot;
 mod storage;
@@ -99,6 +101,11 @@ pub use query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QueryOrder, Quer
 pub use router::{
     PeerPresence, PeerRecommendation, RouteBatchItem, RouteDecision, RouteEnvelope, RoutePayload,
     RouteTarget, Router, RouterConfig, RouterStats,
+};
+#[cfg(feature = "scripting")]
+pub use scripting::{
+    NodeScript, ScriptCapabilities, ScriptExecutionContext, ScriptExecutionOptions,
+    ScriptExecutionResult, ScriptLimits, ScriptPathGrant, ScriptRuntime,
 };
 pub use session_auth::{
     AuthChallenge, AuthResponse, AuthTranscript, IdentityTrust, PresenceIdentity,

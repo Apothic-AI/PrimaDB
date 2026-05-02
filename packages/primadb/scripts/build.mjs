@@ -150,10 +150,14 @@ rmSync(vendorDir, { recursive: true, force: true });
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(resolve(distDir, "runtime"), { recursive: true });
 
-run("./build-wasm.sh", ["--out-dir", "packages/primadb/vendor/default", "--features", "crypto"], repoRoot);
+run(
+  "./build-wasm.sh",
+  ["--out-dir", "packages/primadb/vendor/default", "--features", "crypto,scripting"],
+  repoRoot,
+);
 run(
   "./build-wasm-threads.sh",
-  ["--out-dir", "packages/primadb/vendor/threads", "--features", "crypto"],
+  ["--out-dir", "packages/primadb/vendor/threads", "--features", "crypto,scripting"],
   repoRoot,
 );
 

@@ -35,12 +35,34 @@ try {
   const subscription = notes.subscribe();
   const title = `Node core ${Date.now()}`;
   const payload = Buffer.from([1, 2, 3, 5, 8, 13]);
+  const scriptPath = { anchor: "notes", segments: ["scripted"] };
+  const scriptCapabilities = {
+    read: [{ root: "notes", recursive: true }],
+    write: [{ root: "derived", recursive: true }],
+    transaction: [{ root: "derived", recursive: true }],
+  };
 
   notes.set({
     title,
     body: "native addon smoke",
     createdAt: new Date().toISOString(),
   });
+  db.chain("notes").field("scripted").put({ title: "Scripted note" });
+  db.attachNodeScript(scriptPath, {
+    id: "derive-title",
+    source: `
+      fn main(ctx) {
+        let note = db_get("notes/scripted");
+        db_put("derived/scripted", #{ title: note.title, source: ctx.path.display });
+        return #{ title: note.title };
+      }
+    `,
+    capabilities: scriptCapabilities,
+  });
+  const scriptResults = db.executeNodeScripts(scriptPath, {
+    capabilities: scriptCapabilities,
+  });
+  const scripted = db.chain("derived").field("scripted").once();
   graphAlice.put({
     name: "Alice",
     friend: { $link: "graph/bob" },
@@ -146,6 +168,8 @@ try {
         traversal,
         traversalInitial,
         traversalUpdate,
+        scriptResults,
+        scripted,
         ledgerReport,
         provisionalReport,
         restoredLedgerBalance,
@@ -154,6 +178,10 @@ try {
         node_package_core_confirmed:
           Array.isArray(entries) &&
           entries.length >= 1 &&
+          Array.isArray(scriptResults) &&
+          scriptResults[0]?.report?.status === "committed" &&
+          scripted?.title === "Scripted note" &&
+          scripted?.source === "notes/scripted" &&
           traversal?.entries?.some?.((entry) => entry.nodeId === "graph/bob" && entry.value?.name === "Bob") &&
           traversalUpdate?.value?.entries?.some?.(
             (entry) => entry.nodeId === "graph/bob" && entry.value?.name === "Robert",

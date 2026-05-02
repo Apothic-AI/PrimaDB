@@ -212,6 +212,76 @@ class MeshConfig(TypedDict, total=False):
     sessionAuth: SessionAuthConfig
 ```
 
+## `ScriptPathGrant`
+
+Kind: class
+
+```py
+class ScriptPathGrant(TypedDict, total=False):
+    root: str
+    segments: list[str]
+    recursive: bool
+```
+
+## `ScriptCapabilities`
+
+Kind: class
+
+```py
+class ScriptCapabilities(TypedDict, total=False):
+    read: list[ScriptPathGrant]
+    query: list[ScriptPathGrant]
+    traverse: list[ScriptPathGrant]
+    write: list[ScriptPathGrant]
+    transaction: list[ScriptPathGrant]
+```
+
+## `ScriptLimits`
+
+Kind: class
+
+```py
+class ScriptLimits(TypedDict, total=False):
+    maxOperations: int
+    maxCallLevels: int
+    maxVariables: int
+    maxFunctions: int
+    maxModules: int
+    maxExpressionDepth: int
+    maxStringBytes: int
+    maxArraySize: int
+    maxMapSize: int
+```
+
+## `NodeScript`
+
+Kind: class
+
+```py
+class NodeScript(TypedDict, total=False):
+    id: str
+    runtime: str
+    entry: str
+    source: str
+    sourceHash: Optional[str]
+    author: Optional[str]
+    signature: Optional[str]
+    capabilities: ScriptCapabilities
+    metadata: Any
+```
+
+## `ScriptExecutionOptions`
+
+Kind: class
+
+```py
+class ScriptExecutionOptions(TypedDict, total=False):
+    args: Any
+    capabilities: ScriptCapabilities
+    applyWrites: bool
+    limits: ScriptLimits
+```
+
 ## `NetworkHooks`
 
 Kind: class
@@ -254,6 +324,14 @@ class Primadb:
     def apply_operations_json(self, payload: str) -> int: ...
     def open_durable_storage(self, config: Any) -> Any: ...
     def open_blob_storage(self, config: Any) -> Any: ...
+    def attach_node_script(self, path: Any, script: NodeScript | dict[str, Any]) -> None: ...
+    def remove_node_script(self, path: Any, script_id: str) -> None: ...
+    def node_scripts(self, path: Any) -> list[NodeScript]: ...
+    def execute_node_scripts(
+        self,
+        path: Any,
+        options: Optional[ScriptExecutionOptions | dict[str, Any]] = ...,
+    ) -> Any: ...
     def register_user(self, alias: str, public_key: str, grants: list[UserGrant]) -> None: ...
     def authenticate_local_user(self, alias: str, secret_key: str, grants: list[UserGrant]) -> None: ...
     def set_require_signed_sync(self, required: bool) -> None: ...

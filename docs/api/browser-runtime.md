@@ -80,6 +80,10 @@ class Primadb {
   chain(root: string): Chain;
   scope(root: string): Scope;
   transaction(steps: any): any;
+  attachNodeScript(path: any, script: any): void;
+  removeNodeScript(path: any, script_id: string): void;
+  nodeScripts(path: any): any;
+  executeNodeScripts(path: any, options: any): any;
   snapshot(): any;
   snapshotForRoot(root: string | null): any;
   exportSnapshotJson(): string;

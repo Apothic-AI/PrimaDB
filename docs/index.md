@@ -28,6 +28,7 @@ bridges.
 - relay-routed replication and relay-signaled mesh replication
 - browser and native WebRTC mesh support
 - signed values, delegated write certificates, encrypted payloads, and SEA-style browser crypto
+- explicit node-attached scripting with local capability grants
 - bytes in the graph plus separate blob storage for larger binary payloads
 - browser, Node, and Python SDKs with package-local runnable examples
 
@@ -51,6 +52,7 @@ bridges.
 - [Query and watch](concepts/query-and-watch)
 - [Auth and privacy](concepts/auth-and-privacy)
 - [Storage and durability](concepts/storage)
+- [Scripting](concepts/scripting)
 
 ## Guides
 
@@ -59,6 +61,7 @@ bridges.
 - [Binary data, media, and MoQ](guides/binary-media-and-moq)
 - [Transactions and strict scopes](guides/transactions-and-strict-scopes)
 - [Query, watch, and traversal](guides/query-watch-and-traversal)
+- [Node-attached scripting](guides/scripting)
 
 ## Examples And Operations
 

@@ -21,6 +21,8 @@ rather than "how should I learn the product?"
 - `primadb-python`
 - Python MoQ helpers through the public Python stub
 - the Rust crate, with bundled rustdoc
+- node-attached scripting types and execution methods where the target includes the `scripting`
+  runtime
 
 The generated references include the current strict consistency surface: `Scope`, `ScopePolicy`,
 transaction step payloads, transaction reports, provisional proposals, and relay

@@ -94,6 +94,7 @@ sync.remote_transaction(
 - [Relay, full node, and mesh](../guides/relay-full-node-and-mesh)
 - [Transactions and strict scopes](../guides/transactions-and-strict-scopes)
 - [Binary data, media, and MoQ](../guides/binary-media-and-moq)
+- [Node-attached scripting](../guides/scripting)
 
 ## Package Examples
 

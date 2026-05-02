@@ -8,8 +8,9 @@ use primadb::{
     QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
     RoomHookContext, Scope as CoreScope, ScopePolicy, SecretBoxKey, ServeRequestContext,
-    ServeResultContext, Subscription as CoreSubscription, TransactionOptions, TransactionStep,
-    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    ServeResultContext, ScriptExecutionOptions, Subscription as CoreSubscription,
+    TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
+    TraversalSpec, UserGrant,
     derive_password_key as core_derive_password_key, parse_request_hook_json,
     parse_result_hook_json, parse_void_hook_json,
 };
@@ -428,6 +429,49 @@ impl Primadb {
         let config: BlobStorageConfig = from_py(config)?;
         let binding = self.inner.open_blob_storage(config).map_err(to_py_err)?;
         to_py(py, blob_binding_to_json(binding))
+    }
+
+    fn attach_node_script(
+        &self,
+        path: &Bound<'_, PyAny>,
+        script: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let path: RemotePath = from_py(path)?;
+        let script = from_py(script)?;
+        self.inner
+            .attach_node_script(path, script)
+            .map_err(to_py_err)
+    }
+
+    fn remove_node_script(&self, path: &Bound<'_, PyAny>, script_id: String) -> PyResult<()> {
+        let path: RemotePath = from_py(path)?;
+        self.inner
+            .remove_node_script(&path, &script_id)
+            .map_err(to_py_err)
+    }
+
+    fn node_scripts(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let path: RemotePath = from_py(path)?;
+        to_py(py, self.inner.node_scripts(&path).map_err(to_py_err)?)
+    }
+
+    fn execute_node_scripts(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        options: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let path: RemotePath = from_py(path)?;
+        let options = options
+            .map(from_py::<ScriptExecutionOptions>)
+            .transpose()?
+            .unwrap_or_default();
+        to_py(
+            py,
+            self.inner
+                .execute_node_scripts(path, options)
+                .map_err(to_py_err)?,
+        )
     }
 
     fn register_user(

@@ -9,7 +9,7 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-primadb = { path = "../..", features = ["crypto", "native-websocket", "native-webrtc"] }
+primadb = { path = "../..", features = ["crypto", "native-websocket", "native-webrtc", "scripting"] }
 pyo3 = { version = "0.28.3", features = ["abi3-py39", "extension-module"] }
 pythonize = "0.28.0"
 serde = { version = "1.0", features = ["derive"] }

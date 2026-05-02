@@ -634,6 +634,104 @@ export interface ProvisionalTransaction {
 }
 ```
 
+#### `ScriptRuntime`
+
+Kind: type alias
+
+```ts
+export type ScriptRuntime = "rhai";
+```
+
+#### `ScriptPathGrant`
+
+Kind: interface
+
+```ts
+export interface ScriptPathGrant {
+    root: string;
+    segments?: string[];
+    recursive?: boolean;
+}
+```
+
+#### `ScriptCapabilities`
+
+Kind: interface
+
+```ts
+export interface ScriptCapabilities {
+    read?: ScriptPathGrant[];
+    query?: ScriptPathGrant[];
+    traverse?: ScriptPathGrant[];
+    write?: ScriptPathGrant[];
+    transaction?: ScriptPathGrant[];
+}
+```
+
+#### `ScriptLimits`
+
+Kind: interface
+
+```ts
+export interface ScriptLimits {
+    maxOperations?: number;
+    maxCallLevels?: number;
+    maxVariables?: number;
+    maxFunctions?: number;
+    maxModules?: number;
+    maxExpressionDepth?: number;
+    maxStringBytes?: number;
+    maxArraySize?: number;
+    maxMapSize?: number;
+}
+```
+
+#### `NodeScript`
+
+Kind: interface
+
+```ts
+export interface NodeScript {
+    id: string;
+    runtime?: ScriptRuntime;
+    entry?: string;
+    source: string;
+    sourceHash?: string | null;
+    author?: string | null;
+    signature?: string | null;
+    capabilities?: ScriptCapabilities;
+    metadata?: JsonValue;
+}
+```
+
+#### `ScriptExecutionOptions`
+
+Kind: interface
+
+```ts
+export interface ScriptExecutionOptions {
+    args?: JsonValue;
+    capabilities?: ScriptCapabilities;
+    applyWrites?: boolean;
+    limits?: ScriptLimits;
+}
+```
+
+#### `ScriptExecutionResult`
+
+Kind: interface
+
+```ts
+export interface ScriptExecutionResult {
+    scriptId: string;
+    runtime: ScriptRuntime;
+    sourceHash: string;
+    value: JsonValue;
+    steps: TransactionStep[];
+    report?: TransactionReport | null;
+}
+```
+
 #### `PullRequestKind`
 
 Kind: type alias
@@ -842,6 +940,10 @@ export declare class Primadb {
     applyOperationsJson(payload: string): number;
     openDurableStorage(config: DurableStorageConfig): DurableStorageBinding;
     openBlobStorage(config: BlobStorageConfig): BlobStorageBinding;
+    attachNodeScript(path: RemotePath, script: NodeScript): void;
+    removeNodeScript(path: RemotePath, scriptId: string): void;
+    nodeScripts(path: RemotePath): NodeScript[];
+    executeNodeScripts(path: RemotePath, options?: ScriptExecutionOptions | null): ScriptExecutionResult[];
     registerUser(alias: string, publicKey: string, grants: UserGrant[]): void;
     authenticateLocalUser(alias: string, secretKey: string, grants: UserGrant[]): void;
     setRequireSignedSync(required: boolean): void;

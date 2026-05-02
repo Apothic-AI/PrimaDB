@@ -19,6 +19,7 @@ Current surface:
 - live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
 - authenticated relay/mesh session identity through `generateIdentity()`, `authenticateLocalUser(...)`, `sessionAuth` config, and `context.verifiedIdentity`
 - Argon2id password-derived secret-box keys through `derivePasswordKey(...)`, usable with `setSnapshotEncryptionKey(...)` and `setTransportEncryptionKey(...)`
+- node-attached scripting through `attachNodeScript(...)`, `nodeScripts(...)`, `removeNodeScript(...)`, and `executeNodeScripts(...)`
 - network-boundary hooks through `setNetworkHooks(...)` / `clearNetworkHooks()`
 - experimental MoQ sync helpers through `primadb-node/moq`
 
@@ -81,6 +82,26 @@ await db
   .chain("assets")
   .field("archive")
   .putBlob(Buffer.from([5, 6, 7, 8]), "application/octet-stream");
+
+const scriptPath = { anchor: "notes", segments: ["scripted"] };
+const scriptCapabilities = {
+  read: [{ root: "notes", recursive: true }],
+  write: [{ root: "derived", recursive: true }],
+  transaction: [{ root: "derived", recursive: true }],
+};
+db.chain("notes").field("scripted").put({ title: "Scripted note" });
+db.attachNodeScript(scriptPath, {
+  id: "derive-title",
+  source: `
+    fn main(ctx) {
+      let note = db_get("notes/scripted");
+      db_put("derived/scripted", #{ title: note.title, source: ctx.path.display });
+      return #{ title: note.title };
+    }
+  `,
+  capabilities: scriptCapabilities,
+});
+db.executeNodeScripts(scriptPath, { capabilities: scriptCapabilities });
 
 db.setNetworkHooks({
   onPull(context) {

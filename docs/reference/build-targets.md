@@ -12,12 +12,14 @@ different.
 - native storage
 - native relay
 - native mesh
+- optional `scripting` feature for node-attached script execution
 
 ## Default Browser WASM
 
 - stable browser-first target
 - no threaded WebAssembly requirements
 - best default for compatibility
+- package builds include the scripting runtime
 
 Build:
 
@@ -51,3 +53,4 @@ Packages the browser runtime:
 - `primadb-python`
 
 These are native bindings over the Rust runtime, not browser-WASM-in-Node/Python shims.
+Both native packages include the scripting runtime.

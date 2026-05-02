@@ -99,6 +99,7 @@ Use `primadb/threads` when you want the threaded browser runtime. It still inher
 - [Relay, full node, and mesh](../guides/relay-full-node-and-mesh)
 - [Query, watch, and traversal](../guides/query-watch-and-traversal)
 - [Binary data, media, and MoQ](../guides/binary-media-and-moq)
+- [Node-attached scripting](../guides/scripting)
 
 ## Package Examples
 
