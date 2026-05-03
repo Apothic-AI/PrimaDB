@@ -855,6 +855,15 @@ function generateApiDocs() {
       sourcePath: resolve(repoRoot, "src", "wasm.rs"),
       extraSections: [
         {
+          title: "Browser segment persistence",
+          body: [
+            "`enableIndexedDbSegmentPersistence(...)` and `enableOpfsSegmentPersistence(...)` both perform an initial full flush, then auto-persist later data changes as incremental segment transactions.",
+            "Segment persistence stores current graph state and storage transaction bookkeeping. It intentionally omits the transport pending-op queue, so high-churn opaque values are not duplicated into durable metadata on every save.",
+            "Use OPFS segments for large or high-churn browser-local datasets when `navigator.storage.getDirectory()` is available. IndexedDB segments remain the compatibility path.",
+            "`stats()` reports queued/coalesced events, successful and failed writes, full replacements, incremental transactions, entries written/deleted, estimated bytes written, and the last write error. `estimateStorage()` reports logical namespace size; OPFS also includes origin quota/usage when the browser exposes it.",
+          ].join("\n\n"),
+        },
+        {
           title: "Strict consistency and transactions",
           body: strictConsistencyApiBody.replaceAll(
             "`remoteTransaction(...)` / `remote_transaction(...)`",

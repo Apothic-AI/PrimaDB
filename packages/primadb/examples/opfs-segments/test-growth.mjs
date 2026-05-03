@@ -13,8 +13,7 @@ const EXAMPLES_ROOT =
 const PACKAGE_ROOT =
   process.env.PRIMADB_PACKAGE_ROOT ?? "/home/bitnom/Code/gunport/primadb/packages/primadb";
 const ROOT_URL =
-  process.env.PRIMADB_PACKAGE_INDEXEDDB_SEGMENTS_URL ??
-  "http://127.0.0.1:4181/indexeddb-segments/";
+  process.env.PRIMADB_PACKAGE_OPFS_SEGMENTS_URL ?? "http://127.0.0.1:4181/opfs-segments/";
 const SERVER_PORT = Number(process.env.PRIMADB_PACKAGE_PORT ?? "4181");
 const CHROME_PATH =
   process.env.PLAYWRIGHT_BROWSER_PATH ?? "/usr/bin/google-chrome-stable";
@@ -76,7 +75,7 @@ async function ensureBuild() {
     });
   }
 
-  if (existsSync(`${EXAMPLES_ROOT}/dist/indexeddb-segments/index.html`)) {
+  if (existsSync(`${EXAMPLES_ROOT}/dist/opfs-segments/index.html`)) {
     return;
   }
 
@@ -152,10 +151,9 @@ async function main() {
   try {
     const page = await browser.newPage();
     await page.goto(ROOT_URL, { waitUntil: "networkidle" });
-    await page.waitForFunction(
-      () => globalThis.indexedDbSegmentsRegression != null,
-      { timeout: 30_000 },
-    );
+    await page.waitForFunction(() => globalThis.opfsSegmentsRegression != null, {
+      timeout: 30_000,
+    });
 
     const namespace = `growth-${Date.now().toString(36)}`;
     const options = {
@@ -166,7 +164,7 @@ async function main() {
       checkpointSize: 64 * 1024,
     };
     const result = await page.evaluate((options) => {
-      return globalThis.indexedDbSegmentsRegression.run(options);
+      return globalThis.opfsSegmentsRegression.run(options);
     }, options);
 
     if (result.stats.fullReplacements !== 1) {
@@ -181,6 +179,23 @@ async function main() {
     }
     if (result.stats.failedWrites !== 0) {
       throw new Error(`expected zero failed writes, saw ${result.stats.failedWrites}`);
+    }
+    if (result.restoredLoaded !== true) {
+      throw new Error("expected OPFS restore to load existing segment state");
+    }
+    const expectedPrefix = `${options.iterations - 1}:`;
+    if (
+      typeof result.restoredCheckpointPrefix !== "string" ||
+      !result.restoredCheckpointPrefix.startsWith(expectedPrefix)
+    ) {
+      throw new Error(
+        `restored checkpoint mismatch: expected prefix ${expectedPrefix}, saw ${result.restoredCheckpointPrefix}`,
+      );
+    }
+    if (result.restoredCheckpointLength !== String(options.iterations - 1).length + 1 + options.checkpointSize) {
+      throw new Error(
+        `restored checkpoint length mismatch: saw ${result.restoredCheckpointLength}`,
+      );
     }
     if (result.stats.lastEntriesWritten > 12) {
       throw new Error(
@@ -202,7 +217,7 @@ async function main() {
       options.seedCount * options.seedSize + options.checkpointSize * 2
     ) {
       throw new Error(
-        `logical IndexedDB namespace estimate grew too large: ${result.estimate.estimatedBytes}`,
+        `logical OPFS namespace estimate grew too large: ${result.estimate.estimatedBytes}`,
       );
     }
 

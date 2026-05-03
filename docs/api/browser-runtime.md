@@ -115,6 +115,9 @@ class Primadb {
   saveIndexedDbSegments(database_name: string, store_name: string, namespace: string): Promise<void>;
   loadIndexedDbSegments(database_name: string, store_name: string, namespace: string): Promise<boolean>;
   enableIndexedDbSegmentPersistence(database_name: string, store_name: string, namespace: string, load_existing: boolean | null): Promise<IndexedDbSegmentPersistence>;
+  saveOpfsSegments(directory: string, namespace: string): Promise<void>;
+  loadOpfsSegments(directory: string, namespace: string): Promise<boolean>;
+  enableOpfsSegmentPersistence(directory: string, namespace: string, load_existing: boolean | null): Promise<OpfsSegmentPersistence>;
   openBlobStorage(config: any): any;
   enableIndexedDbBlobStorage(database_name: string, store_name: string, namespace: string): IndexedDbBlobStorage;
   connectWebSocket(url: string, retry_interval_ms: number | null): WebSocketSync;
@@ -211,18 +214,16 @@ class IndexedDbSegmentPersistence {
 }
 ```
 
-`stats()` exposes write diagnostics for browser segment persistence, including full replacement
-count, incremental transaction count, entries written/deleted, estimated bytes written, and the last
-write error if IndexedDB rejects a transaction. `estimateStorage()` measures the current logical
-namespace key count and approximate serialized bytes in IndexedDB.
+### `OpfsSegmentPersistence`
 
-`enableIndexedDbSegmentPersistence(...)` performs an initial full replacement flush, then
-auto-persists later changes as incremental segment transactions. Full replacement is still used for
-explicit `flush()` calls and full-refresh events.
-
-Browser segment persistence stores the current graph state and storage transaction bookkeeping. It
-does not persist the transport pending-op queue, so high-churn opaque values are not duplicated into
-durable metadata on every save.
+```ts
+class OpfsSegmentPersistence {
+  flush(): Promise<void>;
+  stats(): any;
+  estimateStorage(): Promise<any>;
+  close(): void;
+}
+```
 
 ### `IndexedDbBlobStorage`
 
@@ -283,6 +284,16 @@ class WebRtcMesh {
   close(): void;
 }
 ```
+
+## Browser segment persistence
+
+`enableIndexedDbSegmentPersistence(...)` and `enableOpfsSegmentPersistence(...)` both perform an initial full flush, then auto-persist later data changes as incremental segment transactions.
+
+Segment persistence stores current graph state and storage transaction bookkeeping. It intentionally omits the transport pending-op queue, so high-churn opaque values are not duplicated into durable metadata on every save.
+
+Use OPFS segments for large or high-churn browser-local datasets when `navigator.storage.getDirectory()` is available. IndexedDB segments remain the compatibility path.
+
+`stats()` reports queued/coalesced events, successful and failed writes, full replacements, incremental transactions, entries written/deleted, estimated bytes written, and the last write error. `estimateStorage()` reports logical namespace size; OPFS also includes origin quota/usage when the browser exposes it.
 
 ## Strict consistency and transactions
 

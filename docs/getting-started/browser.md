@@ -35,6 +35,16 @@ db.chain("users").field("alice").put({
 });
 ```
 
+For larger browser-local datasets, prefer OPFS segment storage when supported:
+
+```js
+await db.openDurableStorage({
+  kind: "opfs_segments",
+  directory: "primadb-app",
+  namespace: "main",
+});
+```
+
 ## Threaded Browser Flow
 
 Build:

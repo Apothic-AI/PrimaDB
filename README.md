@@ -863,6 +863,7 @@ Primadb supports:
 - snapshot file persistence with `use_file_persistence(...)`
 - browser `localStorage` persistence with `use_browser_storage(...)`
 - explicit IndexedDB persistence hooks in WASM
+- OPFS segment persistence in WASM for large, high-churn browser-local graph state
 - shared durable storage configuration via `open_durable_storage(...)` / `openDurableStorage(...)`
 - storage adapters via `attach_storage_adapter(...)`
 - a RADisk-style file adapter with `use_radisk_storage(...)`
