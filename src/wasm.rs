@@ -10,8 +10,7 @@ use crate::{
     RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
     SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
     TraversalSubscription as CoreTraversalSubscription, VerifiedIdentity, WatchEvent, WatchRequest,
-    WatchRequestKind, build_storage_metadata, build_storage_transaction, encode_component,
-    error_pull_response, error_watch_event,
+    WatchRequestKind, encode_component, error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use serde::Serialize;
@@ -92,6 +91,8 @@ pub struct WasmIndexedDbSegmentPersistence {
     database_name: String,
     store_name: String,
     namespace: String,
+    stats: Rc<RefCell<IndexedDbSegmentPersistenceStats>>,
+    external_hook_registered: bool,
     subscription: Option<ChangeSubscription>,
 }
 
@@ -115,6 +116,83 @@ struct WasmBlobStorageConfig {
     database_name: String,
     store_name: String,
     namespace: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexedDbSegmentPersistenceStats {
+    queued_events: u64,
+    coalesced_events: u64,
+    successful_writes: u64,
+    failed_writes: u64,
+    full_replacements: u64,
+    incremental_transactions: u64,
+    entries_written: u64,
+    entries_deleted: u64,
+    estimated_bytes_written: u64,
+    last_entries_written: u64,
+    last_entries_deleted: u64,
+    last_estimated_bytes_written: u64,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexedDbSegmentStorageEstimate {
+    key_count: u64,
+    estimated_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct IndexedDbSegmentWriteSummary {
+    entries_written: u64,
+    entries_deleted: u64,
+    estimated_bytes_written: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SegmentWriteKind {
+    FullReplacement,
+    Incremental,
+}
+
+fn record_segment_write_success(
+    stats: &Rc<RefCell<IndexedDbSegmentPersistenceStats>>,
+    summary: IndexedDbSegmentWriteSummary,
+    kind: SegmentWriteKind,
+) {
+    let mut stats = stats.borrow_mut();
+    stats.successful_writes = stats.successful_writes.saturating_add(1);
+    match kind {
+        SegmentWriteKind::FullReplacement => {
+            stats.full_replacements = stats.full_replacements.saturating_add(1);
+        }
+        SegmentWriteKind::Incremental => {
+            stats.incremental_transactions = stats.incremental_transactions.saturating_add(1);
+        }
+    }
+    stats.entries_written = stats
+        .entries_written
+        .saturating_add(summary.entries_written);
+    stats.entries_deleted = stats
+        .entries_deleted
+        .saturating_add(summary.entries_deleted);
+    stats.estimated_bytes_written = stats
+        .estimated_bytes_written
+        .saturating_add(summary.estimated_bytes_written);
+    stats.last_entries_written = summary.entries_written;
+    stats.last_entries_deleted = summary.entries_deleted;
+    stats.last_estimated_bytes_written = summary.estimated_bytes_written;
+    stats.last_error = None;
+}
+
+fn record_segment_write_error(
+    stats: &Rc<RefCell<IndexedDbSegmentPersistenceStats>>,
+    error: String,
+) {
+    let mut stats = stats.borrow_mut();
+    stats.failed_writes = stats.failed_writes.saturating_add(1);
+    stats.last_error = Some(error);
 }
 
 #[derive(Debug)]
@@ -892,14 +970,17 @@ impl WasmPrimadb {
         store_name: String,
         namespace: String,
     ) -> std::result::Result<(), JsValue> {
-        let snapshot = self.inner.snapshot();
-        let mut metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
-        metadata.scope_policies = snapshot.scope_policies;
-        metadata.provisional_transactions = snapshot.provisional_transactions;
-        metadata.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
-        let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
-        save_segment_transaction_indexed_db(&database_name, &store_name, &namespace, &transaction)
-            .await
+        let transaction = self.inner.full_storage_transaction_without_pending_ops();
+        replace_segment_transaction_indexed_db(
+            &database_name,
+            &store_name,
+            &namespace,
+            &transaction,
+        )
+        .await?;
+        self.inner
+            .mark_storage_transaction_flushed(&transaction)
+            .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = loadIndexedDbSegments)]
@@ -940,33 +1021,65 @@ impl WasmPrimadb {
                 .await?;
         }
 
+        self.inner.register_external_storage_hook();
         let subscription = self.inner.subscribe_changes();
         let receiver = subscription.receiver();
         let db = self.inner.clone();
         let db_name = database_name.clone();
         let store = store_name.clone();
         let namespace_key = namespace.clone();
+        let stats = Rc::new(RefCell::new(IndexedDbSegmentPersistenceStats::default()));
+        let task_stats = Rc::clone(&stats);
         spawn_local(async move {
             while let Ok(mut event) = receiver.recv().await {
+                {
+                    let mut stats = task_stats.borrow_mut();
+                    stats.queued_events = stats.queued_events.saturating_add(1);
+                }
                 while let Ok(next) = receiver.try_recv() {
                     event.merge(next);
+                    let mut stats = task_stats.borrow_mut();
+                    stats.coalesced_events = stats.coalesced_events.saturating_add(1);
                 }
                 if !event.data_changed && event.pending_ops == 0 {
                     continue;
                 }
-                let snapshot = db.snapshot();
-                let mut metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
-                metadata.scope_policies = snapshot.scope_policies;
-                metadata.provisional_transactions = snapshot.provisional_transactions;
-                metadata.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
-                let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
-                let _ = save_segment_transaction_indexed_db(
-                    &db_name,
-                    &store,
-                    &namespace_key,
-                    &transaction,
-                )
-                .await;
+                let transaction = if event.full_refresh {
+                    db.full_storage_transaction_without_pending_ops()
+                } else {
+                    db.incremental_storage_transaction_without_pending_ops()
+                };
+                let result = if event.full_refresh {
+                    replace_segment_transaction_indexed_db(
+                        &db_name,
+                        &store,
+                        &namespace_key,
+                        &transaction,
+                    )
+                    .await
+                } else {
+                    apply_segment_transaction_indexed_db(
+                        &db_name,
+                        &store,
+                        &namespace_key,
+                        &transaction,
+                    )
+                    .await
+                };
+                match result {
+                    Ok(summary) => match db.mark_storage_transaction_flushed(&transaction) {
+                        Ok(()) => {
+                            let kind = if event.full_refresh {
+                                SegmentWriteKind::FullReplacement
+                            } else {
+                                SegmentWriteKind::Incremental
+                            };
+                            record_segment_write_success(&task_stats, summary, kind);
+                        }
+                        Err(error) => record_segment_write_error(&task_stats, error.to_string()),
+                    },
+                    Err(error) => record_segment_write_error(&task_stats, js_error_string(error)),
+                }
             }
         });
 
@@ -975,6 +1088,8 @@ impl WasmPrimadb {
             database_name,
             store_name,
             namespace,
+            stats,
+            external_hook_registered: true,
             subscription: Some(subscription),
         };
         hook.flush().await?;
@@ -1855,23 +1970,48 @@ impl Drop for WasmIndexedDbPersistence {
 #[wasm_bindgen(js_class = IndexedDbSegmentPersistence)]
 impl WasmIndexedDbSegmentPersistence {
     pub async fn flush(&self) -> std::result::Result<(), JsValue> {
-        let snapshot = self.db.snapshot();
-        let mut metadata = build_storage_metadata(snapshot.clock, snapshot.pending_ops, 1);
-        metadata.scope_policies = snapshot.scope_policies;
-        metadata.provisional_transactions = snapshot.provisional_transactions;
-        metadata.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
-        let transaction = build_storage_transaction(0, metadata, snapshot.nodes);
-        save_segment_transaction_indexed_db(
+        let transaction = self.db.full_storage_transaction_without_pending_ops();
+        let summary = replace_segment_transaction_indexed_db(
             &self.database_name,
             &self.store_name,
             &self.namespace,
             &transaction,
         )
-        .await
+        .await?;
+        self.db
+            .mark_storage_transaction_flushed(&transaction)
+            .map_err(to_js_error)?;
+        record_segment_write_success(&self.stats, summary, SegmentWriteKind::FullReplacement);
+        Ok(())
+    }
+
+    pub fn stats(&self) -> std::result::Result<JsValue, JsValue> {
+        to_js(&*self.stats.borrow())
+    }
+
+    #[wasm_bindgen(js_name = estimateStorage)]
+    pub async fn estimate_storage(&self) -> std::result::Result<JsValue, JsValue> {
+        let estimate = estimate_segment_namespace_indexed_db(
+            &self.database_name,
+            &self.store_name,
+            &self.namespace,
+        )
+        .await?;
+        to_js(&estimate)
     }
 
     pub fn close(&mut self) {
         self.subscription.take();
+        if self.external_hook_registered {
+            self.db.unregister_external_storage_hook();
+            self.external_hook_registered = false;
+        }
+    }
+}
+
+impl Drop for WasmIndexedDbSegmentPersistence {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -1916,12 +2056,6 @@ impl WasmIndexedDbBlobStorage {
             &blob_id,
         )
         .await
-    }
-}
-
-impl Drop for WasmIndexedDbSegmentPersistence {
-    fn drop(&mut self) {
-        self.subscription.take();
     }
 }
 
@@ -5742,67 +5876,55 @@ fn build_segment_transaction_entries(
     transaction: &crate::StorageTransaction,
 ) -> std::result::Result<Vec<(String, JsValue)>, JsValue> {
     let prefix = segment_namespace_prefix(namespace);
-    let mut entries = Vec::with_capacity(
-        1 + transaction.nodes.len()
-            + transaction.auth_meta.len()
-            + transaction.node_indexes.len()
-            + transaction.direct_indexes.len(),
-    );
+    let mut entries = Vec::with_capacity(1 + transaction.nodes.len() + transaction.auth_meta.len());
 
-    entries.push((
-        format!("{prefix}meta"),
-        serde_wasm_bindgen::to_value(&transaction.metadata)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?,
-    ));
+    entries.push((format!("{prefix}meta"), to_js(&transaction.metadata)?));
 
     for (node_id, node_state) in &transaction.nodes {
         entries.push((
             format!("{prefix}node/{}", encode_component(node_id)),
-            serde_wasm_bindgen::to_value(node_state)
-                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+            to_js(node_state)?,
         ));
     }
 
     for (node_id, auth_meta) in &transaction.auth_meta {
         entries.push((
             format!("{prefix}auth/{}", encode_component(node_id)),
-            serde_wasm_bindgen::to_value(auth_meta)
-                .map_err(|error| JsValue::from_str(&error.to_string()))?,
-        ));
-    }
-
-    for (node_id, manifest) in &transaction.node_indexes {
-        entries.push((
-            format!("{prefix}node_index/{}", encode_component(node_id)),
-            serde_wasm_bindgen::to_value(manifest)
-                .map_err(|error| JsValue::from_str(&error.to_string()))?,
-        ));
-    }
-
-    for (key, entry) in &transaction.direct_indexes {
-        entries.push((
-            format!("{prefix}index/{key}"),
-            serde_wasm_bindgen::to_value(entry)
-                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+            to_js(auth_meta)?,
         ));
     }
 
     Ok(entries)
 }
 
-async fn save_segment_transaction_indexed_db(
+fn estimated_indexed_db_entry_bytes(key: &str, value: &JsValue) -> u64 {
+    let value_bytes = js_sys::JSON::stringify(value)
+        .ok()
+        .and_then(|value| value.as_string())
+        .map(|value| value.len() as u64)
+        .unwrap_or(0);
+    key.len() as u64 + value_bytes
+}
+
+async fn replace_segment_transaction_indexed_db(
     database_name: &str,
     store_name: &str,
     namespace: &str,
     transaction: &crate::StorageTransaction,
-) -> std::result::Result<(), JsValue> {
+) -> std::result::Result<IndexedDbSegmentWriteSummary, JsValue> {
     let prefix = segment_namespace_prefix(namespace);
     let stale_keys = list_indexed_db_keys_with_prefix(database_name, store_name, &prefix).await?;
     let entries = build_segment_transaction_entries(namespace, transaction)?;
+    let estimated_bytes_written = entries
+        .iter()
+        .map(|(key, value)| estimated_indexed_db_entry_bytes(key, value))
+        .sum();
     let db = open_indexed_db(database_name, store_name).await?;
     let tx =
         db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readwrite)?;
     let store = tx.object_store(store_name)?;
+    let entries_deleted = stale_keys.len() as u64;
+    let entries_written = entries.len() as u64;
 
     for key in stale_keys {
         let _ = store.delete(&JsValue::from_str(&key))?;
@@ -5813,7 +5935,99 @@ async fn save_segment_transaction_indexed_db(
     }
 
     await_idb_transaction(&tx).await?;
-    Ok(())
+    Ok(IndexedDbSegmentWriteSummary {
+        entries_written,
+        entries_deleted,
+        estimated_bytes_written,
+    })
+}
+
+async fn apply_segment_transaction_indexed_db(
+    database_name: &str,
+    store_name: &str,
+    namespace: &str,
+    transaction: &crate::StorageTransaction,
+) -> std::result::Result<IndexedDbSegmentWriteSummary, JsValue> {
+    let prefix = segment_namespace_prefix(namespace);
+    let mut touched_nodes = crate::touched_nodes(&transaction.journal_ops);
+    touched_nodes.extend(transaction.nodes.keys().cloned());
+    let entries = build_segment_transaction_entries(namespace, transaction)?;
+    let estimated_bytes_written = entries
+        .iter()
+        .map(|(key, value)| estimated_indexed_db_entry_bytes(key, value))
+        .sum();
+
+    let db = open_indexed_db(database_name, store_name).await?;
+    let tx =
+        db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readwrite)?;
+    let store = tx.object_store(store_name)?;
+    let mut entries_deleted = 0_u64;
+
+    for node_id in &touched_nodes {
+        let encoded_node = encode_component(node_id);
+        if !transaction.nodes.contains_key(node_id) {
+            for key in [
+                format!("{prefix}node/{encoded_node}"),
+                format!("{prefix}auth/{encoded_node}"),
+            ] {
+                let _ = store.delete(&JsValue::from_str(&key))?;
+                entries_deleted = entries_deleted.saturating_add(1);
+            }
+        }
+    }
+
+    let entries_written = entries.len() as u64;
+    for (key, value) in entries {
+        let _ = store.put_with_key(&value, &JsValue::from_str(&key))?;
+    }
+
+    await_idb_transaction(&tx).await?;
+    Ok(IndexedDbSegmentWriteSummary {
+        entries_written,
+        entries_deleted,
+        estimated_bytes_written,
+    })
+}
+
+async fn estimate_segment_namespace_indexed_db(
+    database_name: &str,
+    store_name: &str,
+    namespace: &str,
+) -> std::result::Result<IndexedDbSegmentStorageEstimate, JsValue> {
+    let db = open_indexed_db(database_name, store_name).await?;
+    let tx = db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readonly)?;
+    let store = tx.object_store(store_name)?;
+    let prefix = segment_namespace_prefix(namespace);
+    let range = indexed_db_prefix_range(&prefix)?;
+    let keys_request = store.get_all_keys_with_key(&range)?;
+    let values_request = store.get_all_with_key(&range)?;
+    let keys_value = await_idb_request(keys_request.unchecked_ref()).await?;
+    let values_value = await_idb_request(values_request.unchecked_ref()).await?;
+    await_idb_transaction(&tx).await?;
+
+    let keys_array = js_sys::Array::from(&keys_value);
+    let values_array = js_sys::Array::from(&values_value);
+    if keys_array.length() != values_array.length() {
+        return Err(JsValue::from_str(
+            "IndexedDB returned mismatched key/value counts for segment estimate",
+        ));
+    }
+
+    let mut estimated_bytes = 0_u64;
+    for index in 0..keys_array.length() {
+        let key = keys_array
+            .get(index)
+            .as_string()
+            .ok_or_else(|| JsValue::from_str("IndexedDB key is not a string"))?;
+        let value = values_array.get(index);
+        estimated_bytes =
+            estimated_bytes.saturating_add(estimated_indexed_db_entry_bytes(&key, &value));
+    }
+
+    Ok(IndexedDbSegmentStorageEstimate {
+        key_count: keys_array.length() as u64,
+        estimated_bytes,
+    })
 }
 
 async fn load_segment_snapshot_indexed_db(
@@ -6313,4 +6527,15 @@ where
 
 fn to_js_error(error: impl ToString) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn js_error_string(error: JsValue) -> String {
+    error
+        .as_string()
+        .or_else(|| {
+            js_sys::Reflect::get(&error, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|message| message.as_string())
+        })
+        .unwrap_or_else(|| format!("{error:?}"))
 }
