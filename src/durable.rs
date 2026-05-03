@@ -28,6 +28,14 @@ pub enum DurableStorageConfig {
         #[serde(default = "default_true")]
         auto_persist: bool,
     },
+    OpfsSegments {
+        directory: String,
+        namespace: String,
+        #[serde(default = "default_true")]
+        load_existing: bool,
+        #[serde(default = "default_true")]
+        auto_persist: bool,
+    },
     SnapshotFile {
         path: String,
     },

@@ -36,6 +36,8 @@ mod value;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
+#[cfg(target_arch = "wasm32")]
+mod wasm_opfs;
 
 #[cfg(feature = "crypto")]
 pub use auth::{

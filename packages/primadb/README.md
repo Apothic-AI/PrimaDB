@@ -77,6 +77,7 @@ Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport
 
 - [examples/default-notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/default-notes/README.md)
 - [examples/indexeddb-segments/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/indexeddb-segments/README.md)
+- [examples/opfs-segments/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/opfs-segments/README.md)
 - [examples/threaded-mesh/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/threaded-mesh/README.md)
 - [examples/binary-stream-room/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/binary-stream-room/README.md)
 - [examples/text-voice-chat/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/text-voice-chat/README.md)
@@ -131,6 +132,11 @@ db.openBlobStorage({
   kind: "indexed_db",
   databaseName: "primadb-browser-demo",
   storeName: "blobs",
+  namespace: "main",
+});
+await db.openDurableStorage({
+  kind: "opfs_segments",
+  directory: "primadb-browser-demo",
   namespace: "main",
 });
 db.chain("assets").field("avatar").putBytes(new Uint8Array([1, 2, 3, 4]));

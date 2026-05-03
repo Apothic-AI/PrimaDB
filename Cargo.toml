@@ -83,6 +83,14 @@ web-sys = { version = "0.3", features = [
     "ErrorEvent",
     "Event",
     "EventTarget",
+    "File",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemSyncAccessHandle",
+    "FileSystemWritableFileStream",
+    "Blob",
     "IdbDatabase",
     "IdbCursor",
     "IdbCursorWithValue",
@@ -108,6 +116,7 @@ web-sys = { version = "0.3", features = [
     "Storage",
     "WebSocket",
     "Window",
+    "WritableStream",
 ] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

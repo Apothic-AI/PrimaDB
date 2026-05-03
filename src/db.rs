@@ -1515,7 +1515,8 @@ impl Primadb {
             }
             DurableStorageConfig::BrowserStorage { .. }
             | DurableStorageConfig::IndexedDbSnapshots { .. }
-            | DurableStorageConfig::IndexedDbSegments { .. } => Err(PrimadbError::Message(
+            | DurableStorageConfig::IndexedDbSegments { .. }
+            | DurableStorageConfig::OpfsSegments { .. } => Err(PrimadbError::Message(
                 "browser durable storage config is not available on native targets".to_owned(),
             )),
         }

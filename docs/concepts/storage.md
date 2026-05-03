@@ -18,6 +18,7 @@ Browser:
 
 - `localStorage`
 - IndexedDB persistence helpers
+- OPFS segment persistence
 - IndexedDB blob storage
 
 ## Why This Matters
@@ -30,8 +31,15 @@ The storage engine now supports:
 - bounded journal retention
 - explicit vacuum/GC
 - BLAKE3-prefixed content-addressed blob references
+- bounded incremental browser segment writes for IndexedDB and OPFS
 
 That closes a meaningful gap relative to the older snapshot-centered design.
+
+## Browser Backend Choice
+
+Use OPFS segments for large or high-churn browser-local data when available. OPFS stores segment
+records as browser-private files and avoids IndexedDB's structured-clone overhead for large opaque
+values. IndexedDB segments remain the compatibility path for browsers without OPFS.
 
 ## What Is Deferred
 

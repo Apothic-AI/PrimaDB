@@ -1,5 +1,9 @@
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
+use crate::wasm_opfs::{
+    apply_segment_transaction_opfs, estimate_segment_namespace_opfs, load_segment_snapshot_opfs,
+    replace_segment_transaction_opfs,
+};
 use crate::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext,
     DurableStorageBinding, DurableStorageConfig, HookTransport, HybridClock, IceServerConfig,
@@ -93,7 +97,17 @@ pub struct WasmIndexedDbSegmentPersistence {
     database_name: String,
     store_name: String,
     namespace: String,
-    stats: Rc<RefCell<IndexedDbSegmentPersistenceStats>>,
+    stats: Rc<RefCell<WasmSegmentPersistenceStats>>,
+    external_hook_registered: bool,
+    subscription: Option<ChangeSubscription>,
+}
+
+#[wasm_bindgen(js_name = OpfsSegmentPersistence)]
+pub struct WasmOpfsSegmentPersistence {
+    db: Primadb,
+    directory: String,
+    namespace: String,
+    stats: Rc<RefCell<WasmSegmentPersistenceStats>>,
     external_hook_registered: bool,
     subscription: Option<ChangeSubscription>,
 }
@@ -111,6 +125,9 @@ enum WasmDurableStorageHook {
     Segment {
         _hook: WasmIndexedDbSegmentPersistence,
     },
+    OpfsSegment {
+        _hook: WasmOpfsSegmentPersistence,
+    },
 }
 
 #[derive(Clone)]
@@ -122,7 +139,7 @@ struct WasmBlobStorageConfig {
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct IndexedDbSegmentPersistenceStats {
+pub(crate) struct WasmSegmentPersistenceStats {
     queued_events: u64,
     coalesced_events: u64,
     successful_writes: u64,
@@ -140,16 +157,20 @@ struct IndexedDbSegmentPersistenceStats {
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct IndexedDbSegmentStorageEstimate {
-    key_count: u64,
-    estimated_bytes: u64,
+pub(crate) struct WasmSegmentStorageEstimate {
+    pub key_count: u64,
+    pub estimated_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_usage: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_quota: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
-struct IndexedDbSegmentWriteSummary {
-    entries_written: u64,
-    entries_deleted: u64,
-    estimated_bytes_written: u64,
+pub(crate) struct WasmSegmentWriteSummary {
+    pub entries_written: u64,
+    pub entries_deleted: u64,
+    pub estimated_bytes_written: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,8 +180,8 @@ enum SegmentWriteKind {
 }
 
 fn record_segment_write_success(
-    stats: &Rc<RefCell<IndexedDbSegmentPersistenceStats>>,
-    summary: IndexedDbSegmentWriteSummary,
+    stats: &Rc<RefCell<WasmSegmentPersistenceStats>>,
+    summary: WasmSegmentWriteSummary,
     kind: SegmentWriteKind,
 ) {
     let mut stats = stats.borrow_mut();
@@ -188,10 +209,7 @@ fn record_segment_write_success(
     stats.last_error = None;
 }
 
-fn record_segment_write_error(
-    stats: &Rc<RefCell<IndexedDbSegmentPersistenceStats>>,
-    error: String,
-) {
+fn record_segment_write_error(stats: &Rc<RefCell<WasmSegmentPersistenceStats>>, error: String) {
     let mut stats = stats.borrow_mut();
     stats.failed_writes = stats.failed_writes.saturating_add(1);
     stats.last_error = Some(error);
@@ -823,6 +841,31 @@ impl WasmPrimadb {
                     auto_persist,
                 }
             }
+            DurableStorageConfig::OpfsSegments {
+                directory,
+                namespace,
+                load_existing,
+                auto_persist,
+            } => {
+                if auto_persist {
+                    let hook = self
+                        .enable_opfs_segment_persistence(directory, namespace, Some(load_existing))
+                        .await?;
+                    self.durable_storage_hooks
+                        .borrow_mut()
+                        .push(WasmDurableStorageHook::OpfsSegment { _hook: hook });
+                } else if load_existing {
+                    let _ = self
+                        .load_opfs_segments(directory.clone(), namespace.clone())
+                        .await?;
+                }
+                DurableStorageBinding {
+                    backend: "opfs_segments".to_owned(),
+                    incremental: true,
+                    loaded_existing: load_existing,
+                    auto_persist,
+                }
+            }
             DurableStorageConfig::SnapshotFile { .. }
             | DurableStorageConfig::SegmentFiles { .. } => {
                 return Err(JsValue::from_str(
@@ -1091,7 +1134,7 @@ impl WasmPrimadb {
         let db_name = database_name.clone();
         let store = store_name.clone();
         let namespace_key = namespace.clone();
-        let stats = Rc::new(RefCell::new(IndexedDbSegmentPersistenceStats::default()));
+        let stats = Rc::new(RefCell::new(WasmSegmentPersistenceStats::default()));
         let task_stats = Rc::clone(&stats);
         spawn_local(async move {
             while let Ok(mut event) = receiver.recv().await {
@@ -1104,7 +1147,7 @@ impl WasmPrimadb {
                     let mut stats = task_stats.borrow_mut();
                     stats.coalesced_events = stats.coalesced_events.saturating_add(1);
                 }
-                if !event.data_changed && event.pending_ops == 0 {
+                if !event.data_changed {
                     continue;
                 }
                 let transaction = if event.full_refresh {
@@ -1150,6 +1193,114 @@ impl WasmPrimadb {
             db: self.inner.clone(),
             database_name,
             store_name,
+            namespace,
+            stats,
+            external_hook_registered: true,
+            subscription: Some(subscription),
+        };
+        hook.flush().await?;
+        Ok(hook)
+    }
+
+    #[wasm_bindgen(js_name = saveOpfsSegments)]
+    pub async fn save_opfs_segments(
+        &self,
+        directory: String,
+        namespace: String,
+    ) -> std::result::Result<(), JsValue> {
+        let transaction = self.inner.full_storage_transaction_without_pending_ops();
+        replace_segment_transaction_opfs(&directory, &namespace, &transaction).await?;
+        self.inner
+            .mark_storage_transaction_flushed(&transaction)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = loadOpfsSegments)]
+    pub async fn load_opfs_segments(
+        &self,
+        directory: String,
+        namespace: String,
+    ) -> std::result::Result<bool, JsValue> {
+        match load_segment_snapshot_opfs(&directory, &namespace).await? {
+            Some(snapshot) => {
+                let payload = serde_json::to_string(&snapshot)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                self.inner
+                    .import_persisted_snapshot_json(&payload)
+                    .map_err(to_js_error)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    #[wasm_bindgen(js_name = enableOpfsSegmentPersistence)]
+    pub async fn enable_opfs_segment_persistence(
+        &self,
+        directory: String,
+        namespace: String,
+        load_existing: Option<bool>,
+    ) -> std::result::Result<WasmOpfsSegmentPersistence, JsValue> {
+        if load_existing.unwrap_or(true) {
+            let _ = self
+                .load_opfs_segments(directory.clone(), namespace.clone())
+                .await?;
+        }
+
+        self.inner.register_external_storage_hook();
+        let subscription = self.inner.subscribe_changes();
+        let receiver = subscription.receiver();
+        let db = self.inner.clone();
+        let directory_key = directory.clone();
+        let namespace_key = namespace.clone();
+        let stats = Rc::new(RefCell::new(WasmSegmentPersistenceStats::default()));
+        let task_stats = Rc::clone(&stats);
+        spawn_local(async move {
+            while let Ok(mut event) = receiver.recv().await {
+                {
+                    let mut stats = task_stats.borrow_mut();
+                    stats.queued_events = stats.queued_events.saturating_add(1);
+                }
+                while let Ok(next) = receiver.try_recv() {
+                    event.merge(next);
+                    let mut stats = task_stats.borrow_mut();
+                    stats.coalesced_events = stats.coalesced_events.saturating_add(1);
+                }
+                if !event.data_changed {
+                    continue;
+                }
+                let transaction = if event.full_refresh {
+                    db.full_storage_transaction_without_pending_ops()
+                } else {
+                    db.incremental_storage_transaction_without_pending_ops()
+                };
+                let result = if event.full_refresh {
+                    replace_segment_transaction_opfs(&directory_key, &namespace_key, &transaction)
+                        .await
+                } else {
+                    apply_segment_transaction_opfs(&directory_key, &namespace_key, &transaction)
+                        .await
+                };
+                match result {
+                    Ok(summary) => match db.mark_storage_transaction_flushed(&transaction) {
+                        Ok(()) => {
+                            let kind = if event.full_refresh {
+                                SegmentWriteKind::FullReplacement
+                            } else {
+                                SegmentWriteKind::Incremental
+                            };
+                            record_segment_write_success(&task_stats, summary, kind);
+                        }
+                        Err(error) => record_segment_write_error(&task_stats, error.to_string()),
+                    },
+                    Err(error) => record_segment_write_error(&task_stats, js_error_string(error)),
+                }
+            }
+        });
+
+        let hook = WasmOpfsSegmentPersistence {
+            db: self.inner.clone(),
+            directory,
             namespace,
             stats,
             external_hook_registered: true,
@@ -2073,6 +2224,45 @@ impl WasmIndexedDbSegmentPersistence {
 }
 
 impl Drop for WasmIndexedDbSegmentPersistence {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[wasm_bindgen(js_class = OpfsSegmentPersistence)]
+impl WasmOpfsSegmentPersistence {
+    pub async fn flush(&self) -> std::result::Result<(), JsValue> {
+        let transaction = self.db.full_storage_transaction_without_pending_ops();
+        let summary =
+            replace_segment_transaction_opfs(&self.directory, &self.namespace, &transaction)
+                .await?;
+        self.db
+            .mark_storage_transaction_flushed(&transaction)
+            .map_err(to_js_error)?;
+        record_segment_write_success(&self.stats, summary, SegmentWriteKind::FullReplacement);
+        Ok(())
+    }
+
+    pub fn stats(&self) -> std::result::Result<JsValue, JsValue> {
+        to_js(&*self.stats.borrow())
+    }
+
+    #[wasm_bindgen(js_name = estimateStorage)]
+    pub async fn estimate_storage(&self) -> std::result::Result<JsValue, JsValue> {
+        let estimate = estimate_segment_namespace_opfs(&self.directory, &self.namespace).await?;
+        to_js(&estimate)
+    }
+
+    pub fn close(&mut self) {
+        self.subscription.take();
+        if self.external_hook_registered {
+            self.db.unregister_external_storage_hook();
+            self.external_hook_registered = false;
+        }
+    }
+}
+
+impl Drop for WasmOpfsSegmentPersistence {
     fn drop(&mut self) {
         self.close();
     }
@@ -5974,7 +6164,7 @@ async fn replace_segment_transaction_indexed_db(
     store_name: &str,
     namespace: &str,
     transaction: &crate::StorageTransaction,
-) -> std::result::Result<IndexedDbSegmentWriteSummary, JsValue> {
+) -> std::result::Result<WasmSegmentWriteSummary, JsValue> {
     let prefix = segment_namespace_prefix(namespace);
     let stale_keys = list_indexed_db_keys_with_prefix(database_name, store_name, &prefix).await?;
     let entries = build_segment_transaction_entries(namespace, transaction)?;
@@ -5998,7 +6188,7 @@ async fn replace_segment_transaction_indexed_db(
     }
 
     await_idb_transaction(&tx).await?;
-    Ok(IndexedDbSegmentWriteSummary {
+    Ok(WasmSegmentWriteSummary {
         entries_written,
         entries_deleted,
         estimated_bytes_written,
@@ -6010,7 +6200,7 @@ async fn apply_segment_transaction_indexed_db(
     store_name: &str,
     namespace: &str,
     transaction: &crate::StorageTransaction,
-) -> std::result::Result<IndexedDbSegmentWriteSummary, JsValue> {
+) -> std::result::Result<WasmSegmentWriteSummary, JsValue> {
     let prefix = segment_namespace_prefix(namespace);
     let mut touched_nodes = crate::touched_nodes(&transaction.journal_ops);
     touched_nodes.extend(transaction.nodes.keys().cloned());
@@ -6045,7 +6235,7 @@ async fn apply_segment_transaction_indexed_db(
     }
 
     await_idb_transaction(&tx).await?;
-    Ok(IndexedDbSegmentWriteSummary {
+    Ok(WasmSegmentWriteSummary {
         entries_written,
         entries_deleted,
         estimated_bytes_written,
@@ -6056,7 +6246,7 @@ async fn estimate_segment_namespace_indexed_db(
     database_name: &str,
     store_name: &str,
     namespace: &str,
-) -> std::result::Result<IndexedDbSegmentStorageEstimate, JsValue> {
+) -> std::result::Result<WasmSegmentStorageEstimate, JsValue> {
     let db = open_indexed_db(database_name, store_name).await?;
     let tx = db.transaction_with_str_and_mode(store_name, web_sys::IdbTransactionMode::Readonly)?;
     let store = tx.object_store(store_name)?;
@@ -6087,9 +6277,11 @@ async fn estimate_segment_namespace_indexed_db(
             estimated_bytes.saturating_add(estimated_indexed_db_entry_bytes(&key, &value));
     }
 
-    Ok(IndexedDbSegmentStorageEstimate {
+    Ok(WasmSegmentStorageEstimate {
         key_count: keys_array.length() as u64,
         estimated_bytes,
+        origin_usage: None,
+        origin_quota: None,
     })
 }
 
