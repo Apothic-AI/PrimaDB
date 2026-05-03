@@ -205,9 +205,24 @@ class IndexedDbPersistence {
 ```ts
 class IndexedDbSegmentPersistence {
   flush(): Promise<void>;
+  stats(): any;
+  estimateStorage(): Promise<any>;
   close(): void;
 }
 ```
+
+`stats()` exposes write diagnostics for browser segment persistence, including full replacement
+count, incremental transaction count, entries written/deleted, estimated bytes written, and the last
+write error if IndexedDB rejects a transaction. `estimateStorage()` measures the current logical
+namespace key count and approximate serialized bytes in IndexedDB.
+
+`enableIndexedDbSegmentPersistence(...)` performs an initial full replacement flush, then
+auto-persists later changes as incremental segment transactions. Full replacement is still used for
+explicit `flush()` calls and full-refresh events.
+
+Browser segment persistence stores the current graph state and storage transaction bookkeeping. It
+does not persist the transport pending-op queue, so high-churn opaque values are not duplicated into
+durable metadata on every save.
 
 ### `IndexedDbBlobStorage`
 

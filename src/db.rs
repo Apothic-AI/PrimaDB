@@ -12,8 +12,8 @@ use crate::consistency::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::durable::{DurableStorageBinding, DurableStorageConfig};
 use crate::engine::{
-    DirectIndexScan, IncrementalStore, StorageVacuumReport, build_storage_metadata,
-    build_storage_transaction, build_storage_transaction_from_ops,
+    DirectIndexScan, IncrementalStore, StorageTransaction, StorageVacuumReport,
+    build_storage_metadata, build_storage_transaction, build_storage_transaction_from_ops,
 };
 use crate::error::{PrimadbError, Result};
 use crate::hardening::{PrimadbLimits, PrimadbStats};
@@ -180,6 +180,7 @@ struct Inner {
     persistence: Option<PersistenceTarget>,
     storage_adapter: Option<Arc<dyn StorageAdapter>>,
     storage_engine: Option<Arc<dyn IncrementalStore>>,
+    external_storage_hooks: usize,
     blob_store: Option<Arc<dyn BlobStore>>,
     missing_nodes: BTreeSet<NodeId>,
     relationship_index: RelationshipIndex,
@@ -349,6 +350,15 @@ impl TransactionRollback {
     }
 }
 
+fn storage_metadata_from_inner(inner: &Inner, next_tx_id: u64) -> crate::StorageMetadata {
+    let mut metadata =
+        build_storage_metadata(inner.clock.clone(), inner.pending_ops.clone(), next_tx_id);
+    metadata.scope_policies = inner.scope_policies.clone();
+    metadata.provisional_transactions = inner.provisional_transactions.clone();
+    metadata.next_provisional_transaction_id = inner.next_provisional_transaction_id;
+    metadata
+}
+
 impl ChangeEvent {
     pub fn merge(&mut self, other: Self) {
         self.revision = self.revision.max(other.revision);
@@ -403,6 +413,7 @@ impl Primadb {
                 persistence: None,
                 storage_adapter: None,
                 storage_engine: None,
+                external_storage_hooks: 0,
                 blob_store: None,
                 missing_nodes: BTreeSet::new(),
                 relationship_index: RelationshipIndex::default(),
@@ -673,6 +684,72 @@ impl Primadb {
         }
     }
 
+    pub(crate) fn full_storage_transaction(&self) -> StorageTransaction {
+        let inner = self.inner.lock().unwrap();
+        let tx_id = inner.next_storage_tx_id;
+        let metadata = storage_metadata_from_inner(&inner, tx_id.saturating_add(1));
+        let mut transaction = build_storage_transaction(tx_id, metadata, inner.nodes.clone());
+        transaction.journal_ops = inner.unflushed_ops.clone();
+        transaction
+    }
+
+    pub(crate) fn full_storage_transaction_without_pending_ops(&self) -> StorageTransaction {
+        let mut transaction = self.full_storage_transaction();
+        transaction.metadata.pending_ops.clear();
+        transaction
+    }
+
+    pub(crate) fn incremental_storage_transaction(&self) -> StorageTransaction {
+        let inner = self.inner.lock().unwrap();
+        let tx_id = inner.next_storage_tx_id;
+        let metadata = storage_metadata_from_inner(&inner, tx_id.saturating_add(1));
+        if inner.unflushed_ops.is_empty() {
+            build_storage_transaction(tx_id, metadata, BTreeMap::new())
+        } else {
+            build_storage_transaction_from_ops(tx_id, metadata, &inner.nodes, &inner.unflushed_ops)
+        }
+    }
+
+    pub(crate) fn incremental_storage_transaction_without_pending_ops(&self) -> StorageTransaction {
+        let mut transaction = self.incremental_storage_transaction();
+        transaction.metadata.pending_ops.clear();
+        transaction
+    }
+
+    pub(crate) fn mark_storage_transaction_flushed(
+        &self,
+        transaction: &StorageTransaction,
+    ) -> Result<()> {
+        self.mark_durable_operations_flushed(&transaction.journal_ops)?;
+        let mut inner = self.inner.lock().unwrap();
+        inner.next_storage_tx_id = inner
+            .next_storage_tx_id
+            .max(transaction.id.saturating_add(1));
+        Ok(())
+    }
+
+    pub(crate) fn register_external_storage_hook(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.external_storage_hooks = inner.external_storage_hooks.saturating_add(1);
+    }
+
+    pub(crate) fn unregister_external_storage_hook(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.external_storage_hooks = inner.external_storage_hooks.saturating_sub(1);
+    }
+
+    fn mark_durable_operations_flushed(&self, ops: &[Operation]) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if !ops.is_empty() {
+            let saved = ops.len();
+            if inner.unflushed_ops.len() < saved || inner.unflushed_ops[..saved] != *ops {
+                return Ok(());
+            }
+            inner.unflushed_ops.drain(..saved);
+        }
+        Ok(())
+    }
+
     pub fn export_snapshot_json(&self) -> Result<String> {
         Ok(serde_json::to_string_pretty(&self.snapshot())?)
     }
@@ -733,7 +810,7 @@ impl Primadb {
             let mut inner = self.inner.lock().unwrap();
             inner.clock = snapshot.clock;
             inner.nodes = snapshot.nodes;
-            inner.pending_ops = snapshot.pending_ops;
+            inner.pending_ops = compact_operations(snapshot.pending_ops);
             inner.scope_policies = snapshot.scope_policies;
             inner.provisional_transactions = snapshot.provisional_transactions;
             inner.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
@@ -761,7 +838,7 @@ impl Primadb {
             inner.clock = snapshot.clock.rebased_with_actor(local_actor);
             inner.nodes = snapshot.nodes;
             inner.pending_ops = if keep_pending {
-                snapshot.pending_ops
+                compact_operations(snapshot.pending_ops)
             } else {
                 Vec::new()
             };
@@ -810,7 +887,7 @@ impl Primadb {
         {
             let mut inner = self.inner.lock().unwrap();
             for op in ops {
-                inner.pending_ops.push(op);
+                push_compacted_operation(&mut inner.pending_ops, op);
                 count += 1;
             }
         }
@@ -1712,15 +1789,24 @@ impl Primadb {
             engine,
             snapshot,
             unflushed_ops,
-            next_storage_tx_id,
-            clock,
-            pending_ops,
-            nodes,
-            scope_policies,
-            provisional_transactions,
-            next_provisional_transaction_id,
+            storage_transaction,
+            external_storage_hooks,
         ) = {
             let inner = self.inner.lock().unwrap();
+            let storage_transaction = inner.storage_engine.as_ref().map(|_| {
+                let tx_id = inner.next_storage_tx_id;
+                let metadata = storage_metadata_from_inner(&inner, tx_id.saturating_add(1));
+                if inner.unflushed_ops.is_empty() {
+                    build_storage_transaction(tx_id, metadata, inner.nodes.clone())
+                } else {
+                    build_storage_transaction_from_ops(
+                        tx_id,
+                        metadata,
+                        &inner.nodes,
+                        &inner.unflushed_ops,
+                    )
+                }
+            });
             (
                 inner.persistence.clone(),
                 inner.storage_adapter.clone(),
@@ -1734,15 +1820,12 @@ impl Primadb {
                     next_provisional_transaction_id: inner.next_provisional_transaction_id,
                 },
                 inner.unflushed_ops.clone(),
-                inner.next_storage_tx_id,
-                inner.clock.clone(),
-                inner.pending_ops.clone(),
-                inner.nodes.clone(),
-                inner.scope_policies.clone(),
-                inner.provisional_transactions.clone(),
-                inner.next_provisional_transaction_id,
+                storage_transaction,
+                inner.external_storage_hooks,
             )
         };
+
+        let has_sync_durable_backend = target.is_some() || adapter.is_some() || engine.is_some();
 
         if let Some(target) = target {
             store_snapshot_payload(&target, &self.export_persisted_snapshot_json()?)?;
@@ -1752,27 +1835,11 @@ impl Primadb {
             adapter.flush(&unflushed_ops, &snapshot)?;
         }
 
-        if let Some(engine) = engine {
-            let mut metadata = build_storage_metadata(clock, pending_ops, next_storage_tx_id + 1);
-            metadata.scope_policies = scope_policies;
-            metadata.provisional_transactions = provisional_transactions;
-            metadata.next_provisional_transaction_id = next_provisional_transaction_id;
-            let transaction = if unflushed_ops.is_empty() {
-                build_storage_transaction(next_storage_tx_id, metadata, nodes)
-            } else {
-                build_storage_transaction_from_ops(
-                    next_storage_tx_id,
-                    metadata,
-                    &nodes,
-                    &unflushed_ops,
-                )
-            };
+        if let (Some(engine), Some(transaction)) = (engine, storage_transaction) {
             engine.apply_transaction(&transaction)?;
-            self.inner.lock().unwrap().next_storage_tx_id = next_storage_tx_id + 1;
-        }
-
-        if !unflushed_ops.is_empty() {
-            self.inner.lock().unwrap().unflushed_ops.clear();
+            self.mark_storage_transaction_flushed(&transaction)?;
+        } else if has_sync_durable_backend || external_storage_hooks == 0 {
+            self.mark_durable_operations_flushed(&unflushed_ops)?;
         }
 
         Ok(())
@@ -4441,11 +4508,11 @@ impl Inner {
         if accepted {
             let source = operation_source_node(&op).to_owned();
             self.reindex_node_relationships(&source);
-            self.unflushed_ops.push(op.clone());
+            push_compacted_operation(&mut self.unflushed_ops, op.clone());
         }
 
         if accepted && origin == OperationOrigin::Local {
-            self.pending_ops.push(op);
+            push_compacted_operation(&mut self.pending_ops, op);
         }
 
         accepted
@@ -4739,6 +4806,50 @@ fn operation_touched_path(op: &Operation) -> String {
         | OperationAction::RemoveSetMember { node, field, .. }
         | OperationAction::DeleteField { node, field } => format!("{node}/{field}"),
     }
+}
+
+fn operation_compaction_key(op: &Operation) -> String {
+    match &op.action {
+        OperationAction::SetField { node, field, .. }
+        | OperationAction::DeleteField { node, field } => {
+            format!("field\0{node}\0{field}")
+        }
+        OperationAction::AddSetMember {
+            node,
+            field,
+            member,
+        }
+        | OperationAction::RemoveSetMember {
+            node,
+            field,
+            member,
+        } => format!("set\0{node}\0{field}\0{member}"),
+    }
+}
+
+fn push_compacted_operation(queue: &mut Vec<Operation>, op: Operation) {
+    let key = operation_compaction_key(&op);
+    if let Some(existing) = queue
+        .iter_mut()
+        .find(|candidate| operation_compaction_key(candidate) == key)
+    {
+        if op.revision >= existing.revision {
+            *existing = op;
+        }
+        return;
+    }
+    queue.push(op);
+}
+
+fn compact_operations<I>(ops: I) -> Vec<Operation>
+where
+    I: IntoIterator<Item = Operation>,
+{
+    let mut compacted = Vec::new();
+    for op in ops {
+        push_compacted_operation(&mut compacted, op);
+    }
+    compacted
 }
 
 fn operation_source_node(op: &Operation) -> &str {
@@ -6954,6 +7065,92 @@ mod tests {
         assert!(reader.stats().nodes < 24);
 
         let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[test]
+    fn external_incremental_storage_keeps_ops_until_confirmed() -> Result<()> {
+        let db = Primadb::with_replica_id("browser-durable");
+        db.register_external_storage_hook();
+
+        db.root("checkpoint")
+            .field("active")
+            .put("x".repeat(4096))?;
+        let first = db.incremental_storage_transaction();
+        assert_eq!(first.journal_ops.len(), 1);
+
+        db.root("checkpoint").field("next").put("y".repeat(4096))?;
+        db.mark_storage_transaction_flushed(&first)?;
+
+        let second = db.incremental_storage_transaction();
+        assert_eq!(second.journal_ops.len(), 1);
+        assert!(second.nodes.len() <= 2);
+        db.mark_storage_transaction_flushed(&second)?;
+
+        let empty = db.incremental_storage_transaction();
+        assert!(empty.journal_ops.is_empty());
+        assert!(empty.nodes.is_empty());
+        db.unregister_external_storage_hook();
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_storage_transactions_are_bounded_for_repeated_large_updates() -> Result<()> {
+        let db = Primadb::with_replica_id("bounded-browser-durable");
+        db.register_external_storage_hook();
+
+        for index in 0..32 {
+            db.root("docs")
+                .field(format!("doc-{index}"))
+                .put(json!({"title": format!("Document {index}")}))?;
+        }
+        let initial = db.full_storage_transaction();
+        let full_node_count = initial.nodes.len();
+        assert!(full_node_count >= 32);
+        db.mark_storage_transaction_flushed(&initial)?;
+
+        for version in 0..8 {
+            db.root("checkpoint")
+                .field("active")
+                .put(format!("{version}:{}", "z".repeat(64 * 1024)))?;
+            let transaction = db.incremental_storage_transaction();
+            assert_eq!(transaction.journal_ops.len(), 1);
+            assert!(
+                transaction.nodes.len() < full_node_count / 4,
+                "incremental transaction rewrote too many nodes: {} of {full_node_count}",
+                transaction.nodes.len()
+            );
+            db.mark_storage_transaction_flushed(&transaction)?;
+        }
+
+        db.unregister_external_storage_hook();
+        Ok(())
+    }
+
+    #[test]
+    fn pending_and_unflushed_operations_compact_repeated_large_field_updates() -> Result<()> {
+        let db = Primadb::with_replica_id("compact-large-updates");
+        db.register_external_storage_hook();
+
+        for version in 0..16 {
+            db.root("checkpoint")
+                .field("active")
+                .put(format!("{version}:{}", "q".repeat(64 * 1024)))?;
+        }
+
+        assert_eq!(db.pending_operations().len(), 1);
+        let transaction = db.incremental_storage_transaction();
+        assert_eq!(transaction.journal_ops.len(), 1);
+        assert_eq!(transaction.metadata.pending_ops.len(), 1);
+        let browser_transaction = db.incremental_storage_transaction_without_pending_ops();
+        assert_eq!(browser_transaction.journal_ops.len(), 1);
+        assert!(browser_transaction.metadata.pending_ops.is_empty());
+        db.mark_storage_transaction_flushed(&transaction)?;
+        assert_eq!(db.pending_operations().len(), 1);
+        db.drain_pending_operations()?;
+        assert!(db.pending_operations().is_empty());
+
+        db.unregister_external_storage_hook();
         Ok(())
     }
 
