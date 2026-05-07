@@ -12,6 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 const STORAGE_SCHEMA_VERSION: u32 = 1;
+#[cfg(not(target_arch = "wasm32"))]
+const DIRECT_INDEX_LITERAL_COMPONENT_LIMIT: usize = 120;
+#[cfg(not(target_arch = "wasm32"))]
+const DIRECT_INDEX_LITERAL_PREFIX: &str = "v_";
+#[cfg(not(target_arch = "wasm32"))]
+const DIRECT_INDEX_HASH_PREFIX: &str = "h_";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageMetadata {
@@ -124,6 +130,13 @@ pub struct NodeIndexManifest {
     pub direct_index_keys: Vec<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+struct DirectIndexBucket {
+    entries: BTreeMap<String, DirectScalarIndexEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageTransaction {
     pub id: u64,
@@ -222,16 +235,113 @@ impl SegmentFileStore {
         self.root
             .join("indexes")
             .join("direct")
-            .join(encode_component(path))
+            .join(safe_direct_index_component(&encode_component(path)))
     }
 
     fn direct_index_path(&self, key: &str) -> std::path::PathBuf {
+        if let Some((encoded_path, sortable_key, encoded_node_id)) = direct_index_key_parts(key) {
+            return self
+                .root
+                .join("indexes")
+                .join("direct")
+                .join(safe_direct_index_component(encoded_path))
+                .join(safe_direct_index_component(sortable_key))
+                .join(format!(
+                    "{}.json",
+                    safe_direct_index_component(encoded_node_id)
+                ));
+        }
+
         let mut path = self.root.join("indexes");
         for segment in key.split('/') {
-            path.push(segment);
+            path.push(safe_direct_index_component(segment));
         }
         path.set_extension("json");
         path
+    }
+
+    fn read_direct_index_bucket_path(path: &std::path::Path) -> Result<DirectIndexBucket> {
+        if !path.exists() {
+            return Ok(DirectIndexBucket::default());
+        }
+        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+    }
+
+    fn write_direct_index_bucket_path(
+        path: &std::path::Path,
+        bucket: &DirectIndexBucket,
+    ) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_vec(bucket)?)?;
+        Ok(())
+    }
+
+    fn remove_direct_index_entry(&self, key: &str) -> Result<bool> {
+        let path = self.direct_index_path(key);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let mut bucket = Self::read_direct_index_bucket_path(&path)?;
+        let removed = bucket.entries.remove(key).is_some();
+        if bucket.entries.is_empty() {
+            std::fs::remove_file(path)?;
+        } else if removed {
+            Self::write_direct_index_bucket_path(&path, &bucket)?;
+        }
+        Ok(removed)
+    }
+
+    fn upsert_direct_index_entry(&self, key: &str, entry: &DirectScalarIndexEntry) -> Result<()> {
+        let path = self.direct_index_path(key);
+        let mut bucket = Self::read_direct_index_bucket_path(&path)?;
+        bucket.entries.insert(key.to_owned(), entry.clone());
+        Self::write_direct_index_bucket_path(&path, &bucket)
+    }
+
+    fn direct_index_scan_sortable_dirs(
+        &self,
+        root: &std::path::Path,
+        scan: &DirectIndexScan,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        if let Some(exact) = &scan.exact_sortable_key {
+            let dir = root.join(safe_direct_index_component(exact));
+            return Ok(dir.is_dir().then_some(dir).into_iter().collect());
+        }
+
+        let mut dirs = Vec::new();
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(literal) = literal_direct_index_component(&name)
+                && !scan.matches_sortable_key(literal)
+            {
+                continue;
+            }
+            dirs.push(path);
+        }
+        dirs.sort();
+        Ok(dirs)
+    }
+
+    fn collect_direct_index_entries_from_bucket(
+        file: &std::path::Path,
+        path: &str,
+        scan: &DirectIndexScan,
+        entries: &mut Vec<DirectScalarIndexEntry>,
+    ) -> Result<()> {
+        let bucket = Self::read_direct_index_bucket_path(file)?;
+        for entry in bucket.entries.values() {
+            if entry.path == path && scan.matches_sortable_key(&entry.sortable_key) {
+                entries.push(entry.clone());
+            }
+        }
+        Ok(())
     }
 
     fn journal_pending_path(&self, tx_id: u64) -> std::path::PathBuf {
@@ -399,20 +509,13 @@ impl IncrementalStore for SegmentFileStore {
                 .into_iter()
                 .filter(|key| !next_keys.contains(key))
             {
-                let stale_path = self.direct_index_path(&stale_key);
-                if stale_path.exists() {
-                    let _ = std::fs::remove_file(&stale_path);
-                }
+                let _ = self.remove_direct_index_entry(&stale_key)?;
             }
             for key in &manifest.direct_index_keys {
                 let Some(entry) = transaction.direct_indexes.get(key) else {
                     continue;
                 };
-                let path = self.direct_index_path(key);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(path, serde_json::to_vec(entry)?)?;
+                self.upsert_direct_index_entry(key, entry)?;
             }
             std::fs::write(
                 self.node_index_manifest_path(node_id),
@@ -492,38 +595,28 @@ impl IncrementalStore for SegmentFileStore {
             return Ok(Vec::new());
         }
 
-        let mut sortable_roots = std::fs::read_dir(&root)?
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| {
-                let path = entry.path();
-                path.is_dir()
-                    .then_some((entry.file_name().to_string_lossy().to_string(), path))
-            })
-            .collect::<Vec<_>>();
-        sortable_roots.sort_by(|left, right| left.0.cmp(&right.0));
-        if matches!(direction, QueryDirection::Desc) {
-            sortable_roots.reverse();
-        }
-
         let mut entries = Vec::new();
-        for (sortable_key, dir) in sortable_roots {
-            if !scan.matches_sortable_key(&sortable_key) {
-                continue;
-            }
+        for dir in self.direct_index_scan_sortable_dirs(&root, scan)? {
             let mut files = Vec::new();
             collect_files(&dir, &mut files)?;
             files.sort();
-            if matches!(direction, QueryDirection::Desc) {
-                files.reverse();
-            }
             for file in files {
-                let entry: DirectScalarIndexEntry =
-                    serde_json::from_str(&std::fs::read_to_string(file)?)?;
-                entries.push(entry);
-                if scan.limit.is_some_and(|limit| entries.len() >= limit) {
-                    return Ok(entries);
-                }
+                Self::collect_direct_index_entries_from_bucket(&file, path, scan, &mut entries)?;
             }
+        }
+        entries.sort_by(|left, right| {
+            left.sortable_key
+                .cmp(&right.sortable_key)
+                .then_with(|| left.node_id.cmp(&right.node_id))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        if matches!(direction, QueryDirection::Desc) {
+            entries.reverse();
+        }
+        if let Some(limit) = scan.limit
+            && entries.len() > limit
+        {
+            entries.truncate(limit);
         }
         Ok(entries)
     }
@@ -546,24 +639,14 @@ impl IncrementalStore for SegmentFileStore {
             let mut files = Vec::new();
             collect_files(&direct_root, &mut files)?;
             for file in files {
-                let Ok(relative) = file.strip_prefix(self.root.join("indexes")) else {
-                    continue;
-                };
-                let mut components = relative.components();
-                let Some(prefix) = components.next().and_then(|part| part.as_os_str().to_str())
-                else {
-                    continue;
-                };
-                if prefix != "direct" {
-                    continue;
-                }
-                let key = relative
-                    .with_extension("")
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if !live_direct.contains(&key) {
+                let mut bucket = Self::read_direct_index_bucket_path(&file)?;
+                let before = bucket.entries.len();
+                bucket.entries.retain(|key, _| live_direct.contains(key));
+                if bucket.entries.is_empty() {
                     std::fs::remove_file(file)?;
                     report.removed_direct_index_files += 1;
+                } else if bucket.entries.len() != before {
+                    Self::write_direct_index_bucket_path(&file, &bucket)?;
                 }
             }
             report.removed_empty_index_dirs = self.prune_empty_index_dirs(&direct_root)?;
@@ -687,6 +770,39 @@ pub fn direct_index_key(path: &str, sortable_key: &str, node_id: &str) -> String
         sortable_key,
         encode_component(node_id)
     )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn direct_index_key_parts(key: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = key.split('/');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some("direct"), Some(path), Some(sortable_key), Some(node_id), None) => {
+            Some((path, sortable_key, node_id))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn safe_direct_index_component(component: &str) -> String {
+    if component.len() <= DIRECT_INDEX_LITERAL_COMPONENT_LIMIT {
+        return format!("{DIRECT_INDEX_LITERAL_PREFIX}{component}");
+    }
+    format!(
+        "{DIRECT_INDEX_HASH_PREFIX}{}",
+        blake3::hash(component.as_bytes()).to_hex()
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn literal_direct_index_component(component: &str) -> Option<&str> {
+    component.strip_prefix(DIRECT_INDEX_LITERAL_PREFIX)
 }
 
 pub fn encode_component(input: &str) -> String {

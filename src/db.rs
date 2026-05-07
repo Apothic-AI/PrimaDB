@@ -7069,6 +7069,118 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_files_persist_large_string_scalar_without_filename_limit() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-large-scalar-{unique}"));
+        let first_ciphertext = format!("v1.{}", "a".repeat(64 * 1024));
+        let second_ciphertext = format!("v2.{}", "b".repeat(64 * 1024));
+
+        let writer = Primadb::with_replica_id("large-scalar-writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        let checkpoint = writer.root("starla").field("runtime").field("default");
+        checkpoint.put(json!({
+            "kind": "starla.encryptedRuntimeCheckpoint",
+            "version": 1,
+            "namespace": "default",
+            "encryption": {
+                "algorithm": "xchacha20poly1305",
+                "ciphertext": first_ciphertext,
+            },
+        }))?;
+        checkpoint.put(json!({
+            "kind": "starla.encryptedRuntimeCheckpoint",
+            "version": 1,
+            "namespace": "default",
+            "encryption": {
+                "algorithm": "xchacha20poly1305",
+                "ciphertext": second_ciphertext,
+            },
+        }))?;
+
+        let reader = Primadb::with_replica_id("large-scalar-reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        let restored = reader
+            .root("starla")
+            .field("runtime")
+            .field("default")
+            .once_json()?
+            .unwrap();
+        assert_eq!(
+            restored["encryption"]["ciphertext"].as_str(),
+            Some(second_ciphertext.as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_files_query_large_string_scalar_direct_indexes() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-large-index-{unique}"));
+        let alpha_ciphertext = format!("checkpoint-alpha.{}", "x".repeat(64 * 1024));
+        let beta_ciphertext = format!("checkpoint-beta.{}", "y".repeat(64 * 1024));
+
+        let writer = Primadb::with_replica_id("large-index-writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        writer.root("checkpoints").field("items").set(json!({
+            "name": "alpha",
+            "encryption": {
+                "ciphertext": alpha_ciphertext,
+            },
+        }))?;
+        writer.root("checkpoints").field("items").set(json!({
+            "name": "beta",
+            "encryption": {
+                "ciphertext": beta_ciphertext,
+            },
+        }))?;
+
+        let reader = Primadb::with_replica_id("large-index-reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        let exact = reader.root("checkpoints").field("items").query(QuerySpec {
+            filters: vec![QueryFilter::Eq {
+                path: "encryption.ciphertext".to_owned(),
+                value: json!(alpha_ciphertext),
+            }],
+            order: Some(crate::query::QueryOrder {
+                path: "name".to_owned(),
+                direction: QueryDirection::Asc,
+            }),
+            limit: Some(10),
+            offset: 0,
+        })?;
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].value["name"], "alpha");
+
+        let prefixed = reader.root("checkpoints").field("items").query(QuerySpec {
+            filters: vec![QueryFilter::Prefix {
+                path: "encryption.ciphertext".to_owned(),
+                value: "checkpoint-beta.".to_owned(),
+            }],
+            order: Some(crate::query::QueryOrder {
+                path: "name".to_owned(),
+                direction: QueryDirection::Asc,
+            }),
+            limit: Some(10),
+            offset: 0,
+        })?;
+        assert_eq!(prefixed.len(), 1);
+        assert_eq!(prefixed[0].value["name"], "beta");
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
     #[test]
     fn external_incremental_storage_keeps_ops_until_confirmed() -> Result<()> {
         let db = Primadb::with_replica_id("browser-durable");
