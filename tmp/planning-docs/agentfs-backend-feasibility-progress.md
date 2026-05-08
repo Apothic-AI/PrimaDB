@@ -74,6 +74,23 @@
   - `cargo test record --lib`: 1 passed, 62 filtered.
   - `cargo test segment --lib`: 7 passed, 56 filtered.
   - `cargo test lock --lib`: 1 passed, 62 filtered.
+
+## 2026-05-08 Reassessment After Commit `37049b6`
+
+- Confirmed commit `37049b6 Add ordered record storage and conditional batches` is present on `staging`.
+- Confirmed AgentFS still has no direct PrimaDB source/test usage, so no AgentFS compatibility patch is required for the new `RecordBatch` fields or report shape.
+- Confirmed previous AgentFS production caveats are now addressed:
+  - record storage uses ordered bounded key paths with prefix pruning instead of scan-all buckets.
+  - long keys use bounded indexed-prefix plus hash overflow storage.
+  - record batches support `exists`, `absent`, and `value` preconditions.
+  - delete-range expansion occurs inside the local transaction lock.
+  - Rust transactions expose record get/assert/put/delete helpers.
+- Updated cross-repo conclusion: PrimaDB now appears sufficient for a production-oriented AgentFS backend prototype without additional fundamental PrimaDB storage/API work. Remaining complexity belongs mostly to AgentFS integration and replacement of SQLite/Turso-specific storage assumptions.
+- Re-ran targeted checks:
+  - `cargo test record --lib`: 2 passed, 62 filtered.
+  - `cargo test precondition --lib`: 1 passed, 63 filtered.
+  - `cargo test segment --lib`: 8 passed, 56 filtered.
+  - `cargo test transaction --lib`: 10 passed, 54 filtered.
 - Implemented the next AgentFS-oriented record-storage tranche:
   - Replaced native SegmentFiles record buckets with ordered `records/by_key`
     entries so prefix/range scans can prune by key prefix instead of walking all
