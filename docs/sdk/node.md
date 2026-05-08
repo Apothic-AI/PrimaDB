@@ -25,9 +25,10 @@ pnpm run build
 ## Surface
 
 - local graph operations
-- durable native storage
+- durable native SegmentFiles storage with fsync/recovery reports and single-writer locking
 - native blob storage
 - bytes helpers
+- keyed records and prefix/range record scans
 - subscriptions
 - native relay server hosting
 - relay transport
@@ -49,7 +50,14 @@ db.setSnapshotEncryptionKey(key.keyBase64);
 db.openDurableStorage({
   kind: "segment_files",
   directory: "/tmp/primadb-node-demo",
+  durability: "full",
+  lockMode: { kind: "exclusive" },
 });
+
+db.putRecord("agentfs/inodes/1", { mode: "file", size: 4 });
+db.putRecordBytes("agentfs/chunks/1/000000", Buffer.from([1, 2, 3, 4]));
+console.log(db.scanRecords({ prefix: "agentfs/chunks/1/", limit: 100 }).entries);
+db.syncStorage();
 
 db.setNetworkHooks({
   onPull(context) {
@@ -58,6 +66,8 @@ db.setNetworkHooks({
     }
   },
 });
+
+db.closeDurableStorage();
 ```
 
 ## Transactions And Strict Scopes

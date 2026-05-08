@@ -36,6 +36,10 @@ db.attachNodeScript(scriptPath, {
 });
 const scriptResults = db.executeNodeScripts(scriptPath, { capabilities: scriptCapabilities });
 const scripted = db.chain("derived").field("scripted").once();
+db.putRecord("agentfs/inode/1", { kind: "file", size: 3 });
+db.putRecordBytes("agentfs/chunk/1/000000", new Uint8Array([1, 2, 3]));
+const record = db.getRecord("agentfs/inode/1");
+const recordScan = db.scanRecords({ prefix: "agentfs/" });
 
 const report = {
   base: {
@@ -51,6 +55,12 @@ const report = {
     Scope: typeof base.Scope === "function",
     setNetworkHooks: typeof base.setNetworkHooks === "function",
     clearNetworkHooks: typeof base.clearNetworkHooks === "function",
+    putRecord: typeof base.Primadb?.prototype?.putRecord === "function",
+    scanRecords: typeof base.Primadb?.prototype?.scanRecords === "function",
+    recordRoundTrip:
+      record?.value?.value?.size === 3 &&
+      Array.isArray(recordScan?.entries) &&
+      recordScan.entries.length === 2,
     scriptingRoundTrip:
       Array.isArray(scriptResults) &&
       scriptResults[0]?.report?.status === "committed" &&

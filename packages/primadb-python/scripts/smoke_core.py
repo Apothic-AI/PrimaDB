@@ -115,6 +115,10 @@ def main() -> None:
         db.chain("graph").field("bob").put({"name": "Bob"})
         binary.put_bytes(payload)
         blob_ref = blob_chain.put_blob(payload, "application/octet-stream")
+        db.put_record("agentfs/inode/1", {"kind": "file", "size": len(payload)})
+        db.put_record_bytes("agentfs/chunk/1/000000", payload)
+        record_scan = db.scan_records({"prefix": "agentfs/"})
+        storage_sync = db.sync_storage()
         round_trip_bytes = binary.once_bytes()
         round_trip_blob = blob_chain.get_blob()
 
@@ -127,6 +131,7 @@ def main() -> None:
                 break
             time.sleep(0.05)
 
+        db.close_durable_storage()
         restored = Primadb("python-core-b")
         restored.set_snapshot_encryption_key(password_key["keyBase64"])
         restored.set_transport_encryption_key(password_key["keyBase64"])
@@ -151,6 +156,8 @@ def main() -> None:
         )
         restored_bytes = restored.chain("assets").field("bytes").once_bytes()
         restored_blob = restored.chain("assets").field("blob").get_blob()
+        restored_record = restored.get_record("agentfs/inode/1")
+        restored_record_scan = restored.scan_records({"prefix": "agentfs/chunk/1/"})
         traversal = restored.chain("graph").field("alice").traverse(
             {
                 "maxDepth": 1,
@@ -190,6 +197,10 @@ def main() -> None:
                     "roundTripBlob": list(round_trip_blob) if round_trip_blob is not None else None,
                     "restoredBytes": list(restored_bytes) if restored_bytes is not None else None,
                     "restoredBlob": list(restored_blob) if restored_blob is not None else None,
+                    "recordScan": record_scan,
+                    "storageSync": storage_sync,
+                    "restoredRecord": restored_record,
+                    "restoredRecordScan": restored_record_scan,
                     "traversal": traversal,
                     "traversalInitial": traversal_initial,
                     "traversalUpdate": traversal_update,
@@ -219,6 +230,10 @@ def main() -> None:
                         and round_trip_blob == payload
                         and restored_bytes == payload
                         and restored_blob == payload
+                        and storage_sync["synced"] is True
+                        and len(record_scan["entries"]) == 2
+                        and restored_record["value"]["value"]["size"] == len(payload)
+                        and len(restored_record_scan["entries"]) == 1
                         and ledger_report["status"] == "committed"
                         and restored_ledger_balance == 10
                         and provisional_report["status"] == "provisional"

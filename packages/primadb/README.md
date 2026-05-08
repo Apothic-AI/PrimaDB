@@ -25,6 +25,11 @@ The browser bindings also expose `db.scope(...)`, `db.transaction(...)`, and
 Relay sync clients can submit strict-scope transactions to an authority peer with
 `remoteTransaction(...)`.
 
+The browser bindings expose graph-native keyed records with `putRecord(...)`, `putRecordBytes(...)`,
+`putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and
+`deleteRecord(...)`. Records are stored through the same graph engine and durable browser segment
+paths, so they participate in normal watches, sync, transactions, and blob storage.
+
 The browser package build includes node-attached scripting through `attachNodeScript(...)`,
 `nodeScripts(...)`, `removeNodeScript(...)`, and `executeNodeScripts(...)`. Script execution is
 explicit and capability-scoped; scripts do not receive encryption keys or host/network access.
@@ -139,6 +144,10 @@ await db.openDurableStorage({
   directory: "primadb-browser-demo",
   namespace: "main",
 });
+db.putRecord("agentfs/inodes/1", { mode: "file", size: 4 });
+db.putRecordBytes("agentfs/chunks/1/000000", new Uint8Array([1, 2, 3, 4]));
+const recordPage = db.scanRecords({ prefix: "agentfs/chunks/1/", limit: 100 });
+console.log(recordPage.entries.length);
 db.chain("assets").field("avatar").putBytes(new Uint8Array([1, 2, 3, 4]));
 await db
   .chain("assets")

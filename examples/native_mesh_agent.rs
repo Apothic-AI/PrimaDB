@@ -25,6 +25,8 @@ async fn main() -> anyhow::Result<()> {
         Some(db.open_durable_storage(DurableStorageConfig::SegmentFiles {
             directory,
             journal_retention: 8,
+            durability: Default::default(),
+            lock_mode: Default::default(),
         })?)
     } else {
         None

@@ -101,6 +101,16 @@ class Primadb {
   applyOperationsJson(payload: string): number;
   useBrowserStorage(key: string): boolean;
   openDurableStorage(config: any): Promise<any>;
+  putRecord(key: string, value: any): void;
+  putRecordBytes(key: string, bytes: Uint8Array): void;
+  putRecordBlob(key: string, bytes: Uint8Array, media_type: string | null): any;
+  getRecord(key: string): any;
+  scanRecords(scan: any): any;
+  applyRecordBatch(batch: any): any;
+  deleteRecord(key: string): void;
+  syncStorage(): any;
+  storageRecoveryReport(): any;
+  closeDurableStorage(): void;
   registerUser(alias: string, public_key_base64: string, roots: any): void;
   authenticateLocalUser(alias: string, secret_key_base64: string, roots: any): void;
   requireSignedSync(required: boolean): void;
@@ -294,6 +304,12 @@ Segment persistence stores current graph state and storage transaction bookkeepi
 Use OPFS segments for large or high-churn browser-local datasets when `navigator.storage.getDirectory()` is available. IndexedDB segments remain the compatibility path.
 
 `stats()` reports queued/coalesced events, successful and failed writes, full replacements, incremental transactions, entries written/deleted, estimated bytes written, and the last write error. `estimateStorage()` reports logical namespace size; OPFS also includes origin quota/usage when the browser exposes it.
+
+## Keyed records
+
+`putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.
+
+Records persist through IndexedDB/OPFS segment persistence and use the same graph transaction, watch, sync, and blob paths as normal graph writes.
 
 ## Strict consistency and transactions
 

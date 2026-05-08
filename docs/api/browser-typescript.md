@@ -56,6 +56,10 @@ export * from "./hooks.js";
 ```
 
 ```ts
+export * from "./types.js";
+```
+
+```ts
 export { initWasm };
 ```
 
@@ -203,6 +207,258 @@ Kind: function
 
 ```ts
 export declare function createPrimadbMoqLoopback(options: PrimadbMoqLoopbackOptions): Promise<PrimadbMoqLoopback>;
+```
+
+## `packages/primadb/types.ts`
+
+Shared browser storage, blob, and keyed-record TypeScript helper types.
+
+### Direct exports
+
+#### `JsonPrimitive`
+
+Kind: type alias
+
+```ts
+export type JsonPrimitive = string | number | boolean | null;
+```
+
+#### `JsonValue`
+
+Kind: type alias
+
+```ts
+export type JsonValue = JsonPrimitive | JsonValue[] | {
+    [key: string]: JsonValue;
+};
+```
+
+#### `SegmentDurability`
+
+Kind: type alias
+
+```ts
+export type SegmentDurability = "full" | "data" | "relaxed";
+```
+
+#### `SegmentLockMode`
+
+Kind: type alias
+
+```ts
+export type SegmentLockMode = {
+    kind: "exclusive";
+} | {
+    kind: "wait";
+    timeoutMillis: number;
+} | {
+    kind: "disabled";
+};
+```
+
+#### `DurableStorageConfig`
+
+Kind: type alias
+
+```ts
+export type DurableStorageConfig = {
+    kind: "indexed_db_snapshots";
+    databaseName: string;
+    storeName: string;
+    key: string;
+    loadExisting?: boolean;
+    autoPersist?: boolean;
+} | {
+    kind: "indexed_db_segments";
+    databaseName: string;
+    storeName: string;
+    namespace: string;
+    loadExisting?: boolean;
+    autoPersist?: boolean;
+} | {
+    kind: "opfs_segments";
+    directory: string;
+    namespace: string;
+    loadExisting?: boolean;
+    autoPersist?: boolean;
+};
+```
+
+#### `DurableStorageBinding`
+
+Kind: interface
+
+```ts
+export interface DurableStorageBinding {
+    backend: string;
+    incremental: boolean;
+    loadedExisting: boolean;
+    autoPersist: boolean;
+    durability?: SegmentDurability;
+    lockMode?: SegmentLockMode;
+}
+```
+
+#### `BlobStorageConfig`
+
+Kind: type alias
+
+```ts
+export type BlobStorageConfig = {
+    kind: "memory";
+} | {
+    kind: "indexed_db";
+    databaseName: string;
+    storeName: string;
+    namespace: string;
+};
+```
+
+#### `BlobStorageBinding`
+
+Kind: interface
+
+```ts
+export interface BlobStorageBinding {
+    backend: string;
+    contentAddressed: boolean;
+    durability?: SegmentDurability;
+}
+```
+
+#### `BlobRef`
+
+Kind: interface
+
+```ts
+export interface BlobRef {
+    id: string;
+    bytes: number;
+    mediaType?: string | null;
+}
+```
+
+#### `RecordValue`
+
+Kind: type alias
+
+```ts
+export type RecordValue = {
+    kind: "json";
+    value: JsonValue;
+} | {
+    kind: "bytes";
+    value: string;
+} | {
+    kind: "blob";
+    value: BlobRef;
+};
+```
+
+#### `RecordEntry`
+
+Kind: interface
+
+```ts
+export interface RecordEntry {
+    key: string;
+    value: RecordValue;
+}
+```
+
+#### `RecordScan`
+
+Kind: interface
+
+```ts
+export interface RecordScan {
+    prefix?: string | null;
+    startAt?: string | null;
+    startAfter?: string | null;
+    endAt?: string | null;
+    endBefore?: string | null;
+    reverse?: boolean;
+    limit?: number | null;
+    cursor?: string | null;
+}
+```
+
+#### `RecordScanResult`
+
+Kind: interface
+
+```ts
+export interface RecordScanResult {
+    entries: RecordEntry[];
+    nextCursor?: string | null;
+}
+```
+
+#### `RecordMutation`
+
+Kind: type alias
+
+```ts
+export type RecordMutation = {
+    kind: "put";
+    key: string;
+    value: RecordValue;
+} | {
+    kind: "delete";
+    key: string;
+} | {
+    kind: "delete_range";
+    scan: RecordScan;
+};
+```
+
+#### `RecordBatch`
+
+Kind: interface
+
+```ts
+export interface RecordBatch {
+    mutations?: RecordMutation[];
+}
+```
+
+#### `RecordBatchReport`
+
+Kind: interface
+
+```ts
+export interface RecordBatchReport {
+    puts: number;
+    deletes: number;
+    rangeDeletes: number;
+    operationCount: number;
+}
+```
+
+#### `StorageSyncReport`
+
+Kind: interface
+
+```ts
+export interface StorageSyncReport {
+    backend: string;
+    durability: string;
+    synced: boolean;
+}
+```
+
+#### `StorageRecoveryReport`
+
+Kind: interface
+
+```ts
+export interface StorageRecoveryReport {
+    appliedTransactions: number;
+    skippedTransactions: number;
+    removedPendingFiles: number;
+    removedTempFiles: number;
+    quarantinedFiles: number;
+}
 ```
 
 ## `packages/primadb/hooks.ts`

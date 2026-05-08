@@ -83,6 +83,10 @@ export * from "./hooks.js";
 ```
 
 ```ts
+export * from "./types.js";
+```
+
+```ts
 export { initWasm as initWasmThreads };
 ```
 

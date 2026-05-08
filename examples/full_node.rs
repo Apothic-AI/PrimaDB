@@ -30,6 +30,8 @@ async fn main() -> anyhow::Result<()> {
     let storage = db.open_durable_storage(DurableStorageConfig::SegmentFiles {
         directory: options.storage_dir.clone(),
         journal_retention: 8,
+        durability: Default::default(),
+        lock_mode: Default::default(),
     })?;
 
     let mut mesh_config = MeshConfig::relay(&options.room, &relay_url);

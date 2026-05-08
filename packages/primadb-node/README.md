@@ -9,8 +9,10 @@ Current surface:
 - `Primadb` and `Chain` for local graph operations
 - `Scope` and step-based transactions for local ACID writes and coordinated strict-scope proposals
 - durable native storage through `openDurableStorage(...)`
+- explicit SegmentFiles sync/recovery/close helpers through `syncStorage()`, `storageRecoveryReport()`, and `closeDurableStorage()`
 - content-addressed native blob storage through `openBlobStorage(...)`
 - first-class binary helpers through `putBytes()`, `onceBytes()`, `putBlob()`, and `getBlob()`
+- graph-native keyed records through `putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)`
 - subscriptions
 - native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connectRelay(...)`, including disconnected startup with background relay retry
@@ -55,10 +57,13 @@ db.setSnapshotEncryptionKey(key.keyBase64);
 db.openDurableStorage({
   kind: "segment_files",
   directory: "/tmp/primadb-node-demo",
+  durability: "full",
+  lockMode: { kind: "exclusive" },
 });
 db.openBlobStorage({
   kind: "files",
   directory: "/tmp/primadb-node-demo-blobs",
+  durability: "full",
 });
 
 db.chain("notes").field("items").set({
@@ -82,6 +87,12 @@ await db
   .chain("assets")
   .field("archive")
   .putBlob(Buffer.from([5, 6, 7, 8]), "application/octet-stream");
+
+db.putRecord("agentfs/inodes/1", { mode: "file", size: 4 });
+db.putRecordBytes("agentfs/chunks/1/000000", Buffer.from([1, 2, 3, 4]));
+const chunks = db.scanRecords({ prefix: "agentfs/chunks/1/", limit: 100 });
+console.log(chunks.entries.length);
+db.syncStorage();
 
 const scriptPath = { anchor: "notes", segments: ["scripted"] };
 const scriptCapabilities = {
@@ -118,6 +129,8 @@ db.setNetworkHooks({
     }
   },
 });
+
+db.closeDurableStorage();
 ```
 
 ## Smoke Tests

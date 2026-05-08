@@ -43,6 +43,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Link references via `{"$link": "node-id"}` markers.
 - First-class small/medium binary fields via `put_bytes()` / `putBytes(...)` and `{"$bytes": "..."}` markers.
 - Separate content-addressed blob storage for larger binary payloads, with blob refs stored in-graph via `{"$blob": {...}}`.
+- Graph-native keyed record APIs for point reads/writes, prefix/range scans, byte/blob records, and atomic record batches.
 - Reactive subscriptions.
 - Local atomic transactions with preconditions, revision checks, and increment steps.
 - Strict scope policies for local-transactional and single-authority coordinated graph roots.
@@ -70,7 +71,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
 - SEA-style browser crypto surface with pair generation, password-derived keys, sign/verify, encrypt/decrypt, HKDF-backed shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
-- Incremental segment-backed native storage with lazy node restore, canonical node/index records, manifest metadata, nested scalar indexes, bounded direct-index scans, journaled transactions, and explicit vacuum/GC support.
+- Incremental segment-backed native storage with lazy node restore, canonical node/index/record files, manifest metadata, nested scalar indexes, bounded direct-index scans, journaled transactions, startup recovery, explicit fsync durability, single-writer file locking, and explicit vacuum/GC support.
 - Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
 - Gun compatibility surface with `Gun` / `GunChain`, Gun link markers, and Gun graph import/export helpers.
 - Runtime stats and limit controls for transport and queue hardening.
@@ -92,6 +93,7 @@ This is intentionally not a 1:1 port of Gun internals.
 - Browser support stays on stable `wasm32-unknown-unknown` patterns instead of assuming newer WebAssembly proposals are enabled by default.
 - Threaded WASM is an explicit opt-in path layered on top of the default browser build instead of changing the default toolchain or hosting requirements.
 - Native storage no longer needs full snapshot hydration up front: the incremental store can restore clock/pending metadata first and lazy-load nodes on demand.
+- Native SegmentFiles default to crash-safe local durability and exclusive single-writer locking. Callers can explicitly choose weaker durability or disabled locking only when they own the surrounding safety model.
 - Explicit `vacuum_storage()` cleanup keeps native segment files and attached blob stores from accumulating orphaned artifacts without forcing automatic destructive GC into the hot write path.
 
 That gives the project a more inspectable merge model and makes it easier to test and evolve without carrying over Gun's event-routing bugs.

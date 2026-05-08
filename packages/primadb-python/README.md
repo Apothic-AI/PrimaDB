@@ -9,8 +9,10 @@ Current surface:
 - `Primadb` and `Chain` for local graph operations
 - `Scope` and step-based transactions for local ACID writes and coordinated strict-scope proposals
 - durable native storage through `open_durable_storage(...)`
+- explicit SegmentFiles sync/recovery/close helpers through `sync_storage()`, `storage_recovery_report()`, and `close_durable_storage()`
 - content-addressed native blob storage through `open_blob_storage(...)`
 - first-class binary helpers through `put_bytes()`, `once_bytes()`, `put_blob()`, and `get_blob()`
+- graph-native keyed records through `put_record(...)`, `put_record_bytes(...)`, `put_record_blob(...)`, `get_record(...)`, `scan_records(...)`, `apply_record_batch(...)`, and `delete_record(...)`
 - subscriptions
 - native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connect_relay(...)`, including disconnected startup with background relay retry
@@ -60,12 +62,15 @@ db.open_durable_storage(
     {
         "kind": "segment_files",
         "directory": "/tmp/primadb-python-demo",
+        "durability": "full",
+        "lockMode": {"kind": "exclusive"},
     }
 )
 db.open_blob_storage(
     {
         "kind": "files",
         "directory": "/tmp/primadb-python-demo-blobs",
+        "durability": "full",
     }
 )
 
@@ -95,6 +100,12 @@ db.chain("assets").field("archive").put_blob(
     b"\x05\x06\x07\x08",
     "application/octet-stream",
 )
+
+db.put_record("agentfs/inodes/1", {"mode": "file", "size": 4})
+db.put_record_bytes("agentfs/chunks/1/000000", b"\x01\x02\x03\x04")
+chunks = db.scan_records({"prefix": "agentfs/chunks/1/", "limit": 100})
+print(len(chunks["entries"]))
+db.sync_storage()
 
 script_path = {"anchor": "notes", "segments": ["scripted"]}
 script_capabilities = {
@@ -136,6 +147,7 @@ class PrivateDocsHooks:
 
 
 db.set_network_hooks(PrivateDocsHooks())
+db.close_durable_storage()
 ```
 
 ## Smoke Tests

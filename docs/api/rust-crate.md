@@ -43,6 +43,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `BlobStorageConfig`
 - `BlobStore`
 - `FileBlobStore`
+- `FileBlobStoreOptions`
 - `MemoryBlobStore`
 - `StoredBlob`
 
@@ -106,6 +107,9 @@ This page covers the public Rust crate surface. The site also serves the full bu
 
 - `DurableStorageBinding`
 - `DurableStorageConfig`
+- `SegmentDurability`
+- `SegmentFileStoreOptions`
+- `SegmentLockMode`
 
 ### `engine`
 
@@ -119,12 +123,17 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `DirectScalarIndexEntry`
 - `encode_component`
 - `IncrementalStore`
+- `is_record_node_id`
 - `node_matches_root`
 - `NodeIndexManifest`
 - `operation_matches_root`
+- `record_entry_from_node_state`
+- `record_node_id`
 - `SegmentFileStore`
 - `sortable_scalar_key`
 - `StorageMetadata`
+- `StorageRecoveryReport`
+- `StorageSyncReport`
 - `StorageTransaction`
 - `StorageVacuumReport`
 - `StoredAuthFieldMeta`
@@ -195,6 +204,16 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `QueryFilter`
 - `QueryOrder`
 - `QuerySpec`
+
+### `record`
+
+- `RecordBatch`
+- `RecordBatchReport`
+- `RecordEntry`
+- `RecordMutation`
+- `RecordScan`
+- `RecordScanResult`
+- `RecordValue`
 
 ### `router`
 

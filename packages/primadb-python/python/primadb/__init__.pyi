@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol, TypedDict
+from typing import Any, Literal, Optional, Protocol, TypedDict
 
 class PresenceIdentity(TypedDict, total=False):
     publicKey: str
@@ -110,6 +110,129 @@ class MeshConfig(TypedDict, total=False):
     iceServers: list[IceServerConfig]
     sessionAuth: SessionAuthConfig
 
+SegmentDurability = Literal["full", "data", "relaxed"]
+
+class SegmentLockExclusive(TypedDict):
+    kind: Literal["exclusive"]
+
+class SegmentLockWait(TypedDict):
+    kind: Literal["wait"]
+    timeoutMillis: int
+
+class SegmentLockDisabled(TypedDict):
+    kind: Literal["disabled"]
+
+SegmentLockMode = SegmentLockExclusive | SegmentLockWait | SegmentLockDisabled
+
+class SnapshotFileStorageConfig(TypedDict):
+    kind: Literal["snapshot_file"]
+    path: str
+
+class SegmentFilesStorageConfig(TypedDict, total=False):
+    kind: Literal["segment_files"]
+    directory: str
+    journalRetention: int
+    durability: SegmentDurability
+    lockMode: SegmentLockMode
+
+DurableStorageConfig = SnapshotFileStorageConfig | SegmentFilesStorageConfig
+
+class DurableStorageBinding(TypedDict, total=False):
+    backend: str
+    incremental: bool
+    loadedExisting: bool
+    autoPersist: bool
+    durability: SegmentDurability
+    lockMode: SegmentLockMode
+
+class MemoryBlobStorageConfig(TypedDict):
+    kind: Literal["memory"]
+
+class FilesBlobStorageConfig(TypedDict, total=False):
+    kind: Literal["files"]
+    directory: str
+    durability: SegmentDurability
+
+BlobStorageConfig = MemoryBlobStorageConfig | FilesBlobStorageConfig
+
+class BlobStorageBinding(TypedDict, total=False):
+    backend: str
+    contentAddressed: bool
+    durability: SegmentDurability
+
+class BlobRef(TypedDict, total=False):
+    id: str
+    bytes: int
+    mediaType: Optional[str]
+
+class RecordJsonValue(TypedDict):
+    kind: Literal["json"]
+    value: Any
+
+class RecordBytesValue(TypedDict):
+    kind: Literal["bytes"]
+    value: str
+
+class RecordBlobValue(TypedDict):
+    kind: Literal["blob"]
+    value: BlobRef
+
+RecordValue = RecordJsonValue | RecordBytesValue | RecordBlobValue
+
+class RecordEntry(TypedDict):
+    key: str
+    value: RecordValue
+
+class RecordScan(TypedDict, total=False):
+    prefix: Optional[str]
+    startAt: Optional[str]
+    startAfter: Optional[str]
+    endAt: Optional[str]
+    endBefore: Optional[str]
+    reverse: bool
+    limit: Optional[int]
+    cursor: Optional[str]
+
+class RecordScanResult(TypedDict, total=False):
+    entries: list[RecordEntry]
+    nextCursor: Optional[str]
+
+class RecordPutMutation(TypedDict):
+    kind: Literal["put"]
+    key: str
+    value: RecordValue
+
+class RecordDeleteMutation(TypedDict):
+    kind: Literal["delete"]
+    key: str
+
+class RecordDeleteRangeMutation(TypedDict):
+    kind: Literal["delete_range"]
+    scan: RecordScan
+
+RecordMutation = RecordPutMutation | RecordDeleteMutation | RecordDeleteRangeMutation
+
+class RecordBatch(TypedDict, total=False):
+    mutations: list[RecordMutation]
+
+class RecordBatchReport(TypedDict):
+    puts: int
+    deletes: int
+    rangeDeletes: int
+    operationCount: int
+
+class StorageSyncReport(TypedDict):
+    backend: str
+    durability: str
+    synced: bool
+
+class StorageRecoveryReport(TypedDict):
+    appliedTransactions: int
+    skippedTransactions: int
+    removedPendingFiles: int
+    removedTempFiles: int
+    quarantinedFiles: int
+
 class ScriptPathGrant(TypedDict, total=False):
     root: str
     segments: list[str]
@@ -179,8 +302,18 @@ class Primadb:
     def apply_operations(self, operations: Any) -> int: ...
     def apply_envelope(self, envelope: Any) -> int: ...
     def apply_operations_json(self, payload: str) -> int: ...
-    def open_durable_storage(self, config: Any) -> Any: ...
-    def open_blob_storage(self, config: Any) -> Any: ...
+    def open_durable_storage(self, config: DurableStorageConfig | dict[str, Any]) -> DurableStorageBinding: ...
+    def open_blob_storage(self, config: BlobStorageConfig | dict[str, Any]) -> BlobStorageBinding: ...
+    def close_durable_storage(self) -> None: ...
+    def sync_storage(self) -> StorageSyncReport: ...
+    def storage_recovery_report(self) -> Optional[StorageRecoveryReport]: ...
+    def put_record(self, key: str, value: Any) -> None: ...
+    def put_record_bytes(self, key: str, value: bytes) -> None: ...
+    def put_record_blob(self, key: str, value: bytes, media_type: Optional[str] = ...) -> BlobRef: ...
+    def get_record(self, key: str) -> Optional[RecordEntry]: ...
+    def scan_records(self, scan: RecordScan | dict[str, Any]) -> RecordScanResult: ...
+    def apply_record_batch(self, batch: RecordBatch | dict[str, Any]) -> RecordBatchReport: ...
+    def delete_record(self, key: str) -> None: ...
     def attach_node_script(self, path: Any, script: NodeScript | dict[str, Any]) -> None: ...
     def remove_node_script(self, path: Any, script_id: str) -> None: ...
     def node_scripts(self, path: Any) -> list[NodeScript]: ...

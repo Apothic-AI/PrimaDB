@@ -95,6 +95,10 @@ try {
   });
   binary.putBytes(payload);
   const blobRef = blobChain.putBlob(payload, "application/octet-stream");
+  db.putRecord("agentfs/inode/1", { kind: "file", size: payload.length });
+  db.putRecordBytes("agentfs/chunk/1/000000", payload);
+  const recordScan = db.scanRecords({ prefix: "agentfs/" });
+  const storageSync = db.syncStorage();
   const roundTripBytes = binary.onceBytes();
   const roundTripBlob = blobChain.getBlob();
 
@@ -106,6 +110,7 @@ try {
     filters: [{ kind: "prefix", path: "title", value: "Node core" }],
     order: { path: "createdAt", direction: "desc" },
   });
+  db.closeDurableStorage();
 
   const restored = new Primadb("node-core-b");
   restored.setSnapshotEncryptionKey(passwordKey.keyBase64);
@@ -124,6 +129,8 @@ try {
   });
   const restoredBytes = restored.chain("assets").field("bytes").onceBytes();
   const restoredBlob = restored.chain("assets").field("blob").getBlob();
+  const restoredRecord = restored.getRecord("agentfs/inode/1");
+  const restoredRecordScan = restored.scanRecords({ prefix: "agentfs/chunk/1/" });
   const traversal = restored.chain("graph").field("alice").traverse({
     maxDepth: 1,
     includeValues: true,
@@ -165,6 +172,10 @@ try {
         roundTripBlob: roundTripBlob ? Array.from(roundTripBlob) : null,
         restoredBytes: restoredBytes ? Array.from(restoredBytes) : null,
         restoredBlob: restoredBlob ? Array.from(restoredBlob) : null,
+        recordScan,
+        storageSync,
+        restoredRecord,
+        restoredRecordScan,
         traversal,
         traversalInitial,
         traversalUpdate,
@@ -190,6 +201,10 @@ try {
           JSON.stringify(roundTripBlob ? Array.from(roundTripBlob) : null) === JSON.stringify(Array.from(payload)) &&
           JSON.stringify(restoredBytes ? Array.from(restoredBytes) : null) === JSON.stringify(Array.from(payload)) &&
           JSON.stringify(restoredBlob ? Array.from(restoredBlob) : null) === JSON.stringify(Array.from(payload)) &&
+          storageSync.synced === true &&
+          recordScan.entries.length === 2 &&
+          restoredRecord?.value?.value?.size === payload.length &&
+          restoredRecordScan.entries.length === 1 &&
           ledgerReport.status === "committed" &&
           restoredLedgerBalance === 10 &&
           provisionalReport.status === "provisional" &&

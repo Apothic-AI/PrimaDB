@@ -267,6 +267,31 @@ export type DurableStorageConfig = {
     kind: "segment_files";
     directory: string;
     journalRetention?: number;
+    durability?: SegmentDurability;
+    lockMode?: SegmentLockMode;
+};
+```
+
+#### `SegmentDurability`
+
+Kind: type alias
+
+```ts
+export type SegmentDurability = "full" | "data" | "relaxed";
+```
+
+#### `SegmentLockMode`
+
+Kind: type alias
+
+```ts
+export type SegmentLockMode = {
+    kind: "exclusive";
+} | {
+    kind: "wait";
+    timeoutMillis: number;
+} | {
+    kind: "disabled";
 };
 ```
 
@@ -280,6 +305,8 @@ export interface DurableStorageBinding {
     incremental: boolean;
     loadedExisting: boolean;
     autoPersist: boolean;
+    durability?: SegmentDurability;
+    lockMode?: SegmentLockMode;
 }
 ```
 
@@ -293,6 +320,7 @@ export type BlobStorageConfig = {
 } | {
     kind: "files";
     directory: string;
+    durability?: SegmentDurability;
 };
 ```
 
@@ -304,6 +332,142 @@ Kind: interface
 export interface BlobStorageBinding {
     backend: string;
     contentAddressed: boolean;
+    durability?: SegmentDurability;
+}
+```
+
+#### `BlobRef`
+
+Kind: interface
+
+```ts
+export interface BlobRef {
+    id: string;
+    bytes: number;
+    mediaType?: string | null;
+}
+```
+
+#### `RecordValue`
+
+Kind: type alias
+
+```ts
+export type RecordValue = {
+    kind: "json";
+    value: JsonValue;
+} | {
+    kind: "bytes";
+    value: string;
+} | {
+    kind: "blob";
+    value: BlobRef;
+};
+```
+
+#### `RecordEntry`
+
+Kind: interface
+
+```ts
+export interface RecordEntry {
+    key: string;
+    value: RecordValue;
+}
+```
+
+#### `RecordScan`
+
+Kind: interface
+
+```ts
+export interface RecordScan {
+    prefix?: string | null;
+    startAt?: string | null;
+    startAfter?: string | null;
+    endAt?: string | null;
+    endBefore?: string | null;
+    reverse?: boolean;
+    limit?: number | null;
+    cursor?: string | null;
+}
+```
+
+#### `RecordScanResult`
+
+Kind: interface
+
+```ts
+export interface RecordScanResult {
+    entries: RecordEntry[];
+    nextCursor?: string | null;
+}
+```
+
+#### `RecordMutation`
+
+Kind: type alias
+
+```ts
+export type RecordMutation = {
+    kind: "put";
+    key: string;
+    value: RecordValue;
+} | {
+    kind: "delete";
+    key: string;
+} | {
+    kind: "delete_range";
+    scan: RecordScan;
+};
+```
+
+#### `RecordBatch`
+
+Kind: interface
+
+```ts
+export interface RecordBatch {
+    mutations?: RecordMutation[];
+}
+```
+
+#### `RecordBatchReport`
+
+Kind: interface
+
+```ts
+export interface RecordBatchReport {
+    puts: number;
+    deletes: number;
+    rangeDeletes: number;
+    operationCount: number;
+}
+```
+
+#### `StorageSyncReport`
+
+Kind: interface
+
+```ts
+export interface StorageSyncReport {
+    backend: string;
+    durability: string;
+    synced: boolean;
+}
+```
+
+#### `StorageRecoveryReport`
+
+Kind: interface
+
+```ts
+export interface StorageRecoveryReport {
+    appliedTransactions: number;
+    skippedTransactions: number;
+    removedPendingFiles: number;
+    removedTempFiles: number;
+    quarantinedFiles: number;
 }
 ```
 
@@ -940,6 +1104,16 @@ export declare class Primadb {
     applyOperationsJson(payload: string): number;
     openDurableStorage(config: DurableStorageConfig): DurableStorageBinding;
     openBlobStorage(config: BlobStorageConfig): BlobStorageBinding;
+    closeDurableStorage(): void;
+    syncStorage(): StorageSyncReport;
+    storageRecoveryReport(): StorageRecoveryReport | null;
+    putRecord(key: string, value: JsonValue): void;
+    putRecordBytes(key: string, value: Uint8Array): void;
+    putRecordBlob(key: string, value: Uint8Array, mediaType?: string | null): BlobRef;
+    getRecord(key: string): RecordEntry | null;
+    scanRecords(scan: RecordScan): RecordScanResult;
+    applyRecordBatch(batch: RecordBatch): RecordBatchReport;
+    deleteRecord(key: string): void;
     attachNodeScript(path: RemotePath, script: NodeScript): void;
     removeNodeScript(path: RemotePath, scriptId: string): void;
     nodeScripts(path: RemotePath): NodeScript[];

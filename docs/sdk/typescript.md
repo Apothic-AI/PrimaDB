@@ -41,6 +41,15 @@ await initPrimadb();
 const db = new Primadb("browser-a");
 const key = derivePasswordKey("correct horse battery staple");
 db.setSnapshotEncryptionKey(key.keyBase64);
+await db.openDurableStorage({
+  kind: "opfs_segments",
+  directory: "primadb-browser-demo",
+  namespace: "main",
+});
+
+db.putRecord("agentfs/inodes/1", { mode: "file", size: 4 });
+db.putRecordBytes("agentfs/chunks/1/000000", new Uint8Array([1, 2, 3, 4]));
+console.log(db.scanRecords({ prefix: "agentfs/chunks/1/", limit: 100 }).entries);
 
 setNetworkHooks(db, {
   onPull(context) {

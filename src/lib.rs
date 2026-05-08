@@ -24,6 +24,7 @@ mod operation;
 mod parallel;
 mod persistence;
 mod query;
+mod record;
 mod router;
 #[cfg(feature = "scripting")]
 mod scripting;
@@ -46,12 +47,12 @@ pub use auth::{
     StoredSnapshot, UserGrant, UserRecord, inspect_signed_field_value, owner_public_key_for_path,
 };
 pub use binary::BinaryBytes;
-#[cfg(not(target_arch = "wasm32"))]
-pub use blob::FileBlobStore;
 pub use blob::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, BlobStore, MemoryBlobStore, StoredBlob,
     blob_ref_for_data,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use blob::{FileBlobStore, FileBlobStoreOptions};
 pub use clock::{HybridClock, Revision, VersionMarker};
 pub use compat::{Gun, GunChain, GunCompatOptions};
 pub use consistency::{
@@ -70,15 +71,20 @@ pub use db::{
     QueryBuilder, Scope, Subscription, Transaction, TransactionChain, TraversalSubscription,
     VacuumReport,
 };
-pub use durable::{DurableStorageBinding, DurableStorageConfig};
+pub use durable::{
+    DurableStorageBinding, DurableStorageConfig, SegmentDurability, SegmentFileStoreOptions,
+    SegmentLockMode,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use engine::SegmentFileStore;
 pub use engine::{
     AuthNodeMeta, DirectIndexScan, DirectScalarIndexEntry, IncrementalStore, NodeIndexManifest,
-    StorageMetadata, StorageTransaction, StorageVacuumReport, StoredAuthFieldMeta,
-    build_storage_metadata, build_storage_transaction, build_storage_transaction_from_ops,
-    direct_index_encode_prefix, direct_index_key, encode_component, node_matches_root,
-    operation_matches_root, sortable_scalar_key, touched_nodes, touched_storage_nodes,
+    StorageMetadata, StorageRecoveryReport, StorageSyncReport, StorageTransaction,
+    StorageVacuumReport, StoredAuthFieldMeta, build_storage_metadata, build_storage_transaction,
+    build_storage_transaction_from_ops, direct_index_encode_prefix, direct_index_key,
+    encode_component, is_record_node_id, node_matches_root, operation_matches_root,
+    record_entry_from_node_state, record_node_id, sortable_scalar_key, touched_nodes,
+    touched_storage_nodes,
 };
 pub use error::{PrimadbError, Result};
 pub use hardening::{PrimadbLimits, PrimadbStats};
@@ -100,6 +106,10 @@ pub use net::{
 pub use operation::{Operation, OperationAction, OperationValue};
 pub use parallel::{parallel_enabled, parallel_thread_count};
 pub use query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QueryOrder, QuerySpec};
+pub use record::{
+    RecordBatch, RecordBatchReport, RecordEntry, RecordMutation, RecordScan, RecordScanResult,
+    RecordValue,
+};
 pub use router::{
     PeerPresence, PeerRecommendation, RouteBatchItem, RouteDecision, RouteEnvelope, RoutePayload,
     RouteTarget, Router, RouterConfig, RouterStats,

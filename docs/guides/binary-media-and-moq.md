@@ -40,7 +40,11 @@ Use blob storage for larger binary payloads. Blob IDs are BLAKE3-prefixed conten
 Node:
 
 ```ts
-db.openBlobStorage({ kind: "files", directory: "/tmp/primadb-blobs" });
+db.openBlobStorage({
+  kind: "files",
+  directory: "/tmp/primadb-blobs",
+  durability: "full",
+});
 
 const ref = db
   .chain("assets")

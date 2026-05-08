@@ -9,10 +9,10 @@ use crate::{
     DurableStorageBinding, DurableStorageConfig, HookTransport, HybridClock, IceServerConfig,
     LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler,
     Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
-    PullResponseBody, QuerySpec, RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage,
-    RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
-    RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
-    SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
+    PullResponseBody, QuerySpec, RecordBatch, RecordScan, RelayClientConfig, RemotePath,
+    RemoteResult, RemoteWatchMessage, RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload,
+    RouteTarget, Router, RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext,
+    Subscription, SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
     TraversalSubscription as CoreTraversalSubscription, VerifiedIdentity, WatchEvent, WatchRequest,
     WatchRequestKind, encode_component, error_pull_response, error_watch_event,
 };
@@ -774,6 +774,8 @@ impl WasmPrimadb {
                 incremental: false,
                 loaded_existing: self.inner.use_browser_storage(key).map_err(to_js_error)?,
                 auto_persist: true,
+                durability: None,
+                lock_mode: None,
             },
             DurableStorageConfig::IndexedDbSnapshots {
                 database_name,
@@ -804,6 +806,8 @@ impl WasmPrimadb {
                     incremental: false,
                     loaded_existing: load_existing,
                     auto_persist,
+                    durability: None,
+                    lock_mode: None,
                 }
             }
             DurableStorageConfig::IndexedDbSegments {
@@ -839,6 +843,8 @@ impl WasmPrimadb {
                     incremental: true,
                     loaded_existing: load_existing,
                     auto_persist,
+                    durability: None,
+                    lock_mode: None,
                 }
             }
             DurableStorageConfig::OpfsSegments {
@@ -864,6 +870,8 @@ impl WasmPrimadb {
                     incremental: true,
                     loaded_existing: load_existing,
                     auto_persist,
+                    durability: None,
+                    lock_mode: None,
                 }
             }
             DurableStorageConfig::SnapshotFile { .. }
@@ -874,6 +882,78 @@ impl WasmPrimadb {
             }
         };
         to_js(&binding)
+    }
+
+    #[wasm_bindgen(js_name = putRecord)]
+    pub fn put_record(&self, key: String, value: JsValue) -> std::result::Result<(), JsValue> {
+        let value: JsonValue = serde_wasm_bindgen::from_value(value)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.inner.put_record_json(key, value).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = putRecordBytes)]
+    pub fn put_record_bytes(
+        &self,
+        key: String,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<(), JsValue> {
+        self.inner.put_record_bytes(key, bytes).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = putRecordBlob)]
+    pub fn put_record_blob(
+        &self,
+        key: String,
+        bytes: Vec<u8>,
+        media_type: Option<String>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let reference = self
+            .inner
+            .put_record_blob(key, bytes, media_type.as_deref())
+            .map_err(to_js_error)?;
+        to_js(&reference)
+    }
+
+    #[wasm_bindgen(js_name = getRecord)]
+    pub fn get_record(&self, key: String) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.get_record(&key).map_err(to_js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = scanRecords)]
+    pub fn scan_records(&self, scan: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        to_js(&self.inner.scan_records(scan).map_err(to_js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = applyRecordBatch)]
+    pub fn apply_record_batch(&self, batch: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let batch: RecordBatch = serde_wasm_bindgen::from_value(batch)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        to_js(&self.inner.apply_record_batch(batch).map_err(to_js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = deleteRecord)]
+    pub fn delete_record(&self, key: String) -> std::result::Result<(), JsValue> {
+        self.inner.delete_record(key).map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = syncStorage)]
+    pub fn sync_storage(&self) -> std::result::Result<JsValue, JsValue> {
+        Err(JsValue::from_str(
+            "syncStorage is not available for browser storage backends",
+        ))
+    }
+
+    #[wasm_bindgen(js_name = storageRecoveryReport)]
+    pub fn storage_recovery_report(&self) -> std::result::Result<JsValue, JsValue> {
+        to_js(&Option::<crate::StorageRecoveryReport>::None)
+    }
+
+    #[wasm_bindgen(js_name = closeDurableStorage)]
+    pub fn close_durable_storage(&self) {
+        self.inner.close_durable_storage();
+        self.durable_storage_hooks.borrow_mut().clear();
     }
 
     #[cfg(feature = "crypto")]
@@ -1328,6 +1408,7 @@ impl WasmPrimadb {
                 to_js(&BlobStorageBinding {
                     backend: "indexed_db".to_owned(),
                     content_addressed: true,
+                    durability: None,
                 })
             }
             BlobStorageConfig::Memory => {
@@ -1338,6 +1419,7 @@ impl WasmPrimadb {
                 to_js(&BlobStorageBinding {
                     backend: "memory".to_owned(),
                     content_addressed: true,
+                    durability: None,
                 })
             }
             #[cfg(not(target_arch = "wasm32"))]

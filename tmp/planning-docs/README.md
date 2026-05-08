@@ -9,3 +9,5 @@ docs site content.
 - [watch-index-storage-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/watch-index-storage-plan.md)
 - [callback-api-parity-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/callback-api-parity-plan.md)
 - [lazy-graph-traversal-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/lazy-graph-traversal-plan.md)
+- [agentfs-backend-feasibility-plan.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/agentfs-backend-feasibility-plan.md)
+- [agentfs-backend-feasibility-progress.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/agentfs-backend-feasibility-progress.md)

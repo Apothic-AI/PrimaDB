@@ -1,8 +1,11 @@
 use crate::clock::HybridClock;
 use crate::consistency::{ProvisionalTransaction, ScopePolicy};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::durable::{SegmentDurability, SegmentFileStoreOptions, SegmentLockMode};
 use crate::error::{PrimadbError, Result};
 use crate::operation::Operation;
 use crate::query::QueryDirection;
+use crate::record::{RecordEntry, RecordScan, RecordValue};
 use crate::snapshot::DatabaseSnapshot;
 use crate::value::{FieldValue, NodeId, NodeState};
 use serde::{Deserialize, Serialize};
@@ -10,14 +13,30 @@ use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
 
 const STORAGE_SCHEMA_VERSION: u32 = 1;
+#[cfg(not(target_arch = "wasm32"))]
+const SEGMENT_COMMIT_SCHEMA_VERSION: u32 = 1;
 #[cfg(not(target_arch = "wasm32"))]
 const DIRECT_INDEX_LITERAL_COMPONENT_LIMIT: usize = 120;
 #[cfg(not(target_arch = "wasm32"))]
 const DIRECT_INDEX_LITERAL_PREFIX: &str = "v_";
 #[cfg(not(target_arch = "wasm32"))]
 const DIRECT_INDEX_HASH_PREFIX: &str = "h_";
+#[cfg(not(target_arch = "wasm32"))]
+const RECORD_BUCKET_LITERAL_COMPONENT_LIMIT: usize = 120;
+#[cfg(not(target_arch = "wasm32"))]
+const RECORD_BUCKET_LITERAL_PREFIX: &str = "v_";
+#[cfg(not(target_arch = "wasm32"))]
+const RECORD_BUCKET_HASH_PREFIX: &str = "h_";
+#[cfg(not(target_arch = "wasm32"))]
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageMetadata {
@@ -25,6 +44,8 @@ pub struct StorageMetadata {
     pub clock: HybridClock,
     pub pending_ops: Vec<Operation>,
     pub next_tx_id: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_materialized_tx_id: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scope_policies: BTreeMap<String, ScopePolicy>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -40,6 +61,7 @@ impl StorageMetadata {
             clock,
             pending_ops,
             next_tx_id,
+            last_materialized_tx_id: next_tx_id.saturating_sub(1),
             scope_policies: BTreeMap::new(),
             provisional_transactions: BTreeMap::new(),
             next_provisional_transaction_id: 0,
@@ -137,6 +159,13 @@ struct DirectIndexBucket {
     entries: BTreeMap<String, DirectScalarIndexEntry>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+struct RecordBucket {
+    entries: BTreeMap<String, RecordEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageTransaction {
     pub id: u64,
@@ -144,8 +173,30 @@ pub struct StorageTransaction {
     pub nodes: BTreeMap<NodeId, NodeState>,
     pub node_indexes: BTreeMap<NodeId, NodeIndexManifest>,
     pub direct_indexes: BTreeMap<String, DirectScalarIndexEntry>,
+    #[serde(default)]
+    pub records: BTreeMap<String, RecordEntry>,
+    #[serde(default)]
+    pub deleted_records: BTreeSet<String>,
     pub auth_meta: BTreeMap<NodeId, AuthNodeMeta>,
     pub journal_ops: Vec<Operation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSyncReport {
+    pub backend: String,
+    pub durability: String,
+    pub synced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageRecoveryReport {
+    pub applied_transactions: usize,
+    pub skipped_transactions: usize,
+    pub removed_pending_files: usize,
+    pub removed_temp_files: usize,
+    pub quarantined_files: usize,
 }
 
 pub trait IncrementalStore: Debug + Send + Sync {
@@ -166,6 +217,20 @@ pub trait IncrementalStore: Debug + Send + Sync {
         direction: QueryDirection,
     ) -> Result<Vec<DirectScalarIndexEntry>> {
         self.scan_direct_index_entries(path, direction, &DirectIndexScan::default())
+    }
+    fn scan_record_entries(&self, scan: &RecordScan) -> Result<Option<Vec<RecordEntry>>> {
+        let _ = scan;
+        Ok(None)
+    }
+    fn sync(&self) -> Result<StorageSyncReport> {
+        Ok(StorageSyncReport {
+            backend: self.name().to_owned(),
+            durability: "unspecified".to_owned(),
+            synced: false,
+        })
+    }
+    fn recovery_report(&self) -> Option<StorageRecoveryReport> {
+        None
     }
     fn vacuum(&self, transaction: &StorageTransaction) -> Result<StorageVacuumReport> {
         let _ = transaction;
@@ -189,15 +254,165 @@ pub struct StorageVacuumReport {
 pub struct SegmentFileStore {
     root: std::path::PathBuf,
     journal_retention: usize,
+    durability: SegmentDurability,
+    _lock: Option<Arc<SegmentStoreLock>>,
+    recovery_report: Arc<Mutex<StorageRecoveryReport>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct SegmentStoreLock {
+    _file: std::fs::File,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SegmentStoreLock {
+    fn acquire(root: &std::path::Path, mode: &SegmentLockMode) -> Result<Option<Arc<Self>>> {
+        if matches!(mode, SegmentLockMode::Disabled) {
+            return Ok(None);
+        }
+        std::fs::create_dir_all(root)?;
+        let path = root.join(".primadb.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        match mode {
+            SegmentLockMode::Exclusive => {
+                fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+                    PrimadbError::Message(format!(
+                        "segment store `{}` is already open by another process: {error}",
+                        root.display()
+                    ))
+                })?;
+            }
+            SegmentLockMode::Wait { timeout_millis } => {
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(*timeout_millis);
+                loop {
+                    match fs2::FileExt::try_lock_exclusive(&file) {
+                        Ok(()) => break,
+                        Err(error) if std::time::Instant::now() >= deadline => {
+                            return Err(PrimadbError::Message(format!(
+                                "timed out waiting for segment store lock `{}`: {error}",
+                                root.display()
+                            )));
+                        }
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                    }
+                }
+            }
+            SegmentLockMode::Disabled => unreachable!("disabled mode returned early"),
+        }
+        Ok(Some(Arc::new(Self { _file: file })))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SegmentCommitPayload {
+    schema_version: u32,
+    transaction: StorageTransaction,
+    direct_index_removals: Vec<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SegmentCommitRecord {
+    payload: SegmentCommitPayload,
+    checksum: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentFaultPoint {
+    AfterJournalWrite,
+    AfterNodeWrites,
+    AfterIndexWrites,
+    AfterManifestWrite,
+    BeforeJournalFinalize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static SEGMENT_FAULT_POINT: Mutex<Option<(std::path::PathBuf, SegmentFaultPoint)>> =
+    Mutex::new(None);
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn set_segment_fault_point_for_test(
+    root: impl Into<std::path::PathBuf>,
+    point: SegmentFaultPoint,
+) {
+    *SEGMENT_FAULT_POINT.lock().unwrap() = Some((root.into(), point));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(windows)))]
+fn replace_file(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    std::fs::rename(from, to)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    unsafe extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let from_wide = from
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let to_wide = to
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let ok = unsafe {
+        MoveFileExW(
+            from_wide.as_ptr(),
+            to_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error().into())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl SegmentFileStore {
-    pub fn new(root: impl Into<std::path::PathBuf>, journal_retention: usize) -> Self {
-        Self {
-            root: root.into(),
+    pub fn new(root: impl Into<std::path::PathBuf>, journal_retention: usize) -> Result<Self> {
+        Self::with_options(root, journal_retention, SegmentFileStoreOptions::default())
+    }
+
+    pub fn with_options(
+        root: impl Into<std::path::PathBuf>,
+        journal_retention: usize,
+        options: SegmentFileStoreOptions,
+    ) -> Result<Self> {
+        let root = root.into();
+        let lock = SegmentStoreLock::acquire(&root, &options.lock_mode)?;
+        let store = Self {
+            root,
             journal_retention: journal_retention.max(1),
-        }
+            durability: options.durability,
+            _lock: lock,
+            recovery_report: Arc::new(Mutex::new(StorageRecoveryReport::default())),
+        };
+        store.ensure_layout()?;
+        Ok(store)
     }
 
     fn ensure_layout(&self) -> Result<()> {
@@ -205,7 +420,11 @@ impl SegmentFileStore {
         std::fs::create_dir_all(self.root.join("auth"))?;
         std::fs::create_dir_all(self.root.join("node_indexes"))?;
         std::fs::create_dir_all(self.root.join("indexes").join("direct"))?;
+        std::fs::create_dir_all(self.root.join("records"))?;
         std::fs::create_dir_all(self.root.join("journal"))?;
+        if matches!(self.durability, SegmentDurability::Full) {
+            self.sync_dir(&self.root)?;
+        }
         Ok(())
     }
 
@@ -260,6 +479,52 @@ impl SegmentFileStore {
         path
     }
 
+    fn records_root(&self) -> std::path::PathBuf {
+        self.root.join("records")
+    }
+
+    fn record_bucket_path(&self, key: &str) -> std::path::PathBuf {
+        self.records_root()
+            .join(format!("{}.json", safe_record_component(key)))
+    }
+
+    fn read_record_bucket_path(path: &std::path::Path) -> Result<RecordBucket> {
+        if !path.exists() {
+            return Ok(RecordBucket::default());
+        }
+        Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+    }
+
+    fn write_record_bucket_path(
+        &self,
+        path: &std::path::Path,
+        bucket: &RecordBucket,
+    ) -> Result<()> {
+        self.write_json_file(path, bucket)
+    }
+
+    fn upsert_record_entry(&self, entry: &RecordEntry) -> Result<()> {
+        let path = self.record_bucket_path(&entry.key);
+        let mut bucket = Self::read_record_bucket_path(&path)?;
+        bucket.entries.insert(entry.key.clone(), entry.clone());
+        self.write_record_bucket_path(&path, &bucket)
+    }
+
+    fn remove_record_entry(&self, key: &str) -> Result<bool> {
+        let path = self.record_bucket_path(key);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let mut bucket = Self::read_record_bucket_path(&path)?;
+        let removed = bucket.entries.remove(key).is_some();
+        if bucket.entries.is_empty() {
+            self.remove_file_durable(&path)?;
+        } else if removed {
+            self.write_record_bucket_path(&path, &bucket)?;
+        }
+        Ok(removed)
+    }
+
     fn read_direct_index_bucket_path(path: &std::path::Path) -> Result<DirectIndexBucket> {
         if !path.exists() {
             return Ok(DirectIndexBucket::default());
@@ -268,14 +533,11 @@ impl SegmentFileStore {
     }
 
     fn write_direct_index_bucket_path(
+        &self,
         path: &std::path::Path,
         bucket: &DirectIndexBucket,
     ) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, serde_json::to_vec(bucket)?)?;
-        Ok(())
+        self.write_json_file(path, bucket)
     }
 
     fn remove_direct_index_entry(&self, key: &str) -> Result<bool> {
@@ -286,9 +548,9 @@ impl SegmentFileStore {
         let mut bucket = Self::read_direct_index_bucket_path(&path)?;
         let removed = bucket.entries.remove(key).is_some();
         if bucket.entries.is_empty() {
-            std::fs::remove_file(path)?;
+            self.remove_file_durable(&path)?;
         } else if removed {
-            Self::write_direct_index_bucket_path(&path, &bucket)?;
+            self.write_direct_index_bucket_path(&path, &bucket)?;
         }
         Ok(removed)
     }
@@ -297,7 +559,106 @@ impl SegmentFileStore {
         let path = self.direct_index_path(key);
         let mut bucket = Self::read_direct_index_bucket_path(&path)?;
         bucket.entries.insert(key.to_owned(), entry.clone());
-        Self::write_direct_index_bucket_path(&path, &bucket)
+        self.write_direct_index_bucket_path(&path, &bucket)
+    }
+
+    fn write_json_file<T: Serialize>(&self, path: &std::path::Path, value: &T) -> Result<()> {
+        self.write_file(path, &serde_json::to_vec(value)?)
+    }
+
+    fn write_file(&self, path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        if matches!(self.durability, SegmentDurability::Relaxed) {
+            std::fs::write(path, bytes)?;
+            return Ok(());
+        }
+
+        let parent = path.parent().ok_or_else(|| {
+            PrimadbError::Message(format!("path `{}` has no parent directory", path.display()))
+        })?;
+        let temp_path = self.temp_path_for(path);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&temp_path)?;
+            file.write_all(bytes)?;
+            file.flush()?;
+            match self.durability {
+                SegmentDurability::Full => file.sync_all()?,
+                SegmentDurability::Data => file.sync_data()?,
+                SegmentDurability::Relaxed => {}
+            }
+        }
+        replace_file(&temp_path, path)?;
+        if matches!(self.durability, SegmentDurability::Full) {
+            self.sync_dir(parent)?;
+        }
+        Ok(())
+    }
+
+    fn remove_file_durable(&self, path: &std::path::Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let parent = path.parent().map(std::path::Path::to_path_buf);
+        std::fs::remove_file(path)?;
+        if matches!(self.durability, SegmentDurability::Full)
+            && let Some(parent) = parent
+        {
+            self.sync_dir(&parent)?;
+        }
+        Ok(())
+    }
+
+    fn remove_dir_durable(&self, path: &std::path::Path) -> Result<()> {
+        let parent = path.parent().map(std::path::Path::to_path_buf);
+        std::fs::remove_dir(path)?;
+        if matches!(self.durability, SegmentDurability::Full)
+            && let Some(parent) = parent
+        {
+            self.sync_dir(&parent)?;
+        }
+        Ok(())
+    }
+
+    fn temp_path_for(&self, path: &std::path::Path) -> std::path::PathBuf {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("primadb");
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let suffix = format!(
+            ".tmp-{}-{}-{}",
+            std::process::id(),
+            crate::clock::now_millis(),
+            counter
+        );
+        path.with_file_name(format!("{name}{suffix}"))
+    }
+
+    fn sync_dir(&self, path: &std::path::Path) -> Result<()> {
+        let file = std::fs::File::open(path)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn maybe_fail(&self, point: SegmentFaultPoint) -> Result<()> {
+        let mut fault = SEGMENT_FAULT_POINT.lock().unwrap();
+        if fault
+            .as_ref()
+            .is_some_and(|(root, fault_point)| root == &self.root && fault_point == &point)
+        {
+            *fault = None;
+            return Err(PrimadbError::Message(format!(
+                "injected segment fault at {point:?}"
+            )));
+        }
+        Ok(())
     }
 
     fn direct_index_scan_sortable_dirs(
@@ -356,6 +717,219 @@ impl SegmentFileStore {
             .join(format!("tx-{tx_id:020}.json"))
     }
 
+    fn journal_file_key(path: &std::path::Path) -> Option<(u64, bool)> {
+        let name = path.file_name().and_then(|name| name.to_str())?;
+        let (raw_id, pending) = if let Some(raw_id) = name
+            .strip_prefix("pending-")
+            .and_then(|name| name.strip_suffix(".json"))
+        {
+            (raw_id, true)
+        } else if let Some(raw_id) = name
+            .strip_prefix("tx-")
+            .and_then(|name| name.strip_suffix(".json"))
+        {
+            (raw_id, false)
+        } else {
+            return None;
+        };
+        raw_id.parse::<u64>().ok().map(|tx_id| (tx_id, pending))
+    }
+
+    fn build_commit_payload(
+        &self,
+        transaction: &StorageTransaction,
+    ) -> Result<SegmentCommitPayload> {
+        let mut direct_index_removals = Vec::new();
+        for (node_id, manifest) in &transaction.node_indexes {
+            let previous = self.load_node_index_manifest(node_id)?;
+            let next_keys: BTreeSet<_> = manifest.direct_index_keys.iter().cloned().collect();
+            direct_index_removals.extend(
+                previous
+                    .direct_index_keys
+                    .into_iter()
+                    .filter(|key| !next_keys.contains(key)),
+            );
+        }
+        direct_index_removals.sort();
+        direct_index_removals.dedup();
+        Ok(SegmentCommitPayload {
+            schema_version: SEGMENT_COMMIT_SCHEMA_VERSION,
+            transaction: transaction.clone(),
+            direct_index_removals,
+        })
+    }
+
+    fn commit_record_for_payload(payload: SegmentCommitPayload) -> Result<SegmentCommitRecord> {
+        let bytes = serde_json::to_vec(&payload)?;
+        Ok(SegmentCommitRecord {
+            payload,
+            checksum: blake3::hash(&bytes).to_hex().to_string(),
+        })
+    }
+
+    fn validate_commit_record(record: SegmentCommitRecord) -> Result<SegmentCommitPayload> {
+        if record.payload.schema_version != SEGMENT_COMMIT_SCHEMA_VERSION {
+            return Err(PrimadbError::Message(format!(
+                "segment commit schema version {} is unsupported",
+                record.payload.schema_version
+            )));
+        }
+        let expected = blake3::hash(&serde_json::to_vec(&record.payload)?)
+            .to_hex()
+            .to_string();
+        if expected != record.checksum {
+            return Err(PrimadbError::Message(
+                "segment commit checksum mismatch".to_owned(),
+            ));
+        }
+        Ok(record.payload)
+    }
+
+    fn read_commit_record(path: &std::path::Path) -> Result<SegmentCommitPayload> {
+        let record: SegmentCommitRecord = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        Self::validate_commit_record(record)
+    }
+
+    fn write_pending_commit(&self, payload: SegmentCommitPayload) -> Result<std::path::PathBuf> {
+        let record = Self::commit_record_for_payload(payload)?;
+        let pending_path = self.journal_pending_path(record.payload.transaction.id);
+        self.write_json_file(&pending_path, &record)?;
+        if matches!(self.durability, SegmentDurability::Full) {
+            self.sync_dir(&self.root.join("journal"))?;
+        }
+        Ok(pending_path)
+    }
+
+    fn materialize_commit_payload(&self, payload: &SegmentCommitPayload) -> Result<()> {
+        let transaction = &payload.transaction;
+
+        for (node_id, node_state) in &transaction.nodes {
+            self.write_json_file(&self.node_path(node_id), node_state)?;
+        }
+
+        self.maybe_fail(SegmentFaultPoint::AfterNodeWrites)?;
+
+        for (node_id, auth_meta) in &transaction.auth_meta {
+            self.write_json_file(&self.auth_meta_path(node_id), auth_meta)?;
+        }
+
+        for stale_key in &payload.direct_index_removals {
+            let _ = self.remove_direct_index_entry(stale_key)?;
+        }
+        for (node_id, manifest) in &transaction.node_indexes {
+            for key in &manifest.direct_index_keys {
+                let Some(entry) = transaction.direct_indexes.get(key) else {
+                    continue;
+                };
+                self.upsert_direct_index_entry(key, entry)?;
+            }
+            self.write_json_file(&self.node_index_manifest_path(node_id), manifest)?;
+        }
+
+        for key in &transaction.deleted_records {
+            let _ = self.remove_record_entry(key)?;
+        }
+        for entry in transaction.records.values() {
+            self.upsert_record_entry(entry)?;
+        }
+
+        self.maybe_fail(SegmentFaultPoint::AfterIndexWrites)?;
+
+        self.write_json_file(&self.manifest_path(), &transaction.metadata)?;
+        self.maybe_fail(SegmentFaultPoint::AfterManifestWrite)?;
+        Ok(())
+    }
+
+    fn recover(&self) -> Result<StorageRecoveryReport> {
+        self.ensure_layout()?;
+        let mut report = StorageRecoveryReport::default();
+        let mut materialized_last = self
+            .read_manifest_unrecovered()?
+            .map(|metadata| metadata.last_materialized_tx_id)
+            .unwrap_or(0);
+
+        let mut journal_files = Vec::new();
+        for entry in std::fs::read_dir(self.root.join("journal"))? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.contains(".tmp-") {
+                self.remove_file_durable(&path)?;
+                report.removed_temp_files += 1;
+                continue;
+            }
+            if let Some((tx_id, pending)) = Self::journal_file_key(&path) {
+                journal_files.push((tx_id, pending, path));
+            }
+        }
+        journal_files.sort_by_key(|(tx_id, pending, _)| (*tx_id, *pending));
+
+        for (_, _, path) in journal_files {
+            let payload = match Self::read_commit_record(&path) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    let quarantine = path.with_extension("corrupt");
+                    let _ = std::fs::rename(&path, quarantine);
+                    report.quarantined_files += 1;
+                    continue;
+                }
+            };
+            if payload.transaction.id <= materialized_last {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("pending-"))
+                {
+                    self.remove_file_durable(&path)?;
+                    report.removed_pending_files += 1;
+                }
+                report.skipped_transactions += 1;
+                continue;
+            }
+            self.materialize_commit_payload(&payload)?;
+            materialized_last = materialized_last.max(payload.transaction.id);
+            report.applied_transactions += 1;
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("pending-"))
+            {
+                let final_path = self.journal_final_path(payload.transaction.id);
+                if final_path.exists() {
+                    self.remove_file_durable(&path)?;
+                } else {
+                    replace_file(&path, &final_path)?;
+                    if matches!(self.durability, SegmentDurability::Full) {
+                        self.sync_dir(&self.root.join("journal"))?;
+                    }
+                }
+            }
+        }
+
+        *self.recovery_report.lock().unwrap() = report.clone();
+        Ok(report)
+    }
+
+    fn read_manifest_unrecovered(&self) -> Result<Option<StorageMetadata>> {
+        let path = self.manifest_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let metadata: StorageMetadata = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        if metadata.schema_version != STORAGE_SCHEMA_VERSION {
+            return Err(PrimadbError::Message(format!(
+                "storage schema version {} is unsupported",
+                metadata.schema_version
+            )));
+        }
+        Ok(Some(metadata))
+    }
+
     fn load_node_index_manifest(&self, node_id: &str) -> Result<NodeIndexManifest> {
         let path = self.node_index_manifest_path(node_id);
         if !path.exists() {
@@ -384,7 +958,7 @@ impl SegmentFileStore {
         }
         let remove_count = entries.len() - self.journal_retention;
         for path in entries.into_iter().take(remove_count) {
-            let _ = std::fs::remove_file(path);
+            let _ = self.remove_file_durable(&path);
         }
         Ok(remove_count)
     }
@@ -438,7 +1012,7 @@ impl SegmentFileStore {
                 continue;
             };
             if !live_stems.contains(&decoded) {
-                std::fs::remove_file(path)?;
+                self.remove_file_durable(&path)?;
                 removed += 1;
             }
         }
@@ -456,7 +1030,7 @@ impl SegmentFileStore {
             if path.is_dir() {
                 removed += self.prune_empty_index_dirs(&path)?;
                 if std::fs::read_dir(&path)?.next().is_none() {
-                    std::fs::remove_dir(&path)?;
+                    self.remove_dir_durable(&path)?;
                     removed += 1;
                 }
             }
@@ -473,63 +1047,24 @@ impl IncrementalStore for SegmentFileStore {
 
     fn load_metadata(&self) -> Result<Option<StorageMetadata>> {
         self.ensure_layout()?;
-        let path = self.manifest_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let metadata: StorageMetadata = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-        if metadata.schema_version != STORAGE_SCHEMA_VERSION {
-            return Err(PrimadbError::Message(format!(
-                "storage schema version {} is unsupported",
-                metadata.schema_version
-            )));
-        }
-        Ok(Some(metadata))
+        let _ = self.recover()?;
+        self.read_manifest_unrecovered()
     }
 
     fn apply_transaction(&self, transaction: &StorageTransaction) -> Result<()> {
         self.ensure_layout()?;
+        let payload = self.build_commit_payload(transaction)?;
+        let pending_path = self.write_pending_commit(payload.clone())?;
+        self.maybe_fail(SegmentFaultPoint::AfterJournalWrite)?;
 
-        let pending_path = self.journal_pending_path(transaction.id);
-        std::fs::write(&pending_path, serde_json::to_vec(transaction)?)?;
-
-        for (node_id, node_state) in &transaction.nodes {
-            std::fs::write(self.node_path(node_id), serde_json::to_vec(node_state)?)?;
-        }
-
-        for (node_id, auth_meta) in &transaction.auth_meta {
-            std::fs::write(self.auth_meta_path(node_id), serde_json::to_vec(auth_meta)?)?;
-        }
-
-        for (node_id, manifest) in &transaction.node_indexes {
-            let previous = self.load_node_index_manifest(node_id)?;
-            let next_keys: BTreeSet<_> = manifest.direct_index_keys.iter().cloned().collect();
-            for stale_key in previous
-                .direct_index_keys
-                .into_iter()
-                .filter(|key| !next_keys.contains(key))
-            {
-                let _ = self.remove_direct_index_entry(&stale_key)?;
-            }
-            for key in &manifest.direct_index_keys {
-                let Some(entry) = transaction.direct_indexes.get(key) else {
-                    continue;
-                };
-                self.upsert_direct_index_entry(key, entry)?;
-            }
-            std::fs::write(
-                self.node_index_manifest_path(node_id),
-                serde_json::to_vec(manifest)?,
-            )?;
-        }
-
-        std::fs::write(
-            self.manifest_path(),
-            serde_json::to_vec(&transaction.metadata)?,
-        )?;
+        self.materialize_commit_payload(&payload)?;
 
         let final_path = self.journal_final_path(transaction.id);
-        std::fs::rename(&pending_path, &final_path)?;
+        self.maybe_fail(SegmentFaultPoint::BeforeJournalFinalize)?;
+        replace_file(&pending_path, &final_path)?;
+        if matches!(self.durability, SegmentDurability::Full) {
+            self.sync_dir(&self.root.join("journal"))?;
+        }
         self.prune_journal()?;
         Ok(())
     }
@@ -621,6 +1156,53 @@ impl IncrementalStore for SegmentFileStore {
         Ok(entries)
     }
 
+    fn scan_record_entries(&self, scan: &RecordScan) -> Result<Option<Vec<RecordEntry>>> {
+        self.ensure_layout()?;
+        let root = self.records_root();
+        if !root.exists() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut entries = Vec::new();
+        let mut files = Vec::new();
+        collect_files(&root, &mut files)?;
+        files.sort();
+        for file in files {
+            let bucket = Self::read_record_bucket_path(&file)?;
+            for entry in bucket.entries.values() {
+                if scan.matches_key(&entry.key) {
+                    entries.push(entry.clone());
+                }
+            }
+        }
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+        if scan.reverse {
+            entries.reverse();
+        }
+        Ok(Some(entries))
+    }
+
+    fn sync(&self) -> Result<StorageSyncReport> {
+        self.ensure_layout()?;
+        if !matches!(self.durability, SegmentDurability::Relaxed) {
+            self.sync_dir(&self.root)?;
+            self.sync_dir(&self.root.join("journal"))?;
+            self.sync_dir(&self.root.join("nodes"))?;
+            self.sync_dir(&self.root.join("auth"))?;
+            self.sync_dir(&self.root.join("node_indexes"))?;
+            self.sync_dir(&self.root.join("records"))?;
+            self.sync_dir(&self.root.join("indexes").join("direct"))?;
+        }
+        Ok(StorageSyncReport {
+            backend: self.name().to_owned(),
+            durability: format!("{:?}", self.durability).to_lowercase(),
+            synced: !matches!(self.durability, SegmentDurability::Relaxed),
+        })
+    }
+
+    fn recovery_report(&self) -> Option<StorageRecoveryReport> {
+        Some(self.recovery_report.lock().unwrap().clone())
+    }
+
     fn vacuum(&self, transaction: &StorageTransaction) -> Result<StorageVacuumReport> {
         self.ensure_layout()?;
         let (live_nodes, live_auth, live_manifests, live_direct) =
@@ -643,10 +1225,10 @@ impl IncrementalStore for SegmentFileStore {
                 let before = bucket.entries.len();
                 bucket.entries.retain(|key, _| live_direct.contains(key));
                 if bucket.entries.is_empty() {
-                    std::fs::remove_file(file)?;
+                    self.remove_file_durable(&file)?;
                     report.removed_direct_index_files += 1;
                 } else if bucket.entries.len() != before {
-                    Self::write_direct_index_bucket_path(&file, &bucket)?;
+                    self.write_direct_index_bucket_path(&file, &bucket)?;
                 }
             }
             report.removed_empty_index_dirs = self.prune_empty_index_dirs(&direct_root)?;
@@ -672,6 +1254,8 @@ pub fn build_storage_transaction(
 ) -> StorageTransaction {
     let mut node_indexes = BTreeMap::new();
     let mut direct_indexes = BTreeMap::new();
+    let mut records = BTreeMap::new();
+    let mut deleted_records = BTreeSet::new();
     let mut auth_meta = BTreeMap::new();
 
     for (node_id, node_state) in &nodes {
@@ -681,6 +1265,15 @@ pub fn build_storage_transaction(
         };
         node_indexes.insert(node_id.clone(), manifest);
         direct_indexes.extend(direct);
+        if is_record_node_id(node_id)
+            && let Some(record_key) = record_key_from_node_state(node_state)
+        {
+            if let Some(entry) = record_entry_from_node_state(node_state) {
+                records.insert(entry.key.clone(), entry);
+            } else {
+                deleted_records.insert(record_key);
+            }
+        }
         auth_meta.insert(node_id.clone(), auth_node_meta(node_id, node_state));
     }
 
@@ -690,6 +1283,8 @@ pub fn build_storage_transaction(
         nodes,
         node_indexes,
         direct_indexes,
+        records,
+        deleted_records,
         auth_meta,
         journal_ops: Vec::new(),
     }
@@ -805,6 +1400,18 @@ fn literal_direct_index_component(component: &str) -> Option<&str> {
     component.strip_prefix(DIRECT_INDEX_LITERAL_PREFIX)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn safe_record_component(component: &str) -> String {
+    let encoded = encode_component(component);
+    if encoded.len() <= RECORD_BUCKET_LITERAL_COMPONENT_LIMIT {
+        return format!("{RECORD_BUCKET_LITERAL_PREFIX}{encoded}");
+    }
+    format!(
+        "{RECORD_BUCKET_HASH_PREFIX}{}",
+        blake3::hash(component.as_bytes()).to_hex()
+    )
+}
+
 pub fn encode_component(input: &str) -> String {
     let mut output = String::with_capacity(input.len() * 2);
     for byte in input.as_bytes() {
@@ -852,6 +1459,39 @@ pub fn operation_matches_root(op: &Operation, root: &str) -> bool {
             node_matches_root(node, root)
         }
     }
+}
+
+pub fn record_node_id(key: &str) -> String {
+    format!(
+        "__primadb_records/{}",
+        blake3::hash(key.as_bytes()).to_hex()
+    )
+}
+
+pub fn is_record_node_id(node_id: &str) -> bool {
+    node_id.starts_with("__primadb_records/")
+}
+
+fn record_key_from_node_state(node_state: &NodeState) -> Option<String> {
+    let Some(field) = node_state.fields.get("key") else {
+        return None;
+    };
+    match &field.value {
+        FieldValue::Scalar(JsonValue::String(key)) => Some(key.clone()),
+        _ => None,
+    }
+}
+
+pub fn record_entry_from_node_state(node_state: &NodeState) -> Option<RecordEntry> {
+    let key = record_key_from_node_state(node_state)?;
+    let value = node_state.fields.get("value")?;
+    let value = match &value.value {
+        FieldValue::Scalar(value) => RecordValue::Json(value.clone()),
+        FieldValue::Bytes(bytes) => RecordValue::Bytes(bytes.clone()),
+        FieldValue::Blob(blob) => RecordValue::Blob(blob.clone()),
+        FieldValue::Link(_) | FieldValue::Set(_) => return None,
+    };
+    Some(RecordEntry { key, value })
 }
 
 fn direct_scalar_indexes(

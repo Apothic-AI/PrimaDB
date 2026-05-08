@@ -10,7 +10,7 @@ use primadb::{
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
     PasswordKeyDerivationOptions, PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig,
-    RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
+    RecordBatch, RecordScan, RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
     RoomHookContext, SecretBoxKey, ServeRequestContext, ServeResultContext, Scope as CoreScope,
     ScopePolicy, ScriptExecutionOptions, Subscription as CoreSubscription, TransactionOptions,
@@ -58,19 +58,37 @@ pub fn derive_password_key(password: String, options: Option<JsonValue>) -> Resu
 }
 
 fn binding_to_json(binding: CoreDurableStorageBinding) -> JsonValue {
-    json!({
+    let mut value = json!({
         "backend": binding.backend,
         "incremental": binding.incremental,
         "loadedExisting": binding.loaded_existing,
         "autoPersist": binding.auto_persist,
-    })
+    });
+    if let JsonValue::Object(object) = &mut value {
+        if let Some(durability) = binding.durability {
+            object.insert("durability".to_owned(), serde_json::to_value(durability).unwrap_or(JsonValue::Null));
+        }
+        if let Some(lock_mode) = binding.lock_mode {
+            object.insert("lockMode".to_owned(), serde_json::to_value(lock_mode).unwrap_or(JsonValue::Null));
+        }
+    }
+    value
 }
 
 fn blob_binding_to_json(binding: CoreBlobStorageBinding) -> JsonValue {
-    json!({
+    let mut value = json!({
         "backend": binding.backend,
         "contentAddressed": binding.content_addressed,
-    })
+    });
+    if let JsonValue::Object(object) = &mut value
+        && let Some(durability) = binding.durability
+    {
+        object.insert(
+            "durability".to_owned(),
+            serde_json::to_value(durability).unwrap_or(JsonValue::Null),
+        );
+    }
+    value
 }
 
 fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
@@ -467,6 +485,75 @@ impl Primadb {
         let config: BlobStorageConfig = from_json(config)?;
         let binding = self.inner.open_blob_storage(config).map_err(to_napi_error)?;
         Ok(blob_binding_to_json(binding))
+    }
+
+    #[napi(js_name = "closeDurableStorage")]
+    pub fn close_durable_storage(&self) {
+        self.inner.close_durable_storage();
+    }
+
+    #[napi(js_name = "syncStorage")]
+    pub fn sync_storage(&self) -> Result<JsonValue> {
+        to_json(self.inner.sync_storage().map_err(to_napi_error)?)
+    }
+
+    #[napi(js_name = "storageRecoveryReport")]
+    pub fn storage_recovery_report(&self) -> Result<JsonValue> {
+        to_json(self.inner.storage_recovery_report())
+    }
+
+    #[napi(js_name = "putRecord")]
+    pub fn put_record(&self, key: String, value: JsonValue) -> Result<()> {
+        self.inner
+            .put_record_json(key, value)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "putRecordBytes")]
+    pub fn put_record_bytes(&self, key: String, bytes: Buffer) -> Result<()> {
+        self.inner
+            .put_record_bytes(key, bytes.to_vec())
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "putRecordBlob")]
+    pub fn put_record_blob(
+        &self,
+        key: String,
+        bytes: Buffer,
+        media_type: Option<String>,
+    ) -> Result<JsonValue> {
+        to_json(
+            self.inner
+                .put_record_blob(key, bytes.to_vec(), media_type.as_deref())
+                .map_err(to_napi_error)?,
+        )
+    }
+
+    #[napi(js_name = "getRecord")]
+    pub fn get_record(&self, key: String) -> Result<JsonValue> {
+        to_json(self.inner.get_record(&key).map_err(to_napi_error)?)
+    }
+
+    #[napi(js_name = "scanRecords")]
+    pub fn scan_records(&self, scan: JsonValue) -> Result<JsonValue> {
+        let scan: RecordScan = from_json(scan)?;
+        to_json(self.inner.scan_records(scan).map_err(to_napi_error)?)
+    }
+
+    #[napi(js_name = "applyRecordBatch")]
+    pub fn apply_record_batch(&self, batch: JsonValue) -> Result<JsonValue> {
+        let batch: RecordBatch = from_json(batch)?;
+        to_json(
+            self.inner
+                .apply_record_batch(batch)
+                .map_err(to_napi_error)?,
+        )
+    }
+
+    #[napi(js_name = "deleteRecord")]
+    pub fn delete_record(&self, key: String) -> Result<()> {
+        self.inner.delete_record(key).map_err(to_napi_error)
     }
 
     #[napi(js_name = "attachNodeScript")]

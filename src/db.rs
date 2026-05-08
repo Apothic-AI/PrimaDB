@@ -24,6 +24,10 @@ use crate::hooks::{
 use crate::operation::{Operation, OperationAction, OperationValue};
 use crate::persistence::{PersistenceTarget, load_snapshot_payload, store_snapshot_payload};
 use crate::query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QuerySpec};
+use crate::record::{
+    RecordBatch, RecordBatchReport, RecordEntry, RecordMutation, RecordScan, RecordScanResult,
+    RecordValue,
+};
 use crate::session_auth::{PresenceIdentity, SessionAuthConfig, VerifiedIdentity};
 use crate::snapshot::DatabaseSnapshot;
 use crate::storage::StorageAdapter;
@@ -471,6 +475,169 @@ impl Primadb {
             member_ids,
             proposal_id: None,
         })
+    }
+
+    pub fn get_record(&self, key: &str) -> Result<Option<RecordEntry>> {
+        let node_id = crate::record_node_id(key);
+        let mut inner = self.inner.lock().unwrap();
+        let _ = inner.maybe_load_node(&node_id)?;
+        Ok(inner
+            .nodes
+            .get(&node_id)
+            .and_then(crate::record_entry_from_node_state)
+            .filter(|entry| entry.key == key))
+    }
+
+    pub fn get_many_records<I>(&self, keys: I) -> Result<Vec<Option<RecordEntry>>>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        keys.into_iter()
+            .map(|key| self.get_record(key.as_ref()))
+            .collect()
+    }
+
+    pub fn scan_records(&self, scan: RecordScan) -> Result<RecordScanResult> {
+        let engine = { self.inner.lock().unwrap().storage_engine.clone() };
+        let mut entries = match engine {
+            Some(engine) => engine
+                .scan_record_entries(&scan)?
+                .unwrap_or_else(|| self.scan_records_in_memory(&scan).unwrap_or_default()),
+            None => self.scan_records_in_memory(&scan)?,
+        };
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+        if scan.reverse {
+            entries.reverse();
+        }
+        let mut next_cursor = None;
+        if let Some(limit) = scan.limit
+            && entries.len() > limit
+        {
+            let overflow = entries.split_off(limit);
+            next_cursor = entries
+                .last()
+                .map(|entry| entry.key.clone())
+                .or_else(|| overflow.first().map(|entry| entry.key.clone()));
+        }
+        Ok(RecordScanResult {
+            entries,
+            next_cursor,
+        })
+    }
+
+    fn scan_records_in_memory(&self, scan: &RecordScan) -> Result<Vec<RecordEntry>> {
+        let snapshot = self.snapshot();
+        let mut entries = snapshot
+            .nodes
+            .values()
+            .filter_map(crate::record_entry_from_node_state)
+            .filter(|entry| scan.matches_key(&entry.key))
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+        Ok(entries)
+    }
+
+    pub fn apply_record_batch(&self, batch: RecordBatch) -> Result<RecordBatchReport> {
+        let mut expanded = Vec::new();
+        let mut range_deletes = 0;
+        for mutation in batch.mutations {
+            match mutation {
+                RecordMutation::DeleteRange { scan } => {
+                    let entries = self.scan_records(scan)?.entries;
+                    range_deletes += entries.len();
+                    expanded.extend(
+                        entries
+                            .into_iter()
+                            .map(|entry| RecordMutation::Delete { key: entry.key }),
+                    );
+                }
+                other => expanded.push(other),
+            }
+        }
+
+        let (mut report, _, operation_count) = self.run_local_transaction(|tx| {
+            let mut report = RecordBatchReport::default();
+            for mutation in expanded {
+                match mutation {
+                    RecordMutation::Put { key, value } => {
+                        put_record_inner(tx.inner, &key, value)?;
+                        report.puts += 1;
+                    }
+                    RecordMutation::Delete { key } => {
+                        delete_record_inner(tx.inner, &key);
+                        report.deletes += 1;
+                    }
+                    RecordMutation::DeleteRange { .. } => {}
+                }
+            }
+            Ok(report)
+        })?;
+        report.range_deletes = range_deletes;
+        report.operation_count = operation_count;
+        Ok(report)
+    }
+
+    pub fn put_record(&self, key: impl Into<String>, value: RecordValue) -> Result<()> {
+        self.apply_record_batch(RecordBatch {
+            mutations: vec![RecordMutation::Put {
+                key: key.into(),
+                value,
+            }],
+        })?;
+        Ok(())
+    }
+
+    pub fn put_record_json(&self, key: impl Into<String>, value: JsonValue) -> Result<()> {
+        self.put_record(key, RecordValue::Json(value))
+    }
+
+    pub fn put_record_value<T: Serialize>(&self, key: impl Into<String>, value: T) -> Result<()> {
+        self.put_record_json(key, serde_json::to_value(value)?)
+    }
+
+    pub fn put_record_bytes(&self, key: impl Into<String>, bytes: impl AsRef<[u8]>) -> Result<()> {
+        self.put_record(key, RecordValue::Bytes(BinaryBytes::from(bytes.as_ref())))
+    }
+
+    pub fn put_record_blob(
+        &self,
+        key: impl Into<String>,
+        data: impl AsRef<[u8]>,
+        media_type: Option<&str>,
+    ) -> Result<BlobRef> {
+        let reference = self.store_blob(data.as_ref(), media_type)?;
+        self.put_record(key, RecordValue::Blob(reference.clone()))?;
+        Ok(reference)
+    }
+
+    pub fn delete_record(&self, key: impl Into<String>) -> Result<()> {
+        self.apply_record_batch(RecordBatch {
+            mutations: vec![RecordMutation::Delete { key: key.into() }],
+        })?;
+        Ok(())
+    }
+
+    pub fn sync_storage(&self) -> Result<crate::StorageSyncReport> {
+        let engine = self
+            .inner
+            .lock()
+            .unwrap()
+            .storage_engine
+            .clone()
+            .ok_or_else(|| {
+                PrimadbError::Message("incremental storage is not configured".to_owned())
+            })?;
+        engine.sync()
+    }
+
+    pub fn storage_recovery_report(&self) -> Option<crate::StorageRecoveryReport> {
+        self.inner
+            .lock()
+            .unwrap()
+            .storage_engine
+            .clone()
+            .and_then(|engine| engine.recovery_report())
     }
 
     pub fn scope_policy(&self, scope: &str) -> Option<ScopePolicy> {
@@ -1476,7 +1643,7 @@ impl Primadb {
         directory: impl Into<std::path::PathBuf>,
         compaction_threshold: usize,
     ) -> Result<bool> {
-        let store = crate::SegmentFileStore::new(directory, compaction_threshold);
+        let store = crate::SegmentFileStore::new(directory, compaction_threshold)?;
         self.attach_incremental_store(Arc::new(store))
     }
 
@@ -1499,18 +1666,32 @@ impl Primadb {
                     incremental: false,
                     loaded_existing: loaded,
                     auto_persist: true,
+                    durability: None,
+                    lock_mode: None,
                 })
             }
             DurableStorageConfig::SegmentFiles {
                 directory,
                 journal_retention,
+                durability,
+                lock_mode,
             } => {
-                let loaded = self.use_radisk_storage(directory, journal_retention)?;
+                let store = crate::SegmentFileStore::with_options(
+                    directory,
+                    journal_retention,
+                    crate::SegmentFileStoreOptions {
+                        durability,
+                        lock_mode: lock_mode.clone(),
+                    },
+                )?;
+                let loaded = self.attach_incremental_store(Arc::new(store))?;
                 Ok(DurableStorageBinding {
                     backend: "segment_file".to_owned(),
                     incremental: true,
                     loaded_existing: loaded,
                     auto_persist: true,
+                    durability: Some(durability),
+                    lock_mode: Some(lock_mode),
                 })
             }
             DurableStorageConfig::BrowserStorage { .. }
@@ -1533,14 +1714,22 @@ impl Primadb {
                 Ok(BlobStorageBinding {
                     backend: "memory".to_owned(),
                     content_addressed: true,
+                    durability: None,
                 })
             }
             #[cfg(not(target_arch = "wasm32"))]
-            BlobStorageConfig::Files { directory } => {
-                self.attach_blob_store(Arc::new(FileBlobStore::new(directory)));
+            BlobStorageConfig::Files {
+                directory,
+                durability,
+            } => {
+                self.attach_blob_store(Arc::new(FileBlobStore::with_options(
+                    directory,
+                    crate::FileBlobStoreOptions { durability },
+                )));
                 Ok(BlobStorageBinding {
                     backend: "files".to_owned(),
                     content_addressed: true,
+                    durability: Some(durability),
                 })
             }
             #[cfg(target_arch = "wasm32")]
@@ -1677,6 +1866,13 @@ impl Primadb {
         }
         self.persist_if_needed()?;
         Ok(metadata.is_some())
+    }
+
+    pub fn close_durable_storage(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.persistence = None;
+        inner.storage_adapter = None;
+        inner.storage_engine = None;
     }
 
     #[cfg(feature = "crypto")]
@@ -2526,6 +2722,32 @@ fn put_json_inner(
         inner.write_value_to_field(&node, &field, value, &display_path(anchor, segments))?;
     }
     Ok(())
+}
+
+fn put_record_inner(inner: &mut Inner, key: &str, value: RecordValue) -> Result<()> {
+    let node = crate::record_node_id(key);
+    inner.set_field(
+        node.clone(),
+        "key".to_owned(),
+        OperationValue::Scalar(JsonValue::String(key.to_owned())),
+    );
+    let value = match value {
+        RecordValue::Json(value) => OperationValue::Scalar(value),
+        RecordValue::Bytes(bytes) => OperationValue::Bytes(bytes),
+        RecordValue::Blob(blob) => OperationValue::Blob(blob),
+    };
+    inner.set_field(node, "value".to_owned(), value);
+    Ok(())
+}
+
+fn delete_record_inner(inner: &mut Inner, key: &str) {
+    let node = crate::record_node_id(key);
+    inner.set_field(
+        node.clone(),
+        "key".to_owned(),
+        OperationValue::Scalar(JsonValue::String(key.to_owned())),
+    );
+    inner.delete_field(&node, "value");
 }
 
 fn unset_inner(inner: &mut Inner, anchor: &str, segments: &[String]) -> Result<()> {
@@ -5810,9 +6032,10 @@ mod tests {
     use crate::{
         ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PrimadbError,
         PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec,
-        RemotePath, Result, RoomHookContext, ScopeAuthority, ScopeConsistency, ScopeOfflineWrites,
-        ScopePolicy, ServeRequestContext, ServeResultContext, TransactionOptions,
-        TransactionStatus, TransactionStep, TraversalDirection, TraversalSpec,
+        RecordBatch, RecordMutation, RecordScan, RecordValue, RemotePath, Result, RoomHookContext,
+        ScopeAuthority, ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext,
+        ServeResultContext, TransactionOptions, TransactionStatus, TransactionStep,
+        TraversalDirection, TraversalSpec,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -6829,6 +7052,7 @@ mod tests {
         let first = Primadb::with_replica_id("blob-file-a");
         let binding = first.open_blob_storage(crate::BlobStorageConfig::Files {
             directory: root.display().to_string(),
+            durability: Default::default(),
         })?;
         assert_eq!(binding.backend, "files");
 
@@ -6840,6 +7064,7 @@ mod tests {
         let second = Primadb::with_replica_id("blob-file-b");
         second.open_blob_storage(crate::BlobStorageConfig::Files {
             directory: root.display().to_string(),
+            durability: Default::default(),
         })?;
         second
             .root("assets")
@@ -6905,6 +7130,7 @@ mod tests {
             .root("docs")
             .field("hello")
             .put(json!({"value": "world"}))?;
+        drop(first);
 
         let second = Primadb::with_replica_id("node-b");
         assert!(second.use_radisk_storage(path.clone(), 2)?);
@@ -6941,6 +7167,8 @@ mod tests {
             }],
             TransactionOptions::default(),
         )?;
+        drop(scope);
+        drop(first);
 
         let second = Primadb::with_replica_id("proposal-radisk-b");
         assert!(second.use_radisk_storage(path.clone(), 2)?);
@@ -6974,6 +7202,7 @@ mod tests {
                     "created_at": index,
                 }))?;
         }
+        drop(writer);
 
         let reader = Primadb::with_replica_id("reader");
         assert!(reader.use_radisk_storage(path.clone(), 8)?);
@@ -7031,6 +7260,7 @@ mod tests {
                     "profile": { "rank": index },
                 }))?;
         }
+        drop(writer);
 
         let reader = Primadb::with_replica_id("reader");
         assert!(reader.use_radisk_storage(path.clone(), 8)?);
@@ -7101,6 +7331,8 @@ mod tests {
                 "ciphertext": second_ciphertext,
             },
         }))?;
+        drop(checkpoint);
+        drop(writer);
 
         let reader = Primadb::with_replica_id("large-scalar-reader");
         assert!(reader.use_radisk_storage(path.clone(), 8)?);
@@ -7144,6 +7376,7 @@ mod tests {
                 "ciphertext": beta_ciphertext,
             },
         }))?;
+        drop(writer);
 
         let reader = Primadb::with_replica_id("large-index-reader");
         assert!(reader.use_radisk_storage(path.clone(), 8)?);
@@ -7176,6 +7409,184 @@ mod tests {
         })?;
         assert_eq!(prefixed.len(), 1);
         assert_eq!(prefixed[0].value["name"], "beta");
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_files_enforce_single_writer_lock() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-lock-{unique}"));
+
+        let first = Primadb::with_replica_id("lock-a");
+        assert!(!first.use_radisk_storage(path.clone(), 8)?);
+
+        let second = Primadb::with_replica_id("lock-b");
+        let blocked = second.use_radisk_storage(path.clone(), 8);
+        assert!(blocked.is_err());
+
+        drop(first);
+        let third = Primadb::with_replica_id("lock-c");
+        assert!(third.use_radisk_storage(path.clone(), 8).is_ok());
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_files_recover_pending_commit_on_startup() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-recovery-{unique}"));
+
+        let writer = Primadb::with_replica_id("recovery-writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        crate::engine::set_segment_fault_point_for_test(
+            path.clone(),
+            crate::engine::SegmentFaultPoint::AfterNodeWrites,
+        );
+        let failed = writer
+            .root("docs")
+            .field("crash")
+            .put(json!({"value": "survived"}));
+        assert!(failed.is_err());
+        drop(writer);
+
+        let reader = Primadb::with_replica_id("recovery-reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        let report = reader.storage_recovery_report().unwrap_or_default();
+        assert_eq!(report.applied_transactions, 1);
+        let restored = reader.root("docs").field("crash").once_json()?.unwrap();
+        assert_eq!(restored["value"], "survived");
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_files_recover_journal_in_transaction_order() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-order-recovery-{unique}"));
+
+        let writer = Primadb::with_replica_id("recovery-order-writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        writer.root("first").field("value").put("one")?;
+        crate::engine::set_segment_fault_point_for_test(
+            path.clone(),
+            crate::engine::SegmentFaultPoint::AfterJournalWrite,
+        );
+        let failed = writer.root("second").field("value").put("two");
+        assert!(failed.is_err());
+        drop(writer);
+
+        let _ = std::fs::remove_file(path.join("manifest.json"));
+        let _ = std::fs::remove_dir_all(path.join("nodes"));
+
+        let reader = Primadb::with_replica_id("recovery-order-reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        let report = reader.storage_recovery_report().unwrap_or_default();
+        assert_eq!(report.applied_transactions, 3);
+        assert_eq!(
+            reader.root("first").field("value").once_json()?,
+            Some(json!("one"))
+        );
+        assert_eq!(
+            reader.root("second").field("value").once_json()?,
+            Some(json!("two"))
+        );
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn record_batch_scans_and_range_deletes_with_segment_pushdown() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-records-{unique}"));
+
+        let writer = Primadb::with_replica_id("record-writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        let report = writer.apply_record_batch(RecordBatch {
+            mutations: vec![
+                RecordMutation::Put {
+                    key: "agentfs/inode/1".to_owned(),
+                    value: RecordValue::Json(json!({"kind": "dir", "mode": 0o755})),
+                },
+                RecordMutation::Put {
+                    key: "agentfs/dentry/1/README.md".to_owned(),
+                    value: RecordValue::Json(json!({"ino": 2})),
+                },
+                RecordMutation::Put {
+                    key: "agentfs/chunk/2/000000".to_owned(),
+                    value: RecordValue::Bytes(crate::BinaryBytes::from(b"hello".as_slice())),
+                },
+                RecordMutation::Put {
+                    key: "agentfs/chunk/2/000001".to_owned(),
+                    value: RecordValue::Bytes(crate::BinaryBytes::from(b" world".as_slice())),
+                },
+            ],
+        })?;
+        assert_eq!(report.puts, 4);
+        drop(writer);
+
+        let reader = Primadb::with_replica_id("record-reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert_eq!(reader.stats().nodes, 0);
+
+        let chunks = reader.scan_records(RecordScan {
+            prefix: Some("agentfs/chunk/2/".to_owned()),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(chunks.entries.len(), 2);
+        assert_eq!(reader.stats().nodes, 0);
+        let reverse_page = reader.scan_records(RecordScan {
+            prefix: Some("agentfs/chunk/2/".to_owned()),
+            reverse: true,
+            cursor: Some("agentfs/chunk/2/000001".to_owned()),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(reverse_page.entries.len(), 1);
+        assert_eq!(reverse_page.entries[0].key, "agentfs/chunk/2/000000");
+
+        let delete_report = reader.apply_record_batch(RecordBatch {
+            mutations: vec![RecordMutation::DeleteRange {
+                scan: RecordScan {
+                    prefix: Some("agentfs/chunk/2/".to_owned()),
+                    ..RecordScan::default()
+                },
+            }],
+        })?;
+        assert_eq!(delete_report.range_deletes, 2);
+        assert!(reader.sync_storage()?.synced);
+        drop(reader);
+
+        let reopened = Primadb::with_replica_id("record-reopened");
+        assert!(reopened.use_radisk_storage(path.clone(), 8)?);
+        let chunks = reopened.scan_records(RecordScan {
+            prefix: Some("agentfs/chunk/2/".to_owned()),
+            ..RecordScan::default()
+        })?;
+        assert!(chunks.entries.is_empty());
+        let dentry = reopened
+            .get_record("agentfs/dentry/1/README.md")?
+            .expect("dentry should remain");
+        assert_eq!(dentry.value, RecordValue::Json(json!({"ino": 2})));
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())
@@ -7281,6 +7692,7 @@ mod tests {
         assert!(!db.use_radisk_storage(storage_root.clone(), 8)?);
         db.open_blob_storage(crate::BlobStorageConfig::Files {
             directory: blob_root.display().to_string(),
+            durability: Default::default(),
         })?;
         let live_blob = db
             .root("assets")

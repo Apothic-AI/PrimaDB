@@ -34,8 +34,15 @@ db.open_durable_storage(
     {
         "kind": "segment_files",
         "directory": "/tmp/primadb-python-demo",
+        "durability": "full",
+        "lockMode": {"kind": "exclusive"},
     }
 )
+
+db.put_record("agentfs/inodes/1", {"mode": "file", "size": 4})
+db.put_record_bytes("agentfs/chunks/1/000000", b"\x01\x02\x03\x04")
+print(db.scan_records({"prefix": "agentfs/chunks/1/", "limit": 100})["entries"])
+db.sync_storage()
 
 db.set_network_hooks(
     {
@@ -45,6 +52,8 @@ db.set_network_hooks(
         else None
     }
 )
+
+db.close_durable_storage()
 ```
 
 ## Transactions And Strict Scopes

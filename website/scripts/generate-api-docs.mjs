@@ -280,6 +280,20 @@ function parsePythonStub(filePath) {
       continue;
     }
 
+    if (/^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)) {
+      if (current) {
+        blocks.push(current);
+        current = null;
+      }
+      blocks.push({
+        name: line.split("=", 1)[0].trim(),
+        kind: "type alias",
+        lines: [line],
+      });
+      pendingDecorators = [];
+      continue;
+    }
+
     if (current) {
       current.lines.push(line);
     } else if (line.trim()) {
@@ -423,6 +437,13 @@ function mapRustTypeToJs(typeText, classNames) {
   }
   if (compact.includes("js_sys::Uint8Array")) {
     return "Uint8Array";
+  }
+  if (compact === "Vec<u8>") {
+    return "Uint8Array";
+  }
+  if (compact.startsWith("Vec<") && compact.endsWith(">")) {
+    const inner = compact.slice("Vec<".length, -1);
+    return `${mapRustTypeToJs(inner, classNames)}[]`;
   }
   if (compact.includes("JsValue")) {
     return "any";
@@ -824,6 +845,10 @@ function generateApiDocs() {
           note: "Experimental `primadb/moq` helper entrypoint.",
         },
         {
+          path: resolve(repoRoot, "packages", "primadb", "types.ts"),
+          note: "Shared browser storage, blob, and keyed-record TypeScript helper types.",
+        },
+        {
           path: resolve(repoRoot, "packages", "primadb", "hooks.ts"),
           note: "Package-level hook helper types and registration utilities.",
         },
@@ -861,6 +886,13 @@ function generateApiDocs() {
             "Segment persistence stores current graph state and storage transaction bookkeeping. It intentionally omits the transport pending-op queue, so high-churn opaque values are not duplicated into durable metadata on every save.",
             "Use OPFS segments for large or high-churn browser-local datasets when `navigator.storage.getDirectory()` is available. IndexedDB segments remain the compatibility path.",
             "`stats()` reports queued/coalesced events, successful and failed writes, full replacements, incremental transactions, entries written/deleted, estimated bytes written, and the last write error. `estimateStorage()` reports logical namespace size; OPFS also includes origin quota/usage when the browser exposes it.",
+          ].join("\n\n"),
+        },
+        {
+          title: "Keyed records",
+          body: [
+            "`putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.",
+            "Records persist through IndexedDB/OPFS segment persistence and use the same graph transaction, watch, sync, and blob paths as normal graph writes.",
           ].join("\n\n"),
         },
         {

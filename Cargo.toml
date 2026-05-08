@@ -59,6 +59,7 @@ webrtc = { version = "0.8", optional = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fs2 = "0.4"
 rayon = "1.11"
 
 [dev-dependencies]

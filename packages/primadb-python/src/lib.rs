@@ -5,8 +5,9 @@ use primadb::{
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation,
     PasswordKeyDerivationOptions, Primadb as CorePrimadb, PublicIdentity, PullRequestKind,
-    QuerySpec, RelayClientConfig, RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
-    RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
+    QuerySpec, RecordBatch, RecordScan, RelayClientConfig, RelayServerConfig, RemotePath,
+    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
+    RemoteWatchSubscription as CoreRemoteWatch,
     RoomHookContext, Scope as CoreScope, ScopePolicy, SecretBoxKey, ServeRequestContext,
     ServeResultContext, ScriptExecutionOptions, Subscription as CoreSubscription,
     TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
@@ -54,19 +55,37 @@ fn from_py<T: DeserializeOwned>(value: &Bound<'_, PyAny>) -> PyResult<T> {
 }
 
 fn binding_to_json(binding: CoreDurableStorageBinding) -> JsonValue {
-    json!({
+    let mut value = json!({
         "backend": binding.backend,
         "incremental": binding.incremental,
         "loadedExisting": binding.loaded_existing,
         "autoPersist": binding.auto_persist,
-    })
+    });
+    if let JsonValue::Object(object) = &mut value {
+        if let Some(durability) = binding.durability {
+            object.insert("durability".to_owned(), serde_json::to_value(durability).unwrap_or(JsonValue::Null));
+        }
+        if let Some(lock_mode) = binding.lock_mode {
+            object.insert("lockMode".to_owned(), serde_json::to_value(lock_mode).unwrap_or(JsonValue::Null));
+        }
+    }
+    value
 }
 
 fn blob_binding_to_json(binding: CoreBlobStorageBinding) -> JsonValue {
-    json!({
+    let mut value = json!({
         "backend": binding.backend,
         "contentAddressed": binding.content_addressed,
-    })
+    });
+    if let JsonValue::Object(object) = &mut value
+        && let Some(durability) = binding.durability
+    {
+        object.insert(
+            "durability".to_owned(),
+            serde_json::to_value(durability).unwrap_or(JsonValue::Null),
+        );
+    }
+    value
 }
 
 fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
@@ -429,6 +448,69 @@ impl Primadb {
         let config: BlobStorageConfig = from_py(config)?;
         let binding = self.inner.open_blob_storage(config).map_err(to_py_err)?;
         to_py(py, blob_binding_to_json(binding))
+    }
+
+    fn close_durable_storage(&self) {
+        self.inner.close_durable_storage();
+    }
+
+    fn sync_storage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.sync_storage().map_err(to_py_err)?)
+    }
+
+    fn storage_recovery_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.storage_recovery_report())
+    }
+
+    fn put_record(&self, key: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let value: JsonValue = from_py(value)?;
+        self.inner.put_record_json(key, value).map_err(to_py_err)
+    }
+
+    fn put_record_bytes(&self, key: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let bytes = value
+            .extract::<Vec<u8>>()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        self.inner.put_record_bytes(key, bytes).map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (key, value, media_type=None))]
+    fn put_record_blob(
+        &self,
+        py: Python<'_>,
+        key: String,
+        value: &Bound<'_, PyAny>,
+        media_type: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let bytes = value
+            .extract::<Vec<u8>>()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let reference = self
+            .inner
+            .put_record_blob(key, bytes, media_type.as_deref())
+            .map_err(to_py_err)?;
+        to_py(py, reference)
+    }
+
+    fn get_record(&self, py: Python<'_>, key: String) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.get_record(&key).map_err(to_py_err)?)
+    }
+
+    fn scan_records(&self, py: Python<'_>, scan: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let scan: RecordScan = from_py(scan)?;
+        to_py(py, self.inner.scan_records(scan).map_err(to_py_err)?)
+    }
+
+    fn apply_record_batch(&self, py: Python<'_>, batch: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let batch: RecordBatch = from_py(batch)?;
+        to_py(
+            py,
+            self.inner.apply_record_batch(batch).map_err(to_py_err)?,
+        )
+    }
+
+    fn delete_record(&self, key: String) -> PyResult<()> {
+        self.inner.delete_record(key).map_err(to_py_err)
     }
 
     fn attach_node_script(

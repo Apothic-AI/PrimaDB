@@ -10,7 +10,8 @@ snapshot first.”
 
 Native:
 
-- segment-backed durable storage
+- segment-backed durable storage with crash recovery
+- native SegmentFiles single-writer locking
 - file-backed blobs
 - explicit vacuum and blob GC
 
@@ -28,7 +29,11 @@ The storage engine now supports:
 - lazy node restore
 - canonical node/index records
 - nested scalar indexes
+- keyed record buckets for point reads, prefix/range scans, and batch mutation
 - bounded journal retention
+- pending/final commit journals with checksum validation and roll-forward recovery
+- explicit `sync_storage()` / `syncStorage()` hooks for native fsync-style flushing
+- exclusive native storage locks by default
 - explicit vacuum/GC
 - BLAKE3-prefixed content-addressed blob references
 - bounded incremental browser segment writes for IndexedDB and OPFS
@@ -40,6 +45,43 @@ That closes a meaningful gap relative to the older snapshot-centered design.
 Use OPFS segments for large or high-churn browser-local data when available. OPFS stores segment
 records as browser-private files and avoids IndexedDB's structured-clone overhead for large opaque
 values. IndexedDB segments remain the compatibility path for browsers without OPFS.
+
+Browser storage does not expose OS-level fsync or file locks. OPFS and IndexedDB segment persistence
+are still incremental and coalesced, but they rely on browser durability semantics.
+
+## Native SegmentFiles Guarantees
+
+`SegmentFiles` is the strongest native local-durability backend. It defaults to:
+
+- `durability: "full"`: write temp file, flush data, fsync the file, atomically replace the target, and fsync the parent directory.
+- `lockMode: { kind: "exclusive" }`: fail fast if another process already owns the same segment directory.
+- startup recovery: validate pending/final journal commit records and roll forward materialized node/index/auth/record files when needed.
+
+Callers can explicitly choose `durability: "data"` when they only need file-data sync without
+directory fsync, or `durability: "relaxed"` when the surrounding application owns durability.
+`lockMode: { kind: "disabled" }` should only be used when an external process lock protects the
+directory.
+
+Native SDKs also expose:
+
+- `sync_storage()` / `syncStorage()` to force a storage flush report.
+- `storage_recovery_report()` / `storageRecoveryReport()` to inspect the latest startup recovery pass.
+- `close_durable_storage()` / `closeDurableStorage()` to release the store and its file lock deterministically.
+
+Native file-backed blobs use the same durability vocabulary. `FileBlobStore` defaults to
+`durability: "full"` and writes blob data/metadata through temp-file replacement plus fsync before
+reporting success. This matters when keyed records store `BlobRef` values for larger chunk payloads.
+
+## Keyed Records
+
+Keyed records are graph-native primitives for workloads that need ordered lookup without building a
+SQL-like layer. They are useful for filesystem-shaped data such as inodes, dentries, and chunk keys:
+
+- `put_record` / `putRecord` stores JSON.
+- `put_record_bytes` / `putRecordBytes` stores binary data.
+- `put_record_blob` / `putRecordBlob` stores larger binary data in the configured blob store and records the blob ref.
+- `scan_records` / `scanRecords` supports prefix, start/end bounds, reverse order, limit, and cursor.
+- `apply_record_batch` / `applyRecordBatch` applies put/delete/delete-range mutations atomically through the graph transaction path.
 
 ## What Is Deferred
 
