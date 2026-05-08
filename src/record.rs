@@ -95,9 +95,19 @@ pub enum RecordMutation {
     DeleteRange { scan: RecordScan },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordPrecondition {
+    Exists { key: String },
+    Absent { key: String },
+    Value { key: String, value: RecordValue },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordBatch {
+    #[serde(default)]
+    pub preconditions: Vec<RecordPrecondition>,
     #[serde(default)]
     pub mutations: Vec<RecordMutation>,
 }
@@ -105,6 +115,7 @@ pub struct RecordBatch {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordBatchReport {
+    pub preconditions: usize,
     pub puts: usize,
     pub deletes: usize,
     pub range_deletes: usize,

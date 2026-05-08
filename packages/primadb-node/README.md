@@ -92,6 +92,10 @@ db.putRecord("agentfs/inodes/1", { mode: "file", size: 4 });
 db.putRecordBytes("agentfs/chunks/1/000000", Buffer.from([1, 2, 3, 4]));
 const chunks = db.scanRecords({ prefix: "agentfs/chunks/1/", limit: 100 });
 console.log(chunks.entries.length);
+db.applyRecordBatch({
+  preconditions: [{ kind: "exists", key: "agentfs/inodes/1" }],
+  mutations: [],
+});
 db.syncStorage();
 
 const scriptPath = { anchor: "notes", segments: ["scripted"] };

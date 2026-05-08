@@ -422,12 +422,31 @@ export type RecordMutation = {
 };
 ```
 
+#### `RecordPrecondition`
+
+Kind: type alias
+
+```ts
+export type RecordPrecondition = {
+    kind: "exists";
+    key: string;
+} | {
+    kind: "absent";
+    key: string;
+} | {
+    kind: "value";
+    key: string;
+    value: RecordValue;
+};
+```
+
 #### `RecordBatch`
 
 Kind: interface
 
 ```ts
 export interface RecordBatch {
+    preconditions?: RecordPrecondition[];
     mutations?: RecordMutation[];
 }
 ```
@@ -438,6 +457,7 @@ Kind: interface
 
 ```ts
 export interface RecordBatchReport {
+    preconditions: number;
     puts: number;
     deletes: number;
     rangeDeletes: number;

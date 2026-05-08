@@ -464,12 +464,52 @@ Kind: type alias
 RecordMutation = RecordPutMutation | RecordDeleteMutation | RecordDeleteRangeMutation
 ```
 
+## `RecordExistsPrecondition`
+
+Kind: class
+
+```py
+class RecordExistsPrecondition(TypedDict):
+    kind: Literal["exists"]
+    key: str
+```
+
+## `RecordAbsentPrecondition`
+
+Kind: class
+
+```py
+class RecordAbsentPrecondition(TypedDict):
+    kind: Literal["absent"]
+    key: str
+```
+
+## `RecordValuePrecondition`
+
+Kind: class
+
+```py
+class RecordValuePrecondition(TypedDict):
+    kind: Literal["value"]
+    key: str
+    value: RecordValue
+```
+
+## `RecordPrecondition`
+
+Kind: type alias
+
+```py
+RecordPrecondition = RecordExistsPrecondition | RecordAbsentPrecondition | RecordValuePrecondition
+```
+
 ## `RecordBatch`
 
 Kind: class
 
 ```py
 class RecordBatch(TypedDict, total=False):
+    preconditions: list[RecordPrecondition]
     mutations: list[RecordMutation]
 ```
 
@@ -479,6 +519,7 @@ Kind: class
 
 ```py
 class RecordBatchReport(TypedDict):
+    preconditions: int
     puts: int
     deletes: int
     rangeDeletes: int

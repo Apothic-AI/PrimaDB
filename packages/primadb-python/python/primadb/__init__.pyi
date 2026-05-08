@@ -212,10 +212,27 @@ class RecordDeleteRangeMutation(TypedDict):
 
 RecordMutation = RecordPutMutation | RecordDeleteMutation | RecordDeleteRangeMutation
 
+class RecordExistsPrecondition(TypedDict):
+    kind: Literal["exists"]
+    key: str
+
+class RecordAbsentPrecondition(TypedDict):
+    kind: Literal["absent"]
+    key: str
+
+class RecordValuePrecondition(TypedDict):
+    kind: Literal["value"]
+    key: str
+    value: RecordValue
+
+RecordPrecondition = RecordExistsPrecondition | RecordAbsentPrecondition | RecordValuePrecondition
+
 class RecordBatch(TypedDict, total=False):
+    preconditions: list[RecordPrecondition]
     mutations: list[RecordMutation]
 
 class RecordBatchReport(TypedDict):
+    preconditions: int
     puts: int
     deletes: int
     rangeDeletes: int

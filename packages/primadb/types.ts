@@ -95,11 +95,18 @@ export type RecordMutation =
   | { kind: "delete"; key: string }
   | { kind: "delete_range"; scan: RecordScan };
 
+export type RecordPrecondition =
+  | { kind: "exists"; key: string }
+  | { kind: "absent"; key: string }
+  | { kind: "value"; key: string; value: RecordValue };
+
 export interface RecordBatch {
+  preconditions?: RecordPrecondition[];
   mutations?: RecordMutation[];
 }
 
 export interface RecordBatchReport {
+  preconditions: number;
   puts: number;
   deletes: number;
   rangeDeletes: number;

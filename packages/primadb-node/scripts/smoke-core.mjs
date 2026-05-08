@@ -98,6 +98,10 @@ try {
   db.putRecord("agentfs/inode/1", { kind: "file", size: payload.length });
   db.putRecordBytes("agentfs/chunk/1/000000", payload);
   const recordScan = db.scanRecords({ prefix: "agentfs/" });
+  const recordBatchReport = db.applyRecordBatch({
+    preconditions: [{ kind: "exists", key: "agentfs/inode/1" }],
+    mutations: [],
+  });
   const storageSync = db.syncStorage();
   const roundTripBytes = binary.onceBytes();
   const roundTripBlob = blobChain.getBlob();
@@ -173,6 +177,7 @@ try {
         restoredBytes: restoredBytes ? Array.from(restoredBytes) : null,
         restoredBlob: restoredBlob ? Array.from(restoredBlob) : null,
         recordScan,
+        recordBatchReport,
         storageSync,
         restoredRecord,
         restoredRecordScan,
@@ -203,6 +208,7 @@ try {
           JSON.stringify(restoredBlob ? Array.from(restoredBlob) : null) === JSON.stringify(Array.from(payload)) &&
           storageSync.synced === true &&
           recordScan.entries.length === 2 &&
+          recordBatchReport.preconditions === 1 &&
           restoredRecord?.value?.value?.size === payload.length &&
           restoredRecordScan.entries.length === 1 &&
           ledgerReport.status === "committed" &&

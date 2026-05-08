@@ -25,8 +25,8 @@ use crate::operation::{Operation, OperationAction, OperationValue};
 use crate::persistence::{PersistenceTarget, load_snapshot_payload, store_snapshot_payload};
 use crate::query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QuerySpec};
 use crate::record::{
-    RecordBatch, RecordBatchReport, RecordEntry, RecordMutation, RecordScan, RecordScanResult,
-    RecordValue,
+    RecordBatch, RecordBatchReport, RecordEntry, RecordMutation, RecordPrecondition, RecordScan,
+    RecordScanResult, RecordValue,
 };
 use crate::session_auth::{PresenceIdentity, SessionAuthConfig, VerifiedIdentity};
 use crate::snapshot::DatabaseSnapshot;
@@ -478,14 +478,8 @@ impl Primadb {
     }
 
     pub fn get_record(&self, key: &str) -> Result<Option<RecordEntry>> {
-        let node_id = crate::record_node_id(key);
         let mut inner = self.inner.lock().unwrap();
-        let _ = inner.maybe_load_node(&node_id)?;
-        Ok(inner
-            .nodes
-            .get(&node_id)
-            .and_then(crate::record_entry_from_node_state)
-            .filter(|entry| entry.key == key))
+        record_entry_from_inner(&mut inner, key)
     }
 
     pub fn get_many_records<I>(&self, keys: I) -> Result<Vec<Option<RecordEntry>>>
@@ -499,66 +493,31 @@ impl Primadb {
     }
 
     pub fn scan_records(&self, scan: RecordScan) -> Result<RecordScanResult> {
-        let engine = { self.inner.lock().unwrap().storage_engine.clone() };
-        let mut entries = match engine {
-            Some(engine) => engine
-                .scan_record_entries(&scan)?
-                .unwrap_or_else(|| self.scan_records_in_memory(&scan).unwrap_or_default()),
-            None => self.scan_records_in_memory(&scan)?,
+        let storage_entries = {
+            let engine = { self.inner.lock().unwrap().storage_engine.clone() };
+            match engine {
+                Some(engine) => engine.scan_record_entries(&scan)?,
+                None => None,
+            }
         };
-        entries.sort_by(|left, right| left.key.cmp(&right.key));
-        if scan.reverse {
-            entries.reverse();
-        }
-        let mut next_cursor = None;
-        if let Some(limit) = scan.limit
-            && entries.len() > limit
-        {
-            let overflow = entries.split_off(limit);
-            next_cursor = entries
-                .last()
-                .map(|entry| entry.key.clone())
-                .or_else(|| overflow.first().map(|entry| entry.key.clone()));
-        }
-        Ok(RecordScanResult {
-            entries,
-            next_cursor,
-        })
-    }
-
-    fn scan_records_in_memory(&self, scan: &RecordScan) -> Result<Vec<RecordEntry>> {
-        let snapshot = self.snapshot();
-        let mut entries = snapshot
-            .nodes
-            .values()
-            .filter_map(crate::record_entry_from_node_state)
-            .filter(|entry| scan.matches_key(&entry.key))
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.key.cmp(&right.key));
-        Ok(entries)
+        let mut inner = self.inner.lock().unwrap();
+        let entries = collect_record_entries_for_scan(&mut inner, &scan, storage_entries)?;
+        Ok(record_scan_result(entries, &scan))
     }
 
     pub fn apply_record_batch(&self, batch: RecordBatch) -> Result<RecordBatchReport> {
-        let mut expanded = Vec::new();
-        let mut range_deletes = 0;
-        for mutation in batch.mutations {
-            match mutation {
-                RecordMutation::DeleteRange { scan } => {
-                    let entries = self.scan_records(scan)?.entries;
-                    range_deletes += entries.len();
-                    expanded.extend(
-                        entries
-                            .into_iter()
-                            .map(|entry| RecordMutation::Delete { key: entry.key }),
-                    );
-                }
-                other => expanded.push(other),
-            }
-        }
+        let RecordBatch {
+            preconditions,
+            mutations,
+        } = batch;
 
         let (mut report, _, operation_count) = self.run_local_transaction(|tx| {
             let mut report = RecordBatchReport::default();
-            for mutation in expanded {
+            for precondition in &preconditions {
+                assert_record_precondition(tx.inner, precondition)?;
+            }
+            report.preconditions = preconditions.len();
+            for mutation in mutations {
                 match mutation {
                     RecordMutation::Put { key, value } => {
                         put_record_inner(tx.inner, &key, value)?;
@@ -568,18 +527,25 @@ impl Primadb {
                         delete_record_inner(tx.inner, &key);
                         report.deletes += 1;
                     }
-                    RecordMutation::DeleteRange { .. } => {}
+                    RecordMutation::DeleteRange { scan } => {
+                        let entries = collect_record_entries_for_scan_locked(tx.inner, &scan)?;
+                        report.range_deletes += entries.len();
+                        for entry in entries {
+                            delete_record_inner(tx.inner, &entry.key);
+                            report.deletes += 1;
+                        }
+                    }
                 }
             }
             Ok(report)
         })?;
-        report.range_deletes = range_deletes;
         report.operation_count = operation_count;
         Ok(report)
     }
 
     pub fn put_record(&self, key: impl Into<String>, value: RecordValue) -> Result<()> {
         self.apply_record_batch(RecordBatch {
+            preconditions: Vec::new(),
             mutations: vec![RecordMutation::Put {
                 key: key.into(),
                 value,
@@ -613,6 +579,7 @@ impl Primadb {
 
     pub fn delete_record(&self, key: impl Into<String>) -> Result<()> {
         self.apply_record_batch(RecordBatch {
+            preconditions: Vec::new(),
             mutations: vec![RecordMutation::Delete { key: key.into() }],
         })?;
         Ok(())
@@ -2750,6 +2717,116 @@ fn delete_record_inner(inner: &mut Inner, key: &str) {
     inner.delete_field(&node, "value");
 }
 
+fn record_entry_from_inner(inner: &mut Inner, key: &str) -> Result<Option<RecordEntry>> {
+    let node_id = crate::record_node_id(key);
+    let _ = inner.maybe_load_node(&node_id)?;
+    Ok(inner
+        .nodes
+        .get(&node_id)
+        .and_then(crate::record_entry_from_node_state)
+        .filter(|entry| entry.key == key))
+}
+
+fn assert_record_precondition(inner: &mut Inner, precondition: &RecordPrecondition) -> Result<()> {
+    match precondition {
+        RecordPrecondition::Exists { key } => {
+            if record_entry_from_inner(inner, key)?.is_some() {
+                return Ok(());
+            }
+            Err(record_precondition_error(format!(
+                "record `{key}` must exist"
+            )))
+        }
+        RecordPrecondition::Absent { key } => {
+            if record_entry_from_inner(inner, key)?.is_none() {
+                return Ok(());
+            }
+            Err(record_precondition_error(format!(
+                "record `{key}` must be absent"
+            )))
+        }
+        RecordPrecondition::Value { key, value } => {
+            let current = record_entry_from_inner(inner, key)?;
+            if current.as_ref().map(|entry| &entry.value) == Some(value) {
+                return Ok(());
+            }
+            Err(record_precondition_error(format!(
+                "record `{key}` did not match the expected value"
+            )))
+        }
+    }
+}
+
+fn record_precondition_error(message: String) -> PrimadbError {
+    PrimadbError::TransactionConflict { message }
+}
+
+fn collect_record_entries_for_scan_locked(
+    inner: &mut Inner,
+    scan: &RecordScan,
+) -> Result<Vec<RecordEntry>> {
+    let storage_entries = match inner.storage_engine.clone() {
+        Some(engine) => engine.scan_record_entries(scan)?,
+        None => None,
+    };
+    collect_record_entries_for_scan(inner, scan, storage_entries)
+}
+
+fn collect_record_entries_for_scan(
+    inner: &mut Inner,
+    scan: &RecordScan,
+    storage_entries: Option<Vec<RecordEntry>>,
+) -> Result<Vec<RecordEntry>> {
+    let mut entries = BTreeMap::new();
+    if let Some(storage_entries) = storage_entries {
+        for entry in storage_entries {
+            if scan.matches_key(&entry.key) {
+                entries.insert(entry.key.clone(), entry);
+            }
+        }
+    }
+
+    for (node_id, node_state) in &inner.nodes {
+        if !crate::is_record_node_id(node_id) {
+            continue;
+        }
+        let Some(key) = crate::record_key_from_node_state(node_state) else {
+            continue;
+        };
+        if !scan.matches_key(&key) {
+            continue;
+        }
+        if let Some(entry) = crate::record_entry_from_node_state(node_state) {
+            entries.insert(entry.key.clone(), entry);
+        } else {
+            entries.remove(&key);
+        }
+    }
+
+    Ok(entries.into_values().collect())
+}
+
+fn record_scan_result(mut entries: Vec<RecordEntry>, scan: &RecordScan) -> RecordScanResult {
+    entries.sort_by(|left, right| left.key.cmp(&right.key));
+    if scan.reverse {
+        entries.reverse();
+    }
+    let mut next_cursor = None;
+    if let Some(limit) = scan.limit
+        && entries.len() > limit
+    {
+        let overflow = entries.split_off(limit);
+        next_cursor = entries
+            .last()
+            .map(|entry| entry.key.clone())
+            .or_else(|| overflow.first().map(|entry| entry.key.clone()));
+    }
+    RecordScanResult {
+        entries,
+        next_cursor,
+    }
+}
+
 fn unset_inner(inner: &mut Inner, anchor: &str, segments: &[String]) -> Result<()> {
     if segments.is_empty() {
         return Err(PrimadbError::ExpectedFieldPath {
@@ -3110,6 +3187,48 @@ impl<'a> Transaction<'a> {
 
     pub fn member_ids(&self) -> &[String] {
         &self.member_ids
+    }
+
+    pub fn get_record(&mut self, key: &str) -> Result<Option<RecordEntry>> {
+        record_entry_from_inner(self.inner, key)
+    }
+
+    pub fn assert_record_exists(&mut self, key: &str) -> Result<()> {
+        assert_record_precondition(
+            self.inner,
+            &RecordPrecondition::Exists {
+                key: key.to_owned(),
+            },
+        )
+    }
+
+    pub fn assert_record_absent(&mut self, key: &str) -> Result<()> {
+        assert_record_precondition(
+            self.inner,
+            &RecordPrecondition::Absent {
+                key: key.to_owned(),
+            },
+        )
+    }
+
+    pub fn assert_record_value(&mut self, key: &str, value: &RecordValue) -> Result<()> {
+        assert_record_precondition(
+            self.inner,
+            &RecordPrecondition::Value {
+                key: key.to_owned(),
+                value: value.clone(),
+            },
+        )
+    }
+
+    pub fn put_record(&mut self, key: impl Into<String>, value: RecordValue) -> Result<()> {
+        let key = key.into();
+        put_record_inner(self.inner, &key, value)
+    }
+
+    pub fn delete_record(&mut self, key: impl AsRef<str>) -> Result<()> {
+        delete_record_inner(self.inner, key.as_ref());
+        Ok(())
     }
 }
 
@@ -6032,10 +6151,10 @@ mod tests {
     use crate::{
         ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PrimadbError,
         PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec,
-        RecordBatch, RecordMutation, RecordScan, RecordValue, RemotePath, Result, RoomHookContext,
-        ScopeAuthority, ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext,
-        ServeResultContext, TransactionOptions, TransactionStatus, TransactionStep,
-        TraversalDirection, TraversalSpec,
+        RecordBatch, RecordMutation, RecordPrecondition, RecordScan, RecordValue, RemotePath,
+        Result, RoomHookContext, ScopeAuthority, ScopeConsistency, ScopeOfflineWrites, ScopePolicy,
+        ServeRequestContext, ServeResultContext, TransactionOptions, TransactionStatus,
+        TransactionStep, TraversalDirection, TraversalSpec,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -7523,6 +7642,9 @@ mod tests {
         let writer = Primadb::with_replica_id("record-writer");
         assert!(!writer.use_radisk_storage(path.clone(), 8)?);
         let report = writer.apply_record_batch(RecordBatch {
+            preconditions: vec![RecordPrecondition::Absent {
+                key: "agentfs/inode/1".to_owned(),
+            }],
             mutations: vec![
                 RecordMutation::Put {
                     key: "agentfs/inode/1".to_owned(),
@@ -7542,8 +7664,15 @@ mod tests {
                 },
             ],
         })?;
+        assert_eq!(report.preconditions, 1);
         assert_eq!(report.puts, 4);
         drop(writer);
+
+        let corrupt_root = path.join("records").join("by_key");
+        let mut corrupt_path = corrupt_root;
+        corrupt_path.push(crate::encode_component("zzzzzz"));
+        std::fs::create_dir_all(&corrupt_path)?;
+        std::fs::write(corrupt_path.join("entry.json"), b"not json")?;
 
         let reader = Primadb::with_replica_id("record-reader");
         assert!(reader.use_radisk_storage(path.clone(), 8)?);
@@ -7564,7 +7693,47 @@ mod tests {
         assert_eq!(reverse_page.entries.len(), 1);
         assert_eq!(reverse_page.entries[0].key, "agentfs/chunk/2/000000");
 
+        reader.transaction(|tx| {
+            let dentry = tx
+                .get_record("agentfs/dentry/1/README.md")?
+                .expect("dentry should exist in transaction");
+            assert_eq!(dentry.value, RecordValue::Json(json!({"ino": 2})));
+            tx.assert_record_exists("agentfs/inode/1")?;
+            tx.assert_record_absent("agentfs/missing")?;
+            tx.assert_record_value(
+                "agentfs/inode/1",
+                &RecordValue::Json(json!({"kind": "dir", "mode": 0o755})),
+            )?;
+            tx.put_record(
+                "agentfs/chunk/2/000002",
+                RecordValue::Bytes(crate::BinaryBytes::from(b"!".as_slice())),
+            )?;
+            tx.delete_record("agentfs/chunk/2/000002")?;
+            Ok(())
+        })?;
+
+        let failed = reader.apply_record_batch(RecordBatch {
+            preconditions: vec![RecordPrecondition::Absent {
+                key: "agentfs/inode/1".to_owned(),
+            }],
+            mutations: vec![RecordMutation::Put {
+                key: "agentfs/inode/1".to_owned(),
+                value: RecordValue::Json(json!({"kind": "file"})),
+            }],
+        });
+        assert!(matches!(
+            failed,
+            Err(PrimadbError::TransactionConflict { .. })
+        ));
+        assert_eq!(
+            reader.get_record("agentfs/inode/1")?.unwrap().value,
+            RecordValue::Json(json!({"kind": "dir", "mode": 0o755}))
+        );
+
         let delete_report = reader.apply_record_batch(RecordBatch {
+            preconditions: vec![RecordPrecondition::Exists {
+                key: "agentfs/chunk/2/000000".to_owned(),
+            }],
             mutations: vec![RecordMutation::DeleteRange {
                 scan: RecordScan {
                     prefix: Some("agentfs/chunk/2/".to_owned()),
@@ -7572,6 +7741,7 @@ mod tests {
                 },
             }],
         })?;
+        assert_eq!(delete_report.preconditions, 1);
         assert_eq!(delete_report.range_deletes, 2);
         assert!(reader.sync_storage()?.synced);
         drop(reader);
@@ -7587,6 +7757,37 @@ mod tests {
             .get_record("agentfs/dentry/1/README.md")?
             .expect("dentry should remain");
         assert_eq!(dentry.value, RecordValue::Json(json!({"ino": 2})));
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_files_persist_large_record_keys_without_filename_limit() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-record-long-key-{unique}"));
+        let long_key = format!("agentfs/long/{}", "x".repeat(8192));
+        let long_prefix = format!("agentfs/long/{}", "x".repeat(300));
+
+        let writer = Primadb::with_replica_id("long-record-key-writer");
+        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        writer.put_record_json(&long_key, json!({"ok": true}))?;
+        drop(writer);
+
+        let reader = Primadb::with_replica_id("long-record-key-reader");
+        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        let restored = reader.get_record(&long_key)?.expect("long key should load");
+        assert_eq!(restored.value, RecordValue::Json(json!({"ok": true})));
+        let page = reader.scan_records(RecordScan {
+            prefix: Some(long_prefix),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].key, long_key);
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())

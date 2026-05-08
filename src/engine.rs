@@ -30,11 +30,15 @@ const DIRECT_INDEX_LITERAL_PREFIX: &str = "v_";
 #[cfg(not(target_arch = "wasm32"))]
 const DIRECT_INDEX_HASH_PREFIX: &str = "h_";
 #[cfg(not(target_arch = "wasm32"))]
-const RECORD_BUCKET_LITERAL_COMPONENT_LIMIT: usize = 120;
+const RECORD_KEY_CHUNK_HEX: usize = 64;
 #[cfg(not(target_arch = "wasm32"))]
-const RECORD_BUCKET_LITERAL_PREFIX: &str = "v_";
+const RECORD_KEY_INDEX_HEX_LIMIT: usize = 512;
 #[cfg(not(target_arch = "wasm32"))]
-const RECORD_BUCKET_HASH_PREFIX: &str = "h_";
+const RECORD_ENTRY_FILE: &str = "entry.json";
+#[cfg(not(target_arch = "wasm32"))]
+const RECORD_EMPTY_KEY_COMPONENT: &str = "_empty";
+#[cfg(not(target_arch = "wasm32"))]
+const RECORD_OVERFLOW_COMPONENT: &str = "_overflow";
 #[cfg(not(target_arch = "wasm32"))]
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -157,13 +161,6 @@ pub struct NodeIndexManifest {
 #[serde(default)]
 struct DirectIndexBucket {
     entries: BTreeMap<String, DirectScalarIndexEntry>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(default)]
-struct RecordBucket {
-    entries: BTreeMap<String, RecordEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -334,16 +331,19 @@ pub(crate) enum SegmentFaultPoint {
     BeforeJournalFinalize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-static SEGMENT_FAULT_POINT: Mutex<Option<(std::path::PathBuf, SegmentFaultPoint)>> =
-    Mutex::new(None);
+#[cfg(all(test, not(target_arch = "wasm32")))]
+static SEGMENT_FAULT_POINTS: Mutex<BTreeMap<std::path::PathBuf, SegmentFaultPoint>> =
+    Mutex::new(BTreeMap::new());
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) fn set_segment_fault_point_for_test(
     root: impl Into<std::path::PathBuf>,
     point: SegmentFaultPoint,
 ) {
-    *SEGMENT_FAULT_POINT.lock().unwrap() = Some((root.into(), point));
+    SEGMENT_FAULT_POINTS
+        .lock()
+        .unwrap()
+        .insert(root.into(), point);
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(windows)))]
@@ -420,7 +420,7 @@ impl SegmentFileStore {
         std::fs::create_dir_all(self.root.join("auth"))?;
         std::fs::create_dir_all(self.root.join("node_indexes"))?;
         std::fs::create_dir_all(self.root.join("indexes").join("direct"))?;
-        std::fs::create_dir_all(self.root.join("records"))?;
+        std::fs::create_dir_all(self.record_entries_root())?;
         std::fs::create_dir_all(self.root.join("journal"))?;
         if matches!(self.durability, SegmentDurability::Full) {
             self.sync_dir(&self.root)?;
@@ -483,46 +483,50 @@ impl SegmentFileStore {
         self.root.join("records")
     }
 
-    fn record_bucket_path(&self, key: &str) -> std::path::PathBuf {
-        self.records_root()
-            .join(format!("{}.json", safe_record_component(key)))
+    fn record_entries_root(&self) -> std::path::PathBuf {
+        self.records_root().join("by_key")
     }
 
-    fn read_record_bucket_path(path: &std::path::Path) -> Result<RecordBucket> {
-        if !path.exists() {
-            return Ok(RecordBucket::default());
+    fn record_entry_path(&self, key: &str) -> std::path::PathBuf {
+        let mut path = self.record_entries_root();
+        let encoded = encode_component(key);
+        if encoded.is_empty() {
+            path.push(RECORD_EMPTY_KEY_COMPONENT);
+        } else {
+            let indexed_len = encoded.len().min(RECORD_KEY_INDEX_HEX_LIMIT);
+            for chunk in encoded[..indexed_len]
+                .as_bytes()
+                .chunks(RECORD_KEY_CHUNK_HEX)
+            {
+                path.push(std::str::from_utf8(chunk).expect("hex record key chunk"));
+            }
+            if encoded.len() > RECORD_KEY_INDEX_HEX_LIMIT {
+                path.push(RECORD_OVERFLOW_COMPONENT);
+                path.push(blake3::hash(key.as_bytes()).to_hex().to_string());
+            }
         }
+        path.join(RECORD_ENTRY_FILE)
+    }
+
+    fn read_record_entry_path(path: &std::path::Path) -> Result<RecordEntry> {
         Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
 
-    fn write_record_bucket_path(
-        &self,
-        path: &std::path::Path,
-        bucket: &RecordBucket,
-    ) -> Result<()> {
-        self.write_json_file(path, bucket)
-    }
-
     fn upsert_record_entry(&self, entry: &RecordEntry) -> Result<()> {
-        let path = self.record_bucket_path(&entry.key);
-        let mut bucket = Self::read_record_bucket_path(&path)?;
-        bucket.entries.insert(entry.key.clone(), entry.clone());
-        self.write_record_bucket_path(&path, &bucket)
+        let path = self.record_entry_path(&entry.key);
+        self.write_json_file(&path, entry)
     }
 
     fn remove_record_entry(&self, key: &str) -> Result<bool> {
-        let path = self.record_bucket_path(key);
+        let path = self.record_entry_path(key);
         if !path.exists() {
             return Ok(false);
         }
-        let mut bucket = Self::read_record_bucket_path(&path)?;
-        let removed = bucket.entries.remove(key).is_some();
-        if bucket.entries.is_empty() {
-            self.remove_file_durable(&path)?;
-        } else if removed {
-            self.write_record_bucket_path(&path, &bucket)?;
+        self.remove_file_durable(&path)?;
+        if let Some(parent) = path.parent() {
+            self.prune_empty_record_dirs(parent)?;
         }
-        Ok(removed)
+        Ok(true)
     }
 
     fn read_direct_index_bucket_path(path: &std::path::Path) -> Result<DirectIndexBucket> {
@@ -647,17 +651,20 @@ impl SegmentFileStore {
         Ok(())
     }
 
+    #[cfg(test)]
     fn maybe_fail(&self, point: SegmentFaultPoint) -> Result<()> {
-        let mut fault = SEGMENT_FAULT_POINT.lock().unwrap();
-        if fault
-            .as_ref()
-            .is_some_and(|(root, fault_point)| root == &self.root && fault_point == &point)
-        {
-            *fault = None;
+        let mut faults = SEGMENT_FAULT_POINTS.lock().unwrap();
+        if faults.get(&self.root).is_some_and(|fault| fault == &point) {
+            faults.remove(&self.root);
             return Err(PrimadbError::Message(format!(
                 "injected segment fault at {point:?}"
             )));
         }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn maybe_fail(&self, _point: SegmentFaultPoint) -> Result<()> {
         Ok(())
     }
 
@@ -703,6 +710,85 @@ impl SegmentFileStore {
             }
         }
         Ok(())
+    }
+
+    fn record_scan_root(&self, scan: &RecordScan) -> (std::path::PathBuf, Option<String>) {
+        let Some(prefix) = record_scan_key_prefix(scan) else {
+            return (self.record_entries_root(), None);
+        };
+        let encoded = encode_component(&prefix);
+        if encoded.is_empty() {
+            return (self.record_entries_root(), None);
+        }
+
+        let indexed_len = encoded.len().min(RECORD_KEY_INDEX_HEX_LIMIT);
+        let full_chunks_len = indexed_len / RECORD_KEY_CHUNK_HEX * RECORD_KEY_CHUNK_HEX;
+        let mut root = self.record_entries_root();
+        for chunk in encoded[..full_chunks_len]
+            .as_bytes()
+            .chunks(RECORD_KEY_CHUNK_HEX)
+        {
+            root.push(std::str::from_utf8(chunk).expect("hex record scan chunk"));
+        }
+
+        let partial = (full_chunks_len < indexed_len)
+            .then(|| encoded[full_chunks_len..indexed_len].to_owned());
+        (root, partial)
+    }
+
+    fn collect_record_entry_files(
+        dir: &std::path::Path,
+        partial_component_prefix: Option<&str>,
+        files: &mut Vec<std::path::PathBuf>,
+    ) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_file() {
+                if name == RECORD_ENTRY_FILE {
+                    files.push(path);
+                }
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(partial) = partial_component_prefix
+                && !name.starts_with(partial)
+            {
+                continue;
+            }
+            Self::collect_record_entry_files(&path, None, files)?;
+        }
+        Ok(())
+    }
+
+    fn prune_empty_record_dirs(&self, start: &std::path::Path) -> Result<usize> {
+        let root = self.record_entries_root();
+        let mut current = start.to_path_buf();
+        let mut removed = 0;
+        while current != root {
+            match std::fs::read_dir(&current) {
+                Ok(entries) => {
+                    let mut entries = entries;
+                    if entries.next().is_some() {
+                        break;
+                    }
+                    self.remove_dir_durable(&current)?;
+                    removed += 1;
+                }
+                _ => break,
+            }
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            current = parent.to_path_buf();
+        }
+        Ok(removed)
     }
 
     fn journal_pending_path(&self, tx_id: u64) -> std::path::PathBuf {
@@ -1158,20 +1244,18 @@ impl IncrementalStore for SegmentFileStore {
 
     fn scan_record_entries(&self, scan: &RecordScan) -> Result<Option<Vec<RecordEntry>>> {
         self.ensure_layout()?;
-        let root = self.records_root();
+        let (root, partial_component_prefix) = self.record_scan_root(scan);
         if !root.exists() {
             return Ok(Some(Vec::new()));
         }
         let mut entries = Vec::new();
         let mut files = Vec::new();
-        collect_files(&root, &mut files)?;
+        Self::collect_record_entry_files(&root, partial_component_prefix.as_deref(), &mut files)?;
         files.sort();
         for file in files {
-            let bucket = Self::read_record_bucket_path(&file)?;
-            for entry in bucket.entries.values() {
-                if scan.matches_key(&entry.key) {
-                    entries.push(entry.clone());
-                }
+            let entry = Self::read_record_entry_path(&file)?;
+            if scan.matches_key(&entry.key) {
+                entries.push(entry);
             }
         }
         entries.sort_by(|left, right| left.key.cmp(&right.key));
@@ -1401,15 +1485,42 @@ fn literal_direct_index_component(component: &str) -> Option<&str> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn safe_record_component(component: &str) -> String {
-    let encoded = encode_component(component);
-    if encoded.len() <= RECORD_BUCKET_LITERAL_COMPONENT_LIMIT {
-        return format!("{RECORD_BUCKET_LITERAL_PREFIX}{encoded}");
+fn record_scan_key_prefix(scan: &RecordScan) -> Option<String> {
+    if let Some(prefix) = &scan.prefix {
+        return Some(prefix.clone());
     }
-    format!(
-        "{RECORD_BUCKET_HASH_PREFIX}{}",
-        blake3::hash(component.as_bytes()).to_hex()
-    )
+
+    let lower = if scan.reverse {
+        scan.start_at.as_deref().or(scan.start_after.as_deref())
+    } else {
+        scan.cursor
+            .as_deref()
+            .or(scan.start_at.as_deref())
+            .or(scan.start_after.as_deref())
+    };
+    let upper = if scan.reverse {
+        scan.cursor
+            .as_deref()
+            .or(scan.end_at.as_deref())
+            .or(scan.end_before.as_deref())
+    } else {
+        scan.end_at.as_deref().or(scan.end_before.as_deref())
+    };
+
+    let common = common_string_prefix(lower?, upper?);
+    (!common.is_empty()).then_some(common)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn common_string_prefix(left: &str, right: &str) -> String {
+    let mut output = String::new();
+    for (left_char, right_char) in left.chars().zip(right.chars()) {
+        if left_char != right_char {
+            break;
+        }
+        output.push(left_char);
+    }
+    output
 }
 
 pub fn encode_component(input: &str) -> String {
@@ -1472,7 +1583,7 @@ pub fn is_record_node_id(node_id: &str) -> bool {
     node_id.starts_with("__primadb_records/")
 }
 
-fn record_key_from_node_state(node_state: &NodeState) -> Option<String> {
+pub fn record_key_from_node_state(node_state: &NodeState) -> Option<String> {
     let Some(field) = node_state.fields.get("key") else {
         return None;
     };

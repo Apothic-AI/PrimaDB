@@ -159,6 +159,10 @@ Current evidence:
   deletes, and atomic multi-record mutation.
 - These requirements can be met with graph-native record/range APIs rather than
   SQL tables.
+- Follow-up review found two remaining production-parity gaps after the first
+  record API tranche: SegmentFiles record scans still walked record files before
+  filtering, and record batches lacked native preconditions for create-if-absent
+  and compare-and-set style updates.
 
 Plan:
 
@@ -194,10 +198,24 @@ Plan:
      facade.
    - SegmentFiles should use ordered key/index layout for prefix and range
      scans.
+   - SegmentFiles record storage should avoid using unbounded key material as a
+     single filename/path component. Use bounded ordered key chunks plus an
+     overflow hash lane for very long keys, and always filter the stored record
+     key after pushdown for correctness.
    - Browser IndexedDB/OPFS segment paths should implement the same logical
      contract where practical.
 
-6. Keep APIs package-consistent.
+6. Add conditional record mutations and transaction-scoped record assertions.
+   - `RecordBatch` should accept preconditions such as exists, absent, and value
+     equality.
+   - Preconditions must be checked inside the same local transaction lock as
+     the mutations so rollback semantics are preserved.
+   - `DeleteRange` expansion should also happen inside the transaction rather
+     than before it.
+   - Rust transactions should expose record get/assert/put/delete helpers for
+     callers that need custom graph-native mutation logic.
+
+7. Keep APIs package-consistent.
    - Rust core first.
    - Node package bindings second.
    - Python package bindings third.

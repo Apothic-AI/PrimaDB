@@ -128,6 +128,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `NodeIndexManifest`
 - `operation_matches_root`
 - `record_entry_from_node_state`
+- `record_key_from_node_state`
 - `record_node_id`
 - `SegmentFileStore`
 - `sortable_scalar_key`
@@ -211,6 +212,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `RecordBatchReport`
 - `RecordEntry`
 - `RecordMutation`
+- `RecordPrecondition`
 - `RecordScan`
 - `RecordScanResult`
 - `RecordValue`

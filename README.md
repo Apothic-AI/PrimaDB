@@ -43,7 +43,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Link references via `{"$link": "node-id"}` markers.
 - First-class small/medium binary fields via `put_bytes()` / `putBytes(...)` and `{"$bytes": "..."}` markers.
 - Separate content-addressed blob storage for larger binary payloads, with blob refs stored in-graph via `{"$blob": {...}}`.
-- Graph-native keyed record APIs for point reads/writes, prefix/range scans, byte/blob records, and atomic record batches.
+- Graph-native keyed record APIs for point reads/writes, prefix/range scans, byte/blob records, and conditional atomic record batches.
 - Reactive subscriptions.
 - Local atomic transactions with preconditions, revision checks, and increment steps.
 - Strict scope policies for local-transactional and single-authority coordinated graph roots.
@@ -71,7 +71,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
 - SEA-style browser crypto surface with pair generation, password-derived keys, sign/verify, encrypt/decrypt, HKDF-backed shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
-- Incremental segment-backed native storage with lazy node restore, canonical node/index/record files, manifest metadata, nested scalar indexes, bounded direct-index scans, journaled transactions, startup recovery, explicit fsync durability, single-writer file locking, and explicit vacuum/GC support.
+- Incremental segment-backed native storage with lazy node restore, canonical node/index files, ordered record key storage, manifest metadata, nested scalar indexes, bounded direct-index scans, journaled transactions, startup recovery, explicit fsync durability, single-writer file locking, and explicit vacuum/GC support.
 - Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
 - Gun compatibility surface with `Gun` / `GunChain`, Gun link markers, and Gun graph import/export helpers.
 - Runtime stats and limit controls for transport and queue hardening.

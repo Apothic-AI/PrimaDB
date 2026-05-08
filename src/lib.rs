@@ -83,8 +83,8 @@ pub use engine::{
     StorageVacuumReport, StoredAuthFieldMeta, build_storage_metadata, build_storage_transaction,
     build_storage_transaction_from_ops, direct_index_encode_prefix, direct_index_key,
     encode_component, is_record_node_id, node_matches_root, operation_matches_root,
-    record_entry_from_node_state, record_node_id, sortable_scalar_key, touched_nodes,
-    touched_storage_nodes,
+    record_entry_from_node_state, record_key_from_node_state, record_node_id, sortable_scalar_key,
+    touched_nodes, touched_storage_nodes,
 };
 pub use error::{PrimadbError, Result};
 pub use hardening::{PrimadbLimits, PrimadbStats};
@@ -107,8 +107,8 @@ pub use operation::{Operation, OperationAction, OperationValue};
 pub use parallel::{parallel_enabled, parallel_thread_count};
 pub use query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QueryOrder, QuerySpec};
 pub use record::{
-    RecordBatch, RecordBatchReport, RecordEntry, RecordMutation, RecordScan, RecordScanResult,
-    RecordValue,
+    RecordBatch, RecordBatchReport, RecordEntry, RecordMutation, RecordPrecondition, RecordScan,
+    RecordScanResult, RecordValue,
 };
 pub use router::{
     PeerPresence, PeerRecommendation, RouteBatchItem, RouteDecision, RouteEnvelope, RoutePayload,

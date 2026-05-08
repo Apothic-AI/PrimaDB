@@ -118,6 +118,12 @@ def main() -> None:
         db.put_record("agentfs/inode/1", {"kind": "file", "size": len(payload)})
         db.put_record_bytes("agentfs/chunk/1/000000", payload)
         record_scan = db.scan_records({"prefix": "agentfs/"})
+        record_batch_report = db.apply_record_batch(
+            {
+                "preconditions": [{"kind": "exists", "key": "agentfs/inode/1"}],
+                "mutations": [],
+            }
+        )
         storage_sync = db.sync_storage()
         round_trip_bytes = binary.once_bytes()
         round_trip_blob = blob_chain.get_blob()
@@ -198,6 +204,7 @@ def main() -> None:
                     "restoredBytes": list(restored_bytes) if restored_bytes is not None else None,
                     "restoredBlob": list(restored_blob) if restored_blob is not None else None,
                     "recordScan": record_scan,
+                    "recordBatchReport": record_batch_report,
                     "storageSync": storage_sync,
                     "restoredRecord": restored_record,
                     "restoredRecordScan": restored_record_scan,
@@ -232,6 +239,7 @@ def main() -> None:
                         and restored_blob == payload
                         and storage_sync["synced"] is True
                         and len(record_scan["entries"]) == 2
+                        and record_batch_report["preconditions"] == 1
                         and restored_record["value"]["value"]["size"] == len(payload)
                         and len(restored_record_scan["entries"]) == 1
                         and ledger_report["status"] == "committed"

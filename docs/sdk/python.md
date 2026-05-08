@@ -42,6 +42,12 @@ db.open_durable_storage(
 db.put_record("agentfs/inodes/1", {"mode": "file", "size": 4})
 db.put_record_bytes("agentfs/chunks/1/000000", b"\x01\x02\x03\x04")
 print(db.scan_records({"prefix": "agentfs/chunks/1/", "limit": 100})["entries"])
+db.apply_record_batch(
+    {
+        "preconditions": [{"kind": "exists", "key": "agentfs/inodes/1"}],
+        "mutations": [],
+    }
+)
 db.sync_storage()
 
 db.set_network_hooks(

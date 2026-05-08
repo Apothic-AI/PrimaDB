@@ -105,6 +105,12 @@ db.put_record("agentfs/inodes/1", {"mode": "file", "size": 4})
 db.put_record_bytes("agentfs/chunks/1/000000", b"\x01\x02\x03\x04")
 chunks = db.scan_records({"prefix": "agentfs/chunks/1/", "limit": 100})
 print(len(chunks["entries"]))
+db.apply_record_batch(
+    {
+        "preconditions": [{"kind": "exists", "key": "agentfs/inodes/1"}],
+        "mutations": [],
+    }
+)
 db.sync_storage()
 
 script_path = {"anchor": "notes", "segments": ["scripted"]}

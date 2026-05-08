@@ -58,3 +58,63 @@
   - `pnpm --dir packages/primadb run smoke`
   - `pnpm --dir packages/primadb-node run smoke:core`
   - `uv run maturin develop --manifest-path Cargo.toml && uv run python scripts/smoke_core.py`
+
+## 2026-05-08
+
+- Cross-checked PrimaDB branch `staging` at commit `8059489` from AgentFS.
+- Confirmed AgentFS has no current PrimaDB source/test integration, so the new Rust construction changes do not require an AgentFS patch yet.
+- Confirmed the updated PrimaDB APIs map cleanly to the AgentFS storage adapter design:
+  - `SegmentFiles` full durability and exclusive locks cover local filesystem durability/exclusion requirements.
+  - `sync_storage` can back AgentFS `fsync` semantics for the PrimaDB backend.
+  - `close_durable_storage` handles test/script reopen cases caused by exclusive locks.
+  - keyed record APIs are a better fit than hand-modeling every inode/dentry/chunk as visible application graph paths.
+- Remaining production-parity caveat: `SegmentFiles` record prefix/range scans currently collect record bucket files before filtering, so large AgentFS directory listings and range deletes may still need prefix-indexed record storage in PrimaDB rather than AgentFS-specific secondary indexes.
+- Remaining API ergonomics caveat: AgentFS can serialize mutations itself, but PrimaDB-native record preconditions or transaction-scoped record get/assert methods would make create-if-absent, rename conflict checks, and inode allocation less brittle.
+- Re-ran targeted checks:
+  - `cargo test record --lib`: 1 passed, 62 filtered.
+  - `cargo test segment --lib`: 7 passed, 56 filtered.
+  - `cargo test lock --lib`: 1 passed, 62 filtered.
+- Implemented the next AgentFS-oriented record-storage tranche:
+  - Replaced native SegmentFiles record buckets with ordered `records/by_key`
+    entries so prefix/range scans can prune by key prefix instead of walking all
+    record files first.
+  - Added a bounded indexed-prefix plus hash overflow layout for very long
+    record keys, avoiding unbounded filename/path components while preserving
+    record-key filtering correctness.
+  - Added `RecordPrecondition` to record batches with `exists`, `absent`, and
+    value-equality checks.
+  - Moved `DeleteRange` expansion into the local transaction lock so conditional
+    checks, range expansion, mutations, and rollback share one atomic graph
+    transaction.
+  - Added Rust transaction-scoped record helpers:
+    `get_record`, `assert_record_exists`, `assert_record_absent`,
+    `assert_record_value`, `put_record`, and `delete_record`.
+  - Updated browser TypeScript, native Node, and Python package declarations and
+    smoke scripts for conditional record batches.
+  - Updated storage/package docs and regenerated API reference docs.
+- Added focused regression coverage for:
+  - SegmentFiles prefix scans not reading unrelated record-key subtrees.
+  - conditional record batch rollback on failed preconditions.
+  - transaction-scoped record get/assert/put/delete helpers.
+  - very long record keys persisting and prefix-scanning without filename/path
+    length failures.
+- Fixed native SegmentFiles recovery-test fault injection to be keyed by segment
+  root. The previous single global fault slot could be overwritten by another
+  parallel recovery test during `cargo test`.
+- Re-ran targeted check:
+  - `cargo test record --lib`: 2 passed, 62 filtered.
+- Final validation completed:
+  - `cargo test --lib`: 64 passed.
+  - `cargo test`: 64 passed.
+  - `cargo test --examples`: 0 passed across 11 example suites.
+  - `cargo check --lib`: passed with existing dead-code warnings.
+  - `cargo check --manifest-path packages/primadb-node/Cargo.toml`: passed with existing dead-code warnings.
+  - `cargo check --manifest-path packages/primadb-python/Cargo.toml`: passed with existing dead-code warnings.
+  - `pnpm --dir packages/primadb run build`: passed.
+  - `pnpm --dir packages/primadb run typecheck`: passed.
+  - `pnpm --dir packages/primadb run smoke`: passed.
+  - `pnpm --dir packages/primadb-node run smoke:core`: passed.
+  - `uv run maturin develop --manifest-path Cargo.toml && uv run python scripts/smoke_core.py`: passed; maturin reported the existing local `patchelf` warning.
+  - `pnpm --dir website run build`: passed.
+  - `cargo fmt --check`: passed.
+  - `git diff --check`: passed.

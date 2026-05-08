@@ -29,7 +29,7 @@ The storage engine now supports:
 - lazy node restore
 - canonical node/index records
 - nested scalar indexes
-- keyed record buckets for point reads, prefix/range scans, and batch mutation
+- ordered keyed records for point reads, prefix/range scans, conditional batches, and batch mutation
 - bounded journal retention
 - pending/final commit journals with checksum validation and roll-forward recovery
 - explicit `sync_storage()` / `syncStorage()` hooks for native fsync-style flushing
@@ -81,7 +81,27 @@ SQL-like layer. They are useful for filesystem-shaped data such as inodes, dentr
 - `put_record_bytes` / `putRecordBytes` stores binary data.
 - `put_record_blob` / `putRecordBlob` stores larger binary data in the configured blob store and records the blob ref.
 - `scan_records` / `scanRecords` supports prefix, start/end bounds, reverse order, limit, and cursor.
-- `apply_record_batch` / `applyRecordBatch` applies put/delete/delete-range mutations atomically through the graph transaction path.
+- `apply_record_batch` / `applyRecordBatch` applies conditional put/delete/delete-range mutations atomically through the graph transaction path.
+
+Native `SegmentFiles` stores records under ordered, bounded key paths instead of hashing every key into
+an unscannable bucket. Prefix scans descend directly into the matching key subtree and still filter the
+stored record key for correctness. Very long keys use a bounded indexed-prefix plus hash overflow layout
+so record storage does not depend on unbounded filename or path components.
+
+Record batches can include preconditions:
+
+```js
+db.applyRecordBatch({
+  preconditions: [{ kind: "absent", key: "agentfs/inodes/2" }],
+  mutations: [
+    {
+      kind: "put",
+      key: "agentfs/inodes/2",
+      value: { kind: "json", value: { mode: "file", size: 0 } },
+    },
+  ],
+});
+```
 
 ## What Is Deferred
 

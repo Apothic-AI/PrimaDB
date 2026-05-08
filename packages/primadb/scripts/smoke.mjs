@@ -40,6 +40,10 @@ db.putRecord("agentfs/inode/1", { kind: "file", size: 3 });
 db.putRecordBytes("agentfs/chunk/1/000000", new Uint8Array([1, 2, 3]));
 const record = db.getRecord("agentfs/inode/1");
 const recordScan = db.scanRecords({ prefix: "agentfs/" });
+const recordBatchReport = db.applyRecordBatch({
+  preconditions: [{ kind: "exists", key: "agentfs/inode/1" }],
+  mutations: [],
+});
 
 const report = {
   base: {
@@ -59,6 +63,7 @@ const report = {
     scanRecords: typeof base.Primadb?.prototype?.scanRecords === "function",
     recordRoundTrip:
       record?.value?.value?.size === 3 &&
+      recordBatchReport?.preconditions === 1 &&
       Array.isArray(recordScan?.entries) &&
       recordScan.entries.length === 2,
     scriptingRoundTrip:
