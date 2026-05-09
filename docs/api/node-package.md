@@ -948,6 +948,9 @@ export type PullRequestKind = {
     };
     spec: LexSpec;
 } | {
+    kind: "records";
+    scan: RecordScan;
+} | {
     kind: "node";
     id: string;
 } | {
@@ -978,6 +981,9 @@ export type RemoteResult = {
 } | {
     kind: "lex";
     entries: JsonValue[];
+} | {
+    kind: "records";
+    result: RecordScanResult;
 } | {
     kind: "node";
     node: JsonValue | null;
@@ -1089,7 +1095,7 @@ Kind: interface
 export interface RemoteWatchMessage {
     done: boolean;
     initial?: boolean;
-    kind?: "get" | "map" | "query" | "lex" | "node" | "snapshot" | "transaction" | null;
+    kind?: "get" | "map" | "query" | "lex" | "records" | "node" | "snapshot" | "transaction" | null;
     value?: JsonValue | null;
     error?: string | null;
 }
@@ -1132,6 +1138,7 @@ export declare class Primadb {
     putRecordBlob(key: string, value: Uint8Array, mediaType?: string | null): BlobRef;
     getRecord(key: string): RecordEntry | null;
     scanRecords(scan: RecordScan): RecordScanResult;
+    watchRecords(scan: RecordScan): RecordWatchSubscription;
     applyRecordBatch(batch: RecordBatch): RecordBatchReport;
     deleteRecord(key: string): void;
     attachNodeScript(path: RemotePath, script: NodeScript): void;
@@ -1218,6 +1225,18 @@ export declare class TraversalSubscription {
 }
 ```
 
+#### `RecordWatchSubscription`
+
+Kind: class
+
+```ts
+export declare class RecordWatchSubscription {
+    next(): Promise<{ done: boolean; value?: RecordScanResult | null }>;
+    tryNext(): { done: boolean; value?: RecordScanResult | null };
+    close(): void;
+}
+```
+
 #### `RelayServer`
 
 Kind: class
@@ -1259,6 +1278,7 @@ export declare class WebSocketSync {
     remoteGet(peerId: string, path: RemotePath): Promise<JsonValue | null>;
     remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
     remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
+    remoteRecords(peerId: string, scan: RecordScan): Promise<RecordScanResult>;
     remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
     remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
     remoteTransaction(peerId: string, scope: string, steps: TransactionStep[], options?: TransactionOptions | null): Promise<TransactionReport>;
@@ -1266,6 +1286,7 @@ export declare class WebSocketSync {
     watchRemoteMap(peerId: string, path: RemotePath): RemoteWatch;
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
     watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): RemoteWatch;
+    watchRemoteRecords(peerId: string, scan: RecordScan): RemoteWatch;
     watchRemoteNode(peerId: string, id: string): RemoteWatch;
     watchRemoteSnapshot(peerId: string, root?: string | null): RemoteWatch;
     flushPending(): Promise<number>;
@@ -1292,6 +1313,7 @@ export declare class WebRtcMesh {
     watchRemoteMap(peerId: string, path: RemotePath): Promise<RemoteWatch>;
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<RemoteWatch>;
     watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<RemoteWatch>;
+    watchRemoteRecords(peerId: string, scan: RecordScan): Promise<RemoteWatch>;
     watchRemoteNode(peerId: string, id: string): Promise<RemoteWatch>;
     watchRemoteSnapshot(peerId: string, root?: string | null): Promise<RemoteWatch>;
     flushPending(): Promise<number>;

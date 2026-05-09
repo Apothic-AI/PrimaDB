@@ -58,6 +58,8 @@ const watch = sync.watchRemoteQuery("native:peer-a", {
 ```
 
 Remote watches stream an initial result and then updates. Large responses are chunked.
+Use `watchRemoteRecords(peerId, scan)` for ordered keyed-record scans over the same relay/mesh
+watch pipeline.
 
 ## Lexical Scan
 

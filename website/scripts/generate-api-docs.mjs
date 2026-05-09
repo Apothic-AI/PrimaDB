@@ -891,7 +891,8 @@ function generateApiDocs() {
         {
           title: "Keyed records",
           body: [
-            "`putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.",
+            "`putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `watchRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.",
+            "`remoteRecords(...)` and `watchRemoteRecords(...)` use the same record-scan request shape as local record watches, so relay and mesh transports do not define separate record semantics.",
             "Records persist through IndexedDB/OPFS segment persistence and use the same graph transaction, watch, sync, and blob paths as normal graph writes.",
           ].join("\n\n"),
         },

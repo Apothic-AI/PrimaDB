@@ -96,6 +96,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `NodeFetchScheduler`
 - `Primadb`
 - `QueryBuilder`
+- `RecordWatchSubscription`
 - `Scope`
 - `Subscription`
 - `Transaction`

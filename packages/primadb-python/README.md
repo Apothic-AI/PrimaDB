@@ -12,13 +12,14 @@ Current surface:
 - explicit SegmentFiles sync/recovery/close helpers through `sync_storage()`, `storage_recovery_report()`, and `close_durable_storage()`
 - content-addressed native blob storage through `open_blob_storage(...)`
 - first-class binary helpers through `put_bytes()`, `once_bytes()`, `put_blob()`, and `get_blob()`
-- graph-native keyed records through `put_record(...)`, `put_record_bytes(...)`, `put_record_blob(...)`, `get_record(...)`, `scan_records(...)`, `apply_record_batch(...)`, and `delete_record(...)`
+- graph-native keyed records through `put_record(...)`, `put_record_bytes(...)`, `put_record_blob(...)`, `get_record(...)`, `scan_records(...)`, `watch_records(...)`, `apply_record_batch(...)`, and `delete_record(...)`
 - subscriptions
 - native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connect_relay(...)`, including disconnected startup with background relay retry
 - remote strict-scope transaction submission through `remote_transaction(...)` on relay sync clients
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
-- live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, and `watch_remote_snapshot(...)`
+- remote keyed-record pulls through `remote_records(...)`
+- live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, `watch_remote_records(...)`, and `watch_remote_snapshot(...)`
 - authenticated relay/mesh session identity through `generate_identity()`, `authenticate_local_user(...)`, `sessionAuth` config, and `context["verifiedIdentity"]`
 - Argon2id password-derived secret-box keys through `derive_password_key(...)`, usable with `set_snapshot_encryption_key(...)` and `set_transport_encryption_key(...)`
 - node-attached scripting through `attach_node_script(...)`, `node_scripts(...)`, `remove_node_script(...)`, and `execute_node_scripts(...)`

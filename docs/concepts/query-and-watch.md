@@ -13,6 +13,10 @@ updated snapshots when the relevant path changes.
 The current storage/query work narrowed invalidation so unrelated writes do not trigger unrelated
 subscriptions.
 
+Keyed records also have local scan watches through `watch_records(...)` / `watchRecords(...)`. A
+record watch emits the current `RecordScanResult` first, then emits updated scan results only when
+the touched logical record keys overlap the scan prefix/range.
+
 ## Remote Watches
 
 Relay and mesh transports support remote live interests for:
@@ -21,9 +25,16 @@ Relay and mesh transports support remote live interests for:
 - `map`
 - `query`
 - `lex`
+- `records`
+- `node`
 - `snapshot`
 
 Each watch starts with an initial snapshot and then streams updates. Large results are chunked.
+
+Record watches intentionally use the same `PullRequestKind::Records { scan }` request shape for
+local serving, relay pulls, and relay/mesh watches. That keeps the model close to Gun's single
+interest pipeline: transport adapters move the same interest/result messages rather than defining
+separate local and remote query semantics.
 
 Strict-scope `remoteTransaction(...)` / `remote_transaction(...)` calls are request/response pull
 operations, not live watches.

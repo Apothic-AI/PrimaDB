@@ -2,11 +2,11 @@
 use crate::SecureSyncFrame;
 use crate::{
     ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, NodeFetchScheduler,
-    Operation, PeerRecommendation, Primadb, PrimadbError, RelayClientConfig, RemotePath,
-    RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem,
-    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
-    VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response,
-    error_watch_event,
+    Operation, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
+    RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription,
+    Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig,
+    SyncEnvelope, SyncFrame, VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind,
+    error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
@@ -71,6 +71,10 @@ enum PullAccumulator {
     },
     Lex {
         entries: Vec<LexEntry>,
+    },
+    Records {
+        entries: Vec<RecordEntry>,
+        next_cursor: Option<String>,
     },
     Node {
         node: Option<crate::NodeState>,
@@ -388,6 +392,18 @@ impl NativeWebSocketSync {
         )
     }
 
+    pub fn watch_records(
+        &self,
+        peer_id: impl Into<String>,
+        scan: crate::RecordScan,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Records { scan },
+        )
+    }
+
     pub fn watch_node(
         &self,
         peer_id: impl Into<String>,
@@ -467,6 +483,25 @@ impl NativeWebSocketSync {
             RemoteResult::Lex { entries } => Ok(entries),
             other => Err(PrimadbError::Message(format!(
                 "expected lex result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_records(
+        &self,
+        peer_id: impl Into<String>,
+        scan: crate::RecordScan,
+    ) -> Result<RecordScanResult> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Records { scan },
+        )
+        .await?
+        {
+            RemoteResult::Records { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected records result, received {other:?}"
             ))),
         }
     }
@@ -1198,10 +1233,12 @@ fn build_relay_presence_route(state: &Arc<NativeWebSocketSyncState>, url: &str) 
             "pull_get".to_owned(),
             "pull_query".to_owned(),
             "pull_lex".to_owned(),
+            "pull_records".to_owned(),
             "watch_get".to_owned(),
             "watch_map".to_owned(),
             "watch_query".to_owned(),
             "watch_lex".to_owned(),
+            "watch_records".to_owned(),
             "watch_snapshot".to_owned(),
             "peer_exchange".to_owned(),
         ],
@@ -1556,6 +1593,17 @@ fn clear_incoming_watches(state: &Arc<NativeWebSocketSyncState>) {
 }
 
 fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEvent) -> bool {
+    if event.full_refresh {
+        return true;
+    }
+    if let crate::PullRequestKind::Records { scan } = &watch.request_kind {
+        return event.records_changed
+            && (event.touched_record_keys.is_empty()
+                || event
+                    .touched_record_keys
+                    .iter()
+                    .any(|key| scan.matches_key(key)));
+    }
     event.full_refresh
         || watch.interest_path.as_ref().map_or(true, |path| {
             event
@@ -1660,6 +1708,22 @@ fn apply_response_body(
         crate::PullResponseBody::Lex { entries } => {
             if let PullAccumulator::Lex { entries: current } = accumulator {
                 current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Records {
+            entries,
+            next_cursor,
+        } => {
+            if let PullAccumulator::Records {
+                entries: current,
+                next_cursor: current_cursor,
+            } = accumulator
+            {
+                current.extend(entries.clone());
+                if next_cursor.is_some() {
+                    *current_cursor = next_cursor.clone();
+                }
             }
             None
         }
@@ -1789,6 +1853,10 @@ impl PullAccumulator {
             crate::PullRequestKind::Lex { .. } => Self::Lex {
                 entries: Vec::new(),
             },
+            crate::PullRequestKind::Records { .. } => Self::Records {
+                entries: Vec::new(),
+                next_cursor: None,
+            },
             crate::PullRequestKind::Node { .. } => Self::Node { node: None },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -1806,6 +1874,15 @@ impl PullAccumulator {
             Self::Map { entries } => Ok(RemoteResult::Map { entries }),
             Self::Query { entries } => Ok(RemoteResult::Query { entries }),
             Self::Lex { entries } => Ok(RemoteResult::Lex { entries }),
+            Self::Records {
+                entries,
+                next_cursor,
+            } => Ok(RemoteResult::Records {
+                result: RecordScanResult {
+                    entries,
+                    next_cursor,
+                },
+            }),
             Self::Node { node } => Ok(RemoteResult::Node { node }),
             Self::Snapshot {
                 clock,

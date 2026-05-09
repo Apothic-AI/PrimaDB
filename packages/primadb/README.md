@@ -18,6 +18,7 @@ The browser bindings also expose live remote watch helpers on relay and mesh tra
 - `watchRemoteMap(...)`
 - `watchRemoteQuery(...)`
 - `watchRemoteLex(...)`
+- `watchRemoteRecords(...)`
 - `watchRemoteSnapshot(...)`
 
 The browser bindings also expose `db.scope(...)`, `db.transaction(...)`, and
@@ -26,9 +27,10 @@ Relay sync clients can submit strict-scope transactions to an authority peer wit
 `remoteTransaction(...)`.
 
 The browser bindings expose graph-native keyed records with `putRecord(...)`, `putRecordBytes(...)`,
-`putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and
-`deleteRecord(...)`. Records are stored through the same graph engine and durable browser segment
-paths, so they participate in normal watches, sync, transactions, and blob storage.
+`putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `watchRecords(...)`,
+`applyRecordBatch(...)`, and `deleteRecord(...)`. Records are stored through the same graph engine
+and durable browser segment paths, so they participate in normal watches, sync, transactions, and
+blob storage.
 
 The browser package build includes node-attached scripting through `attachNodeScript(...)`,
 `nodeScripts(...)`, `removeNodeScript(...)`, and `executeNodeScripts(...)`. Script execution is

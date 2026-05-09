@@ -1,7 +1,8 @@
 use crate::value::{NodeId, NodeState};
 use crate::{
-    DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec, ScopePolicy,
-    TransactionOptions, TransactionReport, TransactionStep,
+    DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec, RecordEntry,
+    RecordScan, RecordScanResult, ScopePolicy, TransactionOptions, TransactionReport,
+    TransactionStep,
 };
 use async_channel::Receiver;
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,9 @@ pub enum PullRequestKind {
         path: RemotePath,
         spec: LexSpec,
     },
+    Records {
+        scan: RecordScan,
+    },
     Node {
         id: NodeId,
     },
@@ -112,6 +116,11 @@ pub enum PullResponseBody {
     },
     Lex {
         entries: Vec<LexEntry>,
+    },
+    Records {
+        entries: Vec<RecordEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
     },
     Node {
         node: Option<NodeState>,
@@ -172,6 +181,7 @@ pub enum RemoteResult {
     Map { entries: Vec<MapEntry> },
     Query { entries: Vec<MapEntry> },
     Lex { entries: Vec<LexEntry> },
+    Records { result: RecordScanResult },
     Node { node: Option<NodeState> },
     Snapshot { snapshot: DatabaseSnapshot },
     Transaction { report: TransactionReport },
@@ -199,6 +209,7 @@ impl PullRequestKind {
             Self::Map { .. } => "map",
             Self::Query { .. } => "query",
             Self::Lex { .. } => "lex",
+            Self::Records { .. } => "records",
             Self::Node { .. } => "node",
             Self::Snapshot { .. } => "snapshot",
             Self::Transaction { .. } => "transaction",
@@ -211,6 +222,7 @@ impl PullRequestKind {
             | Self::Map { path }
             | Self::Query { path, .. }
             | Self::Lex { path, .. } => Some(path.path()),
+            Self::Records { .. } => None,
             Self::Node { id } => Some(id.clone()),
             Self::Snapshot { root } => root.clone(),
             Self::Transaction { scope, .. } => Some(scope.clone()),

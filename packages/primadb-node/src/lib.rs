@@ -12,9 +12,10 @@ use primadb::{
     PasswordKeyDerivationOptions, PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig,
     RecordBatch, RecordScan, RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
     RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
-    RoomHookContext, SecretBoxKey, ServeRequestContext, ServeResultContext, Scope as CoreScope,
-    ScopePolicy, ScriptExecutionOptions, Subscription as CoreSubscription, TransactionOptions,
-    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    RecordWatchSubscription as CoreRecordWatchSubscription, RoomHookContext, SecretBoxKey,
+    ServeRequestContext, ServeResultContext, Scope as CoreScope, ScopePolicy,
+    ScriptExecutionOptions, Subscription as CoreSubscription, TransactionOptions, TransactionStep,
+    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
     derive_password_key as core_derive_password_key, parse_request_hook_json,
     parse_result_hook_json, parse_void_hook_json,
 };
@@ -97,6 +98,7 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         CoreRemoteResult::Map { entries }
         | CoreRemoteResult::Query { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::Records { result } => serde_json::to_value(result).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Transaction { report } => serde_json::to_value(report).unwrap_or(JsonValue::Null),
@@ -109,6 +111,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Map { .. } => "map",
         CoreRemoteResult::Query { .. } => "query",
         CoreRemoteResult::Lex { .. } => "lex",
+        CoreRemoteResult::Records { .. } => "records",
         CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
         CoreRemoteResult::Transaction { .. } => "transaction",
@@ -320,6 +323,11 @@ pub struct Subscription {
 #[napi]
 pub struct TraversalSubscription {
     inner: Arc<Mutex<Option<CoreTraversalSubscription>>>,
+}
+
+#[napi]
+pub struct RecordWatchSubscription {
+    inner: Arc<Mutex<Option<CoreRecordWatchSubscription>>>,
 }
 
 #[napi]
@@ -539,6 +547,15 @@ impl Primadb {
     pub fn scan_records(&self, scan: JsonValue) -> Result<JsonValue> {
         let scan: RecordScan = from_json(scan)?;
         to_json(self.inner.scan_records(scan).map_err(to_napi_error)?)
+    }
+
+    #[napi(js_name = "watchRecords")]
+    pub fn watch_records(&self, scan: JsonValue) -> Result<RecordWatchSubscription> {
+        let scan: RecordScan = from_json(scan)?;
+        let subscription = self.inner.watch_records(scan).map_err(to_napi_error)?;
+        Ok(RecordWatchSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
     }
 
     #[napi(js_name = "applyRecordBatch")]
@@ -961,6 +978,61 @@ impl TraversalSubscription {
 }
 
 #[napi]
+impl RecordWatchSubscription {
+    #[napi]
+    pub async fn next(&self) -> Result<JsonValue> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("record watch subscription"))?
+        };
+
+        let message = match subscription.recv().await {
+            Some(value) => {
+                self.inner.lock().unwrap().replace(subscription);
+                json!({
+                    "done": false,
+                    "value": value,
+                })
+            }
+            None => json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }),
+        };
+
+        Ok(message)
+    }
+
+    #[napi(js_name = "tryNext")]
+    pub fn try_next(&self) -> Result<JsonValue> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return Ok(json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }));
+        };
+        match subscription.try_recv() {
+            Some(value) => Ok(json!({
+                "done": false,
+                "value": value,
+            })),
+            None => Ok(json!({
+                "done": false,
+                "value": JsonValue::Null,
+            })),
+        }
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[napi]
 impl RelayServer {
     #[napi(factory, js_name = "listen")]
     pub async fn listen(config: JsonValue) -> Result<RelayServer> {
@@ -1193,6 +1265,21 @@ impl WebSocketSync {
         to_json(result?)
     }
 
+    #[napi(js_name = "remoteRecords")]
+    pub async fn remote_records(&self, peer_id: String, scan: JsonValue) -> Result<JsonValue> {
+        let scan: RecordScan = from_json(scan)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_records(peer_id, scan)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
     #[napi(js_name = "remoteNode")]
     pub async fn remote_node(&self, peer_id: String, id: String) -> Result<JsonValue> {
         let sync = {
@@ -1316,6 +1403,22 @@ impl WebSocketSync {
             .as_ref()
             .ok_or_else(|| closed_error("websocket sync"))?
             .watch_lex(peer_id, path, spec)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchRemoteRecords")]
+    pub fn watch_remote_records(&self, peer_id: String, scan: JsonValue) -> Result<RemoteWatch> {
+        let scan: RecordScan = from_json(scan)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_records(peer_id, scan)
             .map_err(to_napi_error)?;
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(watch))),
@@ -1532,6 +1635,24 @@ impl WebRtcMesh {
             guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
         };
         let result = mesh.watch_lex(peer_id, path, spec).await.map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchRemoteRecords")]
+    pub async fn watch_remote_records(
+        &self,
+        peer_id: String,
+        scan: JsonValue,
+    ) -> Result<RemoteWatch> {
+        let scan: RecordScan = from_json(scan)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh.watch_records(peer_id, scan).await.map_err(to_napi_error);
         self.inner.lock().unwrap().replace(mesh);
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(result?))),

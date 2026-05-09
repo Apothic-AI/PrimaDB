@@ -12,13 +12,14 @@ Current surface:
 - explicit SegmentFiles sync/recovery/close helpers through `syncStorage()`, `storageRecoveryReport()`, and `closeDurableStorage()`
 - content-addressed native blob storage through `openBlobStorage(...)`
 - first-class binary helpers through `putBytes()`, `onceBytes()`, `putBlob()`, and `getBlob()`
-- graph-native keyed records through `putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)`
+- graph-native keyed records through `putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `watchRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)`
 - subscriptions
 - native relay server hosting through `RelayServer.listen(...)`
 - native relay sync through `connectRelay(...)`, including disconnected startup with background relay retry
 - remote strict-scope transaction submission through `remoteTransaction(...)` on relay sync clients
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
-- live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, and `watchRemoteSnapshot(...)`
+- remote keyed-record pulls through `remoteRecords(...)`
+- live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, `watchRemoteRecords(...)`, and `watchRemoteSnapshot(...)`
 - authenticated relay/mesh session identity through `generateIdentity()`, `authenticateLocalUser(...)`, `sessionAuth` config, and `context.verifiedIdentity`
 - Argon2id password-derived secret-box keys through `derivePasswordKey(...)`, usable with `setSnapshotEncryptionKey(...)` and `setTransportEncryptionKey(...)`
 - node-attached scripting through `attachNodeScript(...)`, `nodeScripts(...)`, `removeNodeScript(...)`, and `executeNodeScripts(...)`

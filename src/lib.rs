@@ -68,8 +68,8 @@ pub use crypto::{
 };
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, NodeFetchScheduler, Primadb,
-    QueryBuilder, Scope, Subscription, Transaction, TransactionChain, TraversalSubscription,
-    VacuumReport,
+    QueryBuilder, RecordWatchSubscription, Scope, Subscription, Transaction, TransactionChain,
+    TraversalSubscription, VacuumReport,
 };
 pub use durable::{
     DurableStorageBinding, DurableStorageConfig, SegmentDurability, SegmentFileStoreOptions,

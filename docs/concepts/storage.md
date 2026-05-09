@@ -81,12 +81,18 @@ SQL-like layer. They are useful for filesystem-shaped data such as inodes, dentr
 - `put_record_bytes` / `putRecordBytes` stores binary data.
 - `put_record_blob` / `putRecordBlob` stores larger binary data in the configured blob store and records the blob ref.
 - `scan_records` / `scanRecords` supports prefix, start/end bounds, reverse order, limit, and cursor.
+- `watch_records` / `watchRecords` emits an initial scan result and later emits only when matching record keys change.
 - `apply_record_batch` / `applyRecordBatch` applies conditional put/delete/delete-range mutations atomically through the graph transaction path.
 
 Native `SegmentFiles` stores records under ordered, bounded key paths instead of hashing every key into
 an unscannable bucket. Prefix scans descend directly into the matching key subtree and still filter the
 stored record key for correctness. Very long keys use a bounded indexed-prefix plus hash overflow layout
 so record storage does not depend on unbounded filename or path components.
+
+Record watches use the same graph change pipeline as normal subscriptions and remote watches, but
+their invalidation tracks logical record keys instead of the internal hashed storage node ids. Prefix
+and range watches therefore recompute based on `RecordScan` overlap with touched keys, and fall back
+to a broad refresh only when a remote/imported change cannot expose the logical key.
 
 Record batches can include preconditions:
 

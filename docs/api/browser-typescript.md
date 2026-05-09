@@ -597,6 +597,9 @@ export type PullRequestKind = {
     };
     spec: Record<string, unknown>;
 } | {
+    kind: "records";
+    scan: RecordScan;
+} | {
     kind: "node";
     id: string;
 } | {
@@ -622,6 +625,9 @@ export type RemoteResult = {
 } | {
     kind: "lex";
     entries: unknown[];
+} | {
+    kind: "records";
+    result: RecordScanResult;
 } | {
     kind: "node";
     node: unknown | null;

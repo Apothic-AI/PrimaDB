@@ -85,11 +85,15 @@ Relay and mesh transports support remote pull/watch requests:
 - `remoteMap(...)`
 - `remoteQuery(...)`
 - `remoteLex(...)`
+- `remoteRecords(...)`
+- `remoteNode(...)`
 - `remoteSnapshot(...)`
 - `watchRemoteGet(...)`
 - `watchRemoteMap(...)`
 - `watchRemoteQuery(...)`
 - `watchRemoteLex(...)`
+- `watchRemoteRecords(...)`
+- `watchRemoteNode(...)`
 - `watchRemoteSnapshot(...)`
 
 Mesh traversal can fetch missing linked nodes on demand without pulling the entire graph first.

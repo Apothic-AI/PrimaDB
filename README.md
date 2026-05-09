@@ -43,7 +43,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Link references via `{"$link": "node-id"}` markers.
 - First-class small/medium binary fields via `put_bytes()` / `putBytes(...)` and `{"$bytes": "..."}` markers.
 - Separate content-addressed blob storage for larger binary payloads, with blob refs stored in-graph via `{"$blob": {...}}`.
-- Graph-native keyed record APIs for point reads/writes, prefix/range scans, byte/blob records, and conditional atomic record batches.
+- Graph-native keyed record APIs for point reads/writes, prefix/range scans, local scan watches, byte/blob records, and conditional atomic record batches.
 - Reactive subscriptions.
 - Local atomic transactions with preconditions, revision checks, and increment steps.
 - Strict scope policies for local-transactional and single-authority coordinated graph roots.
@@ -58,7 +58,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Automatic IndexedDB persistence hook in the WASM bindings.
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
 - Routed transport envelopes with presence, signaling, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
-- Remote live watches for `get` / `map` / `query` / `lex` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
+- Remote live watches for `get` / `map` / `query` / `lex` / `records` / `node` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
 - Narrow watch invalidation based on touched logical paths, plus burst coalescing in relay/mesh watch refresh loops so unrelated writes do not fan out through every active watch.
 - Browser WebRTC mesh sync with both local `BroadcastChannel` signaling and relay-backed signaling for cross-browser peers.
 - Native WebRTC mesh starts offline, keeps local reads/writes/durable state available, and retries relay signaling in the background until a relay peer appears.

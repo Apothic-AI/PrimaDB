@@ -106,6 +106,7 @@ class Primadb {
   putRecordBlob(key: string, bytes: Uint8Array, media_type: string | null): any;
   getRecord(key: string): any;
   scanRecords(scan: any): any;
+  watchRecords(scan: any, callback: Function): RecordWatchSubscription;
   applyRecordBatch(batch: any): any;
   deleteRecord(key: string): void;
   syncStorage(): any;
@@ -178,6 +179,14 @@ class Subscription {
 
 ```ts
 class TraversalSubscription {
+  cancel(): void;
+}
+```
+
+### `RecordWatchSubscription`
+
+```ts
+class RecordWatchSubscription {
   cancel(): void;
 }
 ```
@@ -258,11 +267,13 @@ class WebSocketSync {
   watchRemoteMap(peer_id: string, path: any): RemoteWatch;
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteLex(peer_id: string, path: any, spec: any): RemoteWatch;
+  watchRemoteRecords(peer_id: string, scan: any): RemoteWatch;
   watchRemoteNode(peer_id: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peer_id: string, root: string | null): RemoteWatch;
   remoteGet(peer_id: string, path: any): Promise<any>;
   remoteQuery(peer_id: string, path: any, spec: any): Promise<any>;
   remoteLex(peer_id: string, path: any, spec: any): Promise<any>;
+  remoteRecords(peer_id: string, scan: any): Promise<any>;
   remoteNode(peer_id: string, id: string): Promise<any>;
   remoteSnapshot(peer_id: string, root: string | null): Promise<any>;
   remoteTransaction(peer_id: string, scope: string, steps: any, options: any): Promise<any>;
@@ -287,6 +298,7 @@ class WebRtcMesh {
   watchRemoteMap(peer_id: string, path: any): RemoteWatch;
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteLex(peer_id: string, path: any, spec: any): RemoteWatch;
+  watchRemoteRecords(peer_id: string, scan: any): RemoteWatch;
   watchRemoteNode(peer_id: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peer_id: string, root: string | null): RemoteWatch;
   flushPending(): number;
@@ -307,7 +319,9 @@ Use OPFS segments for large or high-churn browser-local datasets when `navigator
 
 ## Keyed records
 
-`putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.
+`putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `watchRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.
+
+`remoteRecords(...)` and `watchRemoteRecords(...)` use the same record-scan request shape as local record watches, so relay and mesh transports do not define separate record semantics.
 
 Records persist through IndexedDB/OPFS segment persistence and use the same graph transaction, watch, sync, and blob paths as normal graph writes.
 

@@ -9,7 +9,8 @@ use crate::{
     DurableStorageBinding, DurableStorageConfig, HookTransport, HybridClock, IceServerConfig,
     LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler,
     Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
-    PullResponseBody, QuerySpec, RecordBatch, RecordScan, RelayClientConfig, RemotePath,
+    PullResponseBody, QuerySpec, RecordBatch, RecordEntry, RecordScan, RecordScanResult,
+    RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig, RemotePath,
     RemoteResult, RemoteWatchMessage, RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload,
     RouteTarget, Router, RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext,
     Subscription, SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
@@ -70,6 +71,11 @@ pub struct WasmSubscription {
 #[wasm_bindgen(js_name = TraversalSubscription)]
 pub struct WasmTraversalSubscription {
     inner: Option<CoreTraversalSubscription>,
+}
+
+#[wasm_bindgen(js_name = RecordWatchSubscription)]
+pub struct WasmRecordWatchSubscription {
+    inner: Option<CoreRecordWatchSubscription>,
 }
 
 #[wasm_bindgen(js_name = RemoteWatch)]
@@ -288,6 +294,10 @@ enum PullAccumulator {
     },
     Lex {
         entries: Vec<LexEntry>,
+    },
+    Records {
+        entries: Vec<RecordEntry>,
+        next_cursor: Option<String>,
     },
     Node {
         node: Option<crate::NodeState>,
@@ -924,6 +934,30 @@ impl WasmPrimadb {
         let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         to_js(&self.inner.scan_records(scan).map_err(to_js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = watchRecords)]
+    pub fn watch_records(
+        &self,
+        scan: JsValue,
+        callback: js_sys::Function,
+    ) -> std::result::Result<WasmRecordWatchSubscription, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let subscription = self.inner.watch_records(scan).map_err(to_js_error)?;
+        let receiver = subscription.receiver();
+        let callback = callback.clone();
+
+        spawn_local(async move {
+            while let Ok(result) = receiver.recv().await {
+                let js_value = to_js(&result).unwrap_or(JsValue::NULL);
+                let _ = callback.call1(&JsValue::NULL, &js_value);
+            }
+        });
+
+        Ok(WasmRecordWatchSubscription {
+            inner: Some(subscription),
+        })
     }
 
     #[wasm_bindgen(js_name = applyRecordBatch)]
@@ -1563,10 +1597,12 @@ impl WasmPrimadb {
                         "pull_get".to_owned(),
                         "pull_query".to_owned(),
                         "pull_lex".to_owned(),
+                        "pull_records".to_owned(),
                         "watch_get".to_owned(),
                         "watch_map".to_owned(),
                         "watch_query".to_owned(),
                         "watch_lex".to_owned(),
+                        "watch_records".to_owned(),
                         "watch_snapshot".to_owned(),
                         "peer_exchange".to_owned(),
                     ],
@@ -2106,12 +2142,20 @@ impl WasmTraversalSubscription {
     }
 }
 
+#[wasm_bindgen(js_class = RecordWatchSubscription)]
+impl WasmRecordWatchSubscription {
+    pub fn cancel(&mut self) {
+        self.inner.take();
+    }
+}
+
 fn remote_result_kind(result: &RemoteResult) -> &'static str {
     match result {
         RemoteResult::Get { .. } => "get",
         RemoteResult::Map { .. } => "map",
         RemoteResult::Query { .. } => "query",
         RemoteResult::Lex { .. } => "lex",
+        RemoteResult::Records { .. } => "records",
         RemoteResult::Node { .. } => "node",
         RemoteResult::Snapshot { .. } => "snapshot",
         RemoteResult::Transaction { .. } => "transaction",
@@ -2128,6 +2172,7 @@ fn remote_result_to_js(result: &RemoteResult) -> std::result::Result<JsValue, Js
             map_entries_to_js(entries)
         }
         RemoteResult::Lex { entries } => lex_entries_to_js(entries),
+        RemoteResult::Records { result } => to_js(result),
         RemoteResult::Node { node } => to_js(node),
         RemoteResult::Snapshot { snapshot } => to_js(snapshot),
         RemoteResult::Transaction { report } => to_js(report),
@@ -2477,6 +2522,17 @@ impl WasmWebSocketSync {
         start_remote_watch_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
     }
 
+    #[wasm_bindgen(js_name = watchRemoteRecords)]
+    pub fn watch_remote_records(
+        &self,
+        peer_id: String,
+        scan: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_remote_watch_state(&self.state, peer_id, PullRequestKind::Records { scan })
+    }
+
     #[wasm_bindgen(js_name = watchRemoteNode)]
     pub fn watch_remote_node(
         &self,
@@ -2558,6 +2614,24 @@ impl WasmWebSocketSync {
             RemoteResult::Lex { entries } => lex_entries_to_js(&entries),
             other => Err(JsValue::from_str(&format!(
                 "expected lex result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = remoteRecords)]
+    pub async fn remote_records(
+        &self,
+        peer_id: String,
+        scan: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        match request_remote_result_state(&self.state, peer_id, PullRequestKind::Records { scan })
+            .await?
+        {
+            RemoteResult::Records { result } => to_js(&result),
+            other => Err(JsValue::from_str(&format!(
+                "expected records result, received {other:?}"
             ))),
         }
     }
@@ -2776,6 +2850,17 @@ impl WasmWebRtcMesh {
         let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Lex { path, spec })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteRecords)]
+    pub fn watch_remote_records(
+        &self,
+        peer_id: String,
+        scan: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Records { scan })
     }
 
     #[wasm_bindgen(js_name = watchRemoteNode)]
@@ -4402,6 +4487,22 @@ fn apply_response_body_state(
             }
             None
         }
+        PullResponseBody::Records {
+            entries,
+            next_cursor,
+        } => {
+            if let PullAccumulator::Records {
+                entries: current,
+                next_cursor: current_cursor,
+            } = accumulator
+            {
+                current.extend(entries.clone());
+                if next_cursor.is_some() {
+                    *current_cursor = next_cursor.clone();
+                }
+            }
+            None
+        }
         PullResponseBody::Node { node } => {
             *accumulator = PullAccumulator::Node { node: node.clone() };
             None
@@ -4451,6 +4552,10 @@ impl PullAccumulator {
             PullRequestKind::Lex { .. } => Self::Lex {
                 entries: Vec::new(),
             },
+            PullRequestKind::Records { .. } => Self::Records {
+                entries: Vec::new(),
+                next_cursor: None,
+            },
             PullRequestKind::Node { .. } => Self::Node { node: None },
             PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -4468,6 +4573,15 @@ impl PullAccumulator {
             Self::Map { entries } => Ok(RemoteResult::Map { entries }),
             Self::Query { entries } => Ok(RemoteResult::Query { entries }),
             Self::Lex { entries } => Ok(RemoteResult::Lex { entries }),
+            Self::Records {
+                entries,
+                next_cursor,
+            } => Ok(RemoteResult::Records {
+                result: RecordScanResult {
+                    entries,
+                    next_cursor,
+                },
+            }),
             Self::Node { node } => Ok(RemoteResult::Node { node }),
             Self::Snapshot {
                 clock,
@@ -4720,6 +4834,7 @@ fn send_mesh_presence_state(
                 "watch_map".to_owned(),
                 "watch_query".to_owned(),
                 "watch_lex".to_owned(),
+                "watch_records".to_owned(),
                 "watch_snapshot".to_owned(),
             ],
             vec![format!("mesh:{}", borrowed.room)],
@@ -5175,6 +5290,17 @@ fn handle_mesh_auth_response_state(
 }
 
 fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEvent) -> bool {
+    if event.full_refresh {
+        return true;
+    }
+    if let PullRequestKind::Records { scan } = &watch.request_kind {
+        return event.records_changed
+            && (event.touched_record_keys.is_empty()
+                || event
+                    .touched_record_keys
+                    .iter()
+                    .any(|key| scan.matches_key(key)));
+    }
     event.full_refresh
         || watch.interest_path.as_ref().map_or(true, |path| {
             event

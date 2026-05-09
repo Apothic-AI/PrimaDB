@@ -20,6 +20,8 @@ pub struct PrimadbStats {
     pub nodes: usize,
     pub pending_ops: usize,
     pub subscriptions: usize,
+    #[serde(default)]
+    pub record_subscriptions: usize,
     pub change_subscriptions: usize,
     pub unflushed_ops: usize,
 }

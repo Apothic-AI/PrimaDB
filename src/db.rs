@@ -78,6 +78,10 @@ pub struct ChangeEvent {
     pub full_refresh: bool,
     #[serde(default)]
     pub touched_paths: Vec<String>,
+    #[serde(default)]
+    pub records_changed: bool,
+    #[serde(default)]
+    pub touched_record_keys: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -102,6 +106,10 @@ pub struct ChangeSubscription {
 
 pub struct TraversalSubscription {
     inner: Arc<TraversalSubscriptionInner>,
+}
+
+pub struct RecordWatchSubscription {
+    inner: Arc<RecordWatchSubscriptionInner>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +177,12 @@ struct TraversalSubscriptionInner {
     receiver: Receiver<TraversalResult>,
 }
 
+struct RecordWatchSubscriptionInner {
+    id: u64,
+    db: Weak<Mutex<Inner>>,
+    receiver: Receiver<RecordScanResult>,
+}
+
 struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
@@ -176,9 +190,11 @@ struct Inner {
     unflushed_ops: Vec<Operation>,
     subscriptions: std::collections::BTreeMap<u64, Watcher>,
     traversal_subscriptions: std::collections::BTreeMap<u64, TraversalWatcher>,
+    record_subscriptions: std::collections::BTreeMap<u64, RecordWatcher>,
     change_subscriptions: std::collections::BTreeMap<u64, ChangeWatcher>,
     next_subscription_id: u64,
     next_traversal_subscription_id: u64,
+    next_record_subscription_id: u64,
     next_change_subscription_id: u64,
     change_revision: u64,
     persistence: Option<PersistenceTarget>,
@@ -271,6 +287,13 @@ struct TraversalWatcher {
 }
 
 #[derive(Debug, Clone)]
+struct RecordWatcher {
+    scan: RecordScan,
+    last_hash: Option<String>,
+    sender: Sender<RecordScanResult>,
+}
+
+#[derive(Debug, Clone)]
 enum Cursor {
     Node(NodeId),
     Field { node: NodeId, field: String },
@@ -287,6 +310,8 @@ struct ChangeImpact {
     data_changed: bool,
     full_refresh: bool,
     touched_paths: Vec<String>,
+    records_changed: bool,
+    touched_record_keys: Vec<String>,
 }
 
 impl ChangeImpact {
@@ -299,23 +324,39 @@ impl ChangeImpact {
             data_changed: true,
             full_refresh: true,
             touched_paths: Vec::new(),
+            records_changed: false,
+            touched_record_keys: Vec::new(),
         }
     }
 
     fn from_ops(ops: &[Operation]) -> Self {
         let mut touched_paths = BTreeSet::new();
+        let mut touched_record_keys = BTreeSet::new();
+        let mut records_changed = false;
         for op in ops {
             touched_paths.insert(operation_touched_path(op));
+            if operation_is_record_op(op) {
+                records_changed = true;
+            }
+            if let Some(key) = operation_touched_record_key(op) {
+                touched_record_keys.insert(key);
+            }
         }
         Self {
             data_changed: !ops.is_empty(),
             full_refresh: false,
             touched_paths: touched_paths.into_iter().collect(),
+            records_changed,
+            touched_record_keys: touched_record_keys.into_iter().collect(),
         }
     }
 
     fn is_empty(&self) -> bool {
-        !self.data_changed && !self.full_refresh && self.touched_paths.is_empty()
+        !self.data_changed
+            && !self.full_refresh
+            && self.touched_paths.is_empty()
+            && !self.records_changed
+            && self.touched_record_keys.is_empty()
     }
 }
 
@@ -374,6 +415,12 @@ impl ChangeEvent {
             merged.extend(other.touched_paths);
             self.touched_paths = merged.into_iter().collect();
         }
+        self.records_changed |= other.records_changed;
+        if !other.touched_record_keys.is_empty() {
+            let mut merged: BTreeSet<_> = self.touched_record_keys.iter().cloned().collect();
+            merged.extend(other.touched_record_keys);
+            self.touched_record_keys = merged.into_iter().collect();
+        }
     }
 }
 
@@ -409,9 +456,11 @@ impl Primadb {
                 unflushed_ops: Vec::new(),
                 subscriptions: Default::default(),
                 traversal_subscriptions: Default::default(),
+                record_subscriptions: Default::default(),
                 change_subscriptions: Default::default(),
                 next_subscription_id: 0,
                 next_traversal_subscription_id: 0,
+                next_record_subscription_id: 0,
                 next_change_subscription_id: 0,
                 change_revision: 0,
                 persistence: None,
@@ -503,6 +552,10 @@ impl Primadb {
         let mut inner = self.inner.lock().unwrap();
         let entries = collect_record_entries_for_scan(&mut inner, &scan, storage_entries)?;
         Ok(record_scan_result(entries, &scan))
+    }
+
+    pub fn watch_records(&self, scan: RecordScan) -> Result<RecordWatchSubscription> {
+        self.subscribe_to_records(scan)
     }
 
     pub fn apply_record_batch(&self, batch: RecordBatch) -> Result<RecordBatchReport> {
@@ -1240,10 +1293,24 @@ impl Primadb {
             inner.nodes.get(&node_id).cloned() != before
         };
         if changed {
+            let touched_record_keys = if crate::is_record_node_id(&node_id) {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .nodes
+                    .get(&node_id)
+                    .and_then(crate::record_key_from_node_state)
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             self.finalize_change(ChangeImpact {
                 data_changed: true,
                 full_refresh: false,
-                touched_paths: vec![node_id],
+                touched_paths: vec![node_id.clone()],
+                records_changed: crate::is_record_node_id(&node_id),
+                touched_record_keys,
             })?;
         }
         Ok(changed)
@@ -1343,6 +1410,9 @@ impl Primadb {
             }),
             PullRequestKind::Lex { path, spec } => Ok(RemoteResult::Lex {
                 entries: self.lex_path(path, spec)?,
+            }),
+            PullRequestKind::Records { scan } => Ok(RemoteResult::Records {
+                result: self.scan_records(scan.clone())?,
             }),
             PullRequestKind::Node { id } => Ok(RemoteResult::Node {
                 node: self.node_state(id)?,
@@ -1551,6 +1621,8 @@ impl Primadb {
                 data_changed: false,
                 full_refresh: false,
                 touched_paths: Vec::new(),
+                records_changed: false,
+                touched_record_keys: Vec::new(),
             };
             inner.change_subscriptions.insert(
                 id,
@@ -1577,6 +1649,7 @@ impl Primadb {
             nodes: inner.nodes.len(),
             pending_ops: inner.pending_ops.len(),
             subscriptions: inner.subscriptions.len(),
+            record_subscriptions: inner.record_subscriptions.len(),
             change_subscriptions: inner.change_subscriptions.len(),
             unflushed_ops: inner.unflushed_ops.len(),
         }
@@ -2019,12 +2092,15 @@ impl Primadb {
                 data_changed: impact.data_changed,
                 full_refresh: impact.full_refresh,
                 touched_paths: impact.touched_paths,
+                records_changed: impact.records_changed,
+                touched_record_keys: impact.touched_record_keys,
             }
         };
         self.persist_if_needed()?;
         if event.data_changed {
             self.notify_subscribers(&event)?;
             self.notify_traversal_subscribers(&event)?;
+            self.notify_record_subscribers(&event)?;
         }
         self.notify_change_subscribers(event)?;
         Ok(())
@@ -2403,6 +2479,36 @@ impl Primadb {
         })
     }
 
+    fn subscribe_to_records(&self, scan: RecordScan) -> Result<RecordWatchSubscription> {
+        let result = self.scan_records(scan.clone())?;
+        let last_hash = crate::stable_content_hash(&result);
+
+        let (sender, receiver) = async_channel::unbounded();
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_record_subscription_id = inner.next_record_subscription_id.saturating_add(1);
+            let id = inner.next_record_subscription_id;
+            inner.record_subscriptions.insert(
+                id,
+                RecordWatcher {
+                    scan,
+                    last_hash,
+                    sender: sender.clone(),
+                },
+            );
+            id
+        };
+        let _ = sender.try_send(result);
+
+        Ok(RecordWatchSubscription {
+            inner: Arc::new(RecordWatchSubscriptionInner {
+                id,
+                db: Arc::downgrade(&self.inner),
+                receiver,
+            }),
+        })
+    }
+
     fn notify_subscribers(&self, event: &ChangeEvent) -> Result<()> {
         let watchers: Vec<(u64, Watcher)> = {
             let inner = self.inner.lock().unwrap();
@@ -2442,6 +2548,49 @@ impl Primadb {
             }
             for id in stale {
                 inner.subscriptions.remove(&id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn notify_record_subscribers(&self, event: &ChangeEvent) -> Result<()> {
+        let watchers: Vec<(u64, RecordWatcher)> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .record_subscriptions
+                .iter()
+                .map(|(id, watcher)| (*id, watcher.clone()))
+                .collect()
+        };
+
+        let mut stale = Vec::new();
+        let mut hash_updates = Vec::new();
+        for (id, watcher) in watchers {
+            if !record_watch_change_overlaps(&watcher.scan, event) {
+                continue;
+            }
+            let result = self.scan_records(watcher.scan.clone())?;
+            let result_hash = crate::stable_content_hash(&result);
+            if result_hash == watcher.last_hash {
+                continue;
+            }
+            if watcher.sender.try_send(result).is_err() {
+                stale.push(id);
+            } else {
+                hash_updates.push((id, result_hash));
+            }
+        }
+
+        if !stale.is_empty() || !hash_updates.is_empty() {
+            let mut inner = self.inner.lock().unwrap();
+            for (id, hash) in hash_updates {
+                if let Some(watcher) = inner.record_subscriptions.get_mut(&id) {
+                    watcher.last_hash = hash;
+                }
+            }
+            for id in stale {
+                inner.record_subscriptions.remove(&id);
             }
         }
 
@@ -3723,6 +3872,25 @@ impl TraversalSubscription {
     }
 }
 
+impl RecordWatchSubscription {
+    pub fn receiver(&self) -> Receiver<RecordScanResult> {
+        self.inner.receiver.clone()
+    }
+
+    pub async fn recv(&self) -> Option<RecordScanResult> {
+        self.inner.receiver.recv().await.ok()
+    }
+
+    pub fn try_recv(&self) -> Option<RecordScanResult> {
+        self.inner.receiver.try_recv().ok()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn recv_blocking(&self) -> Option<RecordScanResult> {
+        self.inner.receiver.recv_blocking().ok()
+    }
+}
+
 impl Clone for Subscription {
     fn clone(&self) -> Self {
         Self {
@@ -3740,6 +3908,14 @@ impl Clone for ChangeSubscription {
 }
 
 impl Clone for TraversalSubscription {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Clone for RecordWatchSubscription {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -3772,6 +3948,16 @@ impl Drop for TraversalSubscriptionInner {
         if let Some(db) = self.db.upgrade() {
             if let Ok(mut inner) = db.lock() {
                 inner.traversal_subscriptions.remove(&self.id);
+            }
+        }
+    }
+}
+
+impl Drop for RecordWatchSubscriptionInner {
+    fn drop(&mut self) {
+        if let Some(db) = self.db.upgrade() {
+            if let Ok(mut inner) = db.lock() {
+                inner.record_subscriptions.remove(&self.id);
             }
         }
     }
@@ -5141,12 +5327,48 @@ fn traversal_watch_change_overlaps(watcher: &TraversalWatcher, event: &ChangeEve
             .any(|path| watch_change_overlaps(path, event))
 }
 
+fn record_watch_change_overlaps(scan: &RecordScan, event: &ChangeEvent) -> bool {
+    if event.full_refresh {
+        return true;
+    }
+    if !event.records_changed {
+        return false;
+    }
+    if event.touched_record_keys.is_empty() {
+        return true;
+    }
+    event
+        .touched_record_keys
+        .iter()
+        .any(|key| scan.matches_key(key))
+}
+
 fn operation_touched_path(op: &Operation) -> String {
     match &op.action {
         OperationAction::SetField { node, field, .. }
         | OperationAction::AddSetMember { node, field, .. }
         | OperationAction::RemoveSetMember { node, field, .. }
         | OperationAction::DeleteField { node, field } => format!("{node}/{field}"),
+    }
+}
+
+fn operation_is_record_op(op: &Operation) -> bool {
+    match &op.action {
+        OperationAction::SetField { node, .. }
+        | OperationAction::AddSetMember { node, .. }
+        | OperationAction::RemoveSetMember { node, .. }
+        | OperationAction::DeleteField { node, .. } => crate::is_record_node_id(node),
+    }
+}
+
+fn operation_touched_record_key(op: &Operation) -> Option<String> {
+    match &op.action {
+        OperationAction::SetField {
+            node,
+            field,
+            value: OperationValue::Scalar(JsonValue::String(key)),
+        } if crate::is_record_node_id(node) && field == "key" => Some(key.clone()),
+        _ => None,
     }
 }
 
@@ -5587,6 +5809,11 @@ fn build_pull_responses(
             entries,
             limits.max_query_entries_per_chunk.max(1),
         ),
+        RemoteResult::Records { result } => build_record_chunk_responses(
+            request_id,
+            result,
+            limits.max_query_entries_per_chunk.max(1),
+        ),
         RemoteResult::Node { node } => vec![PullResponse {
             request_id: request_id.to_owned(),
             chunk: PullChunk { index: 0, total: 1 },
@@ -5690,6 +5917,45 @@ fn build_query_chunk_responses(
             },
             done: index + 1 == total,
             result: PullResponseBody::Query { entries },
+        })
+        .collect()
+}
+
+fn build_record_chunk_responses(
+    request_id: &str,
+    result: RecordScanResult,
+    chunk_size: usize,
+) -> Vec<PullResponse> {
+    let next_cursor = result.next_cursor;
+    let chunks = chunk_vec(result.entries, chunk_size);
+    if chunks.is_empty() {
+        return vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::Records {
+                entries: Vec::new(),
+                next_cursor,
+            },
+        }];
+    }
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, entries)| PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk {
+                index: index as u32,
+                total: total as u32,
+            },
+            done: index + 1 == total,
+            result: PullResponseBody::Records {
+                entries,
+                next_cursor: (index + 1 == total)
+                    .then_some(next_cursor.clone())
+                    .flatten(),
+            },
         })
         .collect()
 }
@@ -6147,14 +6413,14 @@ fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeFetchScheduler, Primadb};
+    use super::{NodeFetchScheduler, Primadb, build_pull_responses};
     use crate::{
         ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PrimadbError,
-        PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter, QuerySpec,
-        RecordBatch, RecordMutation, RecordPrecondition, RecordScan, RecordValue, RemotePath,
-        Result, RoomHookContext, ScopeAuthority, ScopeConsistency, ScopeOfflineWrites, ScopePolicy,
-        ServeRequestContext, ServeResultContext, TransactionOptions, TransactionStatus,
-        TransactionStep, TraversalDirection, TraversalSpec,
+        PrimadbLimits, PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter,
+        QuerySpec, RecordBatch, RecordEntry, RecordMutation, RecordPrecondition, RecordScan,
+        RecordScanResult, RecordValue, RemotePath, Result, RoomHookContext, ScopeAuthority,
+        ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext, ServeResultContext,
+        TransactionOptions, TransactionStatus, TransactionStep, TraversalDirection, TraversalSpec,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -6519,6 +6785,38 @@ mod tests {
     }
 
     #[test]
+    fn pull_records_request_scans_keyed_records() -> Result<()> {
+        let db = Primadb::with_replica_id("records-pull");
+        db.put_record_json("agentfs/chunk/2/000000", json!({"bytes": 5}))?;
+        db.put_record_json("agentfs/chunk/2/000001", json!({"bytes": 6}))?;
+        db.put_record_json("agentfs/inode/2", json!({"kind": "file"}))?;
+
+        let result = db.execute_pull_request(&PullRequest {
+            request_id: "records-1".to_owned(),
+            request: PullRequestKind::Records {
+                scan: RecordScan {
+                    prefix: Some("agentfs/chunk/2/".to_owned()),
+                    ..RecordScan::default()
+                },
+            },
+        })?;
+
+        match result {
+            crate::RemoteResult::Records { result } => {
+                let keys = result
+                    .entries
+                    .iter()
+                    .map(|entry| entry.key.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(keys, ["agentfs/chunk/2/000000", "agentfs/chunk/2/000001"]);
+                assert_eq!(result.next_cursor, None);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn coordinated_scope_rejects_remote_ops_from_non_authority() -> Result<()> {
         let receiver = Primadb::with_replica_id("receiver");
         receiver.scope("accounts").configure(ScopePolicy {
@@ -6657,6 +6955,106 @@ mod tests {
             .unwrap();
         assert_eq!(members["$set"].as_array().unwrap().len(), 0);
         Ok(())
+    }
+
+    #[test]
+    fn local_record_watch_emits_initial_and_matching_scan_updates() -> Result<()> {
+        let db = Primadb::with_replica_id("record-watch");
+        db.put_record_json("agentfs/chunk/2/000000", json!({"bytes": 5}))?;
+        db.put_record_json("agentfs/inode/2", json!({"kind": "file"}))?;
+
+        let watch = db.watch_records(RecordScan {
+            prefix: Some("agentfs/chunk/2/".to_owned()),
+            ..RecordScan::default()
+        })?;
+
+        let initial = watch.recv_blocking().expect("initial record scan");
+        assert_eq!(initial.entries.len(), 1);
+        assert_eq!(initial.entries[0].key, "agentfs/chunk/2/000000");
+        assert!(watch.try_recv().is_none());
+
+        db.put_record_json("agentfs/inode/3", json!({"kind": "dir"}))?;
+        assert!(
+            watch.try_recv().is_none(),
+            "non-overlapping record keys must not refresh the watch"
+        );
+
+        db.put_record_json("agentfs/chunk/2/000001", json!({"bytes": 6}))?;
+        let updated = watch.recv_blocking().expect("matching record update");
+        let keys = updated
+            .entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["agentfs/chunk/2/000000", "agentfs/chunk/2/000001"]);
+        assert!(watch.try_recv().is_none());
+
+        db.put_record_json("agentfs/chunk/2/000001", json!({"bytes": 6}))?;
+        assert!(
+            watch.try_recv().is_none(),
+            "matching writes with unchanged scan content must not re-emit"
+        );
+
+        db.delete_record("agentfs/chunk/2/000000")?;
+        let deleted = watch.recv_blocking().expect("matching record delete");
+        let keys = deleted
+            .entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["agentfs/chunk/2/000001"]);
+        Ok(())
+    }
+
+    #[test]
+    fn record_pull_responses_chunk_entries_and_keep_cursor_on_final_chunk() {
+        let result = RecordScanResult {
+            entries: (0..5)
+                .map(|index| RecordEntry {
+                    key: format!("agentfs/chunk/2/{index:06}"),
+                    value: RecordValue::Json(json!({ "index": index })),
+                })
+                .collect(),
+            next_cursor: Some("agentfs/chunk/2/000004".to_owned()),
+        };
+        let responses = build_pull_responses(
+            "records-1",
+            crate::RemoteResult::Records { result },
+            &PrimadbLimits {
+                max_query_entries_per_chunk: 2,
+                ..PrimadbLimits::default()
+            },
+        );
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0].chunk.index, 0);
+        assert_eq!(responses[0].chunk.total, 3);
+        assert!(!responses[0].done);
+        assert_eq!(responses[1].chunk.index, 1);
+        assert!(!responses[1].done);
+        assert_eq!(responses[2].chunk.index, 2);
+        assert!(responses[2].done);
+
+        match &responses[0].result {
+            PullResponseBody::Records {
+                entries,
+                next_cursor,
+            } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(next_cursor, &None);
+            }
+            other => panic!("unexpected chunk: {other:?}"),
+        }
+        match &responses[2].result {
+            PullResponseBody::Records {
+                entries,
+                next_cursor,
+            } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(next_cursor.as_deref(), Some("agentfs/chunk/2/000004"));
+            }
+            other => panic!("unexpected chunk: {other:?}"),
+        }
     }
 
     #[test]

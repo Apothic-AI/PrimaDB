@@ -2,10 +2,10 @@
 use crate::SecureSyncFrame;
 use crate::{
     ChangeSubscription, HookTransport, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
-    NodeFetchScheduler, PeerRecommendation, Primadb, PrimadbError, RemoteWatchMessage,
-    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
-    Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity, WatchEvent, WatchRequest,
-    WatchRequestKind, error_watch_event,
+    NodeFetchScheduler, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
+    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
+    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
+    WatchEvent, WatchRequest, WatchRequestKind, error_watch_event,
 };
 use async_channel::{Sender, unbounded};
 use futures_util::stream::SplitSink;
@@ -77,6 +77,10 @@ enum PullAccumulator {
     },
     Lex {
         entries: Vec<crate::LexEntry>,
+    },
+    Records {
+        entries: Vec<RecordEntry>,
+        next_cursor: Option<String>,
     },
     Node {
         node: Option<crate::NodeState>,
@@ -344,6 +348,19 @@ impl NativeWebRtcMesh {
             &self.state,
             peer_id.into(),
             crate::PullRequestKind::Lex { path, spec },
+        )
+        .await
+    }
+
+    pub async fn watch_records(
+        &self,
+        peer_id: impl Into<String>,
+        scan: crate::RecordScan,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Records { scan },
         )
         .await
     }
@@ -1815,6 +1832,17 @@ async fn clear_incoming_mesh_watches(state: &Arc<NativeWebRtcMeshState>) {
 }
 
 fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEvent) -> bool {
+    if event.full_refresh {
+        return true;
+    }
+    if let crate::PullRequestKind::Records { scan } = &watch.request_kind {
+        return event.records_changed
+            && (event.touched_record_keys.is_empty()
+                || event
+                    .touched_record_keys
+                    .iter()
+                    .any(|key| scan.matches_key(key)));
+    }
     event.full_refresh
         || watch.interest_path.as_ref().map_or(true, |path| {
             event
@@ -2125,6 +2153,7 @@ async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
             "watch_map".to_owned(),
             "watch_query".to_owned(),
             "watch_lex".to_owned(),
+            "watch_records".to_owned(),
             "watch_snapshot".to_owned(),
         ],
         vec![format!("mesh:{}", state.room)],
@@ -2215,6 +2244,22 @@ fn apply_response_body(
         crate::PullResponseBody::Lex { entries } => {
             if let PullAccumulator::Lex { entries: current } = accumulator {
                 current.extend(entries.clone());
+            }
+            None
+        }
+        crate::PullResponseBody::Records {
+            entries,
+            next_cursor,
+        } => {
+            if let PullAccumulator::Records {
+                entries: current,
+                next_cursor: current_cursor,
+            } = accumulator
+            {
+                current.extend(entries.clone());
+                if next_cursor.is_some() {
+                    *current_cursor = next_cursor.clone();
+                }
             }
             None
         }
@@ -2394,6 +2439,10 @@ impl PullAccumulator {
             crate::PullRequestKind::Lex { .. } => Self::Lex {
                 entries: Vec::new(),
             },
+            crate::PullRequestKind::Records { .. } => Self::Records {
+                entries: Vec::new(),
+                next_cursor: None,
+            },
             crate::PullRequestKind::Node { .. } => Self::Node { node: None },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -2411,6 +2460,15 @@ impl PullAccumulator {
             Self::Map { entries } => Ok(crate::RemoteResult::Map { entries }),
             Self::Query { entries } => Ok(crate::RemoteResult::Query { entries }),
             Self::Lex { entries } => Ok(crate::RemoteResult::Lex { entries }),
+            Self::Records {
+                entries,
+                next_cursor,
+            } => Ok(crate::RemoteResult::Records {
+                result: RecordScanResult {
+                    entries,
+                    next_cursor,
+                },
+            }),
             Self::Node { node } => Ok(crate::RemoteResult::Node { node }),
             Self::Snapshot {
                 clock,
