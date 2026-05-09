@@ -18,8 +18,9 @@ Current surface:
 - native relay sync through `connectRelay(...)`, including disconnected startup with background relay retry
 - remote strict-scope transaction submission through `remoteTransaction(...)` on relay sync clients
 - native WebRTC mesh through `connectMesh(...)`, including disconnected startup with background relay retry
-- remote keyed-record pulls through `remoteRecords(...)`
-- live remote watches through `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, `watchRemoteRecords(...)`, and `watchRemoteSnapshot(...)`
+- peer-agnostic relay pulls through `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)`, with optional `RemoteInterestPolicy` constraints
+- peer-agnostic relay/mesh watches through `watchGet(...)`, `watchMap(...)`, `watchQuery(...)`, `watchLex(...)`, `watchRecords(...)`, `watchNode(...)`, and `watchSnapshot(...)`
+- explicit peer-targeted pulls and watches through `remoteGet(...)`, `remoteQuery(...)`, `remoteLex(...)`, `remoteRecords(...)`, `remoteNode(...)`, `remoteSnapshot(...)`, `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, `watchRemoteRecords(...)`, `watchRemoteNode(...)`, and `watchRemoteSnapshot(...)`
 - authenticated relay/mesh session identity through `generateIdentity()`, `authenticateLocalUser(...)`, `sessionAuth` config, and `context.verifiedIdentity`
 - Argon2id password-derived secret-box keys through `derivePasswordKey(...)`, usable with `setSnapshotEncryptionKey(...)` and `setTransportEncryptionKey(...)`
 - node-attached scripting through `attachNodeScript(...)`, `nodeScripts(...)`, `removeNodeScript(...)`, and `executeNodeScripts(...)`

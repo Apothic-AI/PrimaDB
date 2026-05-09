@@ -79,10 +79,27 @@ explicitly.
 
 ## Remote Reads And Watches
 
-Relay and mesh transports support remote pull/watch requests:
+Relay and mesh transports support peer-agnostic remote interests once peers are connected. Relay
+sync clients can pull with `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and
+`snapshot(...)`; relay and mesh handles can watch with `watchGet(...)`, `watchMap(...)`,
+`watchQuery(...)`, `watchLex(...)`, `watchRecords(...)`, `watchNode(...)`, and
+`watchSnapshot(...)`.
+
+The default policy is "any connected/recommended peer." Pass a `RemoteInterestPolicy` only when
+needed:
+
+```ts
+const result = await sync.records({ prefix: "threads/" });
+
+const authorityResult = await sync.records(
+  { prefix: "ledger/" },
+  { target: "peer", peerId: "native:ledger", requireCapability: true },
+);
+```
+
+The explicit peer-targeting methods remain available:
 
 - `remoteGet(...)`
-- `remoteMap(...)`
 - `remoteQuery(...)`
 - `remoteLex(...)`
 - `remoteRecords(...)`
@@ -95,6 +112,8 @@ Relay and mesh transports support remote pull/watch requests:
 - `watchRemoteRecords(...)`
 - `watchRemoteNode(...)`
 - `watchRemoteSnapshot(...)`
+
+Strict-scope `remoteTransaction(...)` still targets a concrete authority peer.
 
 Mesh traversal can fetch missing linked nodes on demand without pulling the entire graph first.
 Prefer `watchTraverse(...)` when a UI should update as those fetched nodes arrive.

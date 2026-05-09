@@ -10,10 +10,11 @@ use crate::{
     LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler,
     Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
     PullResponseBody, QuerySpec, RecordBatch, RecordEntry, RecordScan, RecordScanResult,
-    RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig, RemotePath,
-    RemoteResult, RemoteWatchMessage, RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload,
-    RouteTarget, Router, RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext,
-    Subscription, SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
+    RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig,
+    RemoteInterestPolicy, RemoteInterestTarget, RemotePath, RemoteResult, RemoteWatchMessage,
+    RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
+    RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
+    SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
     TraversalSubscription as CoreTraversalSubscription, VerifiedIdentity, WatchEvent, WatchRequest,
     WatchRequestKind, encode_component, error_pull_response, error_watch_event,
 };
@@ -1595,14 +1596,17 @@ impl WasmPrimadb {
                         "snapshot".to_owned(),
                         "batch".to_owned(),
                         "pull_get".to_owned(),
+                        "pull_map".to_owned(),
                         "pull_query".to_owned(),
                         "pull_lex".to_owned(),
                         "pull_records".to_owned(),
+                        "pull_node".to_owned(),
                         "watch_get".to_owned(),
                         "watch_map".to_owned(),
                         "watch_query".to_owned(),
                         "watch_lex".to_owned(),
                         "watch_records".to_owned(),
+                        "watch_node".to_owned(),
                         "watch_snapshot".to_owned(),
                         "peer_exchange".to_owned(),
                     ],
@@ -2472,6 +2476,241 @@ impl WasmWebSocketSync {
         to_js(&peers)
     }
 
+    pub async fn get(
+        &self,
+        path: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Get { path },
+        )
+        .await?
+        {
+            RemoteResult::Get { value } => match value {
+                Some(value) => json_to_supported_js(&value),
+                None => Ok(JsValue::NULL),
+            },
+            other => Err(JsValue::from_str(&format!(
+                "expected get result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn query(
+        &self,
+        path: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Query { path, spec },
+        )
+        .await?
+        {
+            RemoteResult::Query { entries } => map_entries_to_js(&entries),
+            other => Err(JsValue::from_str(&format!(
+                "expected query result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn lex(
+        &self,
+        path: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Lex { path, spec },
+        )
+        .await?
+        {
+            RemoteResult::Lex { entries } => lex_entries_to_js(&entries),
+            other => Err(JsValue::from_str(&format!(
+                "expected lex result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn records(
+        &self,
+        scan: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Records { scan },
+        )
+        .await?
+        {
+            RemoteResult::Records { result } => to_js(&result),
+            other => Err(JsValue::from_str(&format!(
+                "expected records result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn node(
+        &self,
+        id: String,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Node { id },
+        )
+        .await?
+        {
+            RemoteResult::Node { node } => to_js(&node),
+            other => Err(JsValue::from_str(&format!(
+                "expected node result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn snapshot(
+        &self,
+        root: Option<String>,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Snapshot { root },
+        )
+        .await?
+        {
+            RemoteResult::Snapshot { snapshot } => to_js(&snapshot),
+            other => Err(JsValue::from_str(&format!(
+                "expected snapshot result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = watchGet)]
+    pub fn watch_get(
+        &self,
+        path: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(&self.state, policy, PullRequestKind::Get { path })
+    }
+
+    #[wasm_bindgen(js_name = watchMap)]
+    pub fn watch_map(
+        &self,
+        path: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(&self.state, policy, PullRequestKind::Map { path })
+    }
+
+    #[wasm_bindgen(js_name = watchQuery)]
+    pub fn watch_query(
+        &self,
+        path: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Query { path, spec },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchLex)]
+    pub fn watch_lex(
+        &self,
+        path: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Lex { path, spec },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchRecords)]
+    pub fn watch_records(
+        &self,
+        scan: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(&self.state, policy, PullRequestKind::Records { scan })
+    }
+
+    #[wasm_bindgen(js_name = watchNode)]
+    pub fn watch_node(
+        &self,
+        id: String,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(&self.state, policy, PullRequestKind::Node { id })
+    }
+
+    #[wasm_bindgen(js_name = watchSnapshot)]
+    pub fn watch_snapshot(
+        &self,
+        root: Option<String>,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Snapshot { root },
+        )
+    }
+
     #[wasm_bindgen(js_name = watchRemoteGet)]
     pub fn watch_remote_get(
         &self,
@@ -2800,6 +3039,116 @@ impl WasmWebRtcMesh {
     #[wasm_bindgen(js_name = inflightCount)]
     pub fn inflight_count(&self) -> usize {
         self.state.borrow().inflight.len()
+    }
+
+    #[wasm_bindgen(js_name = watchGet)]
+    pub fn watch_get(
+        &self,
+        path: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Get { path },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchMap)]
+    pub fn watch_map(
+        &self,
+        path: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Map { path },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchQuery)]
+    pub fn watch_query(
+        &self,
+        path: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: QuerySpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Query { path, spec },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchLex)]
+    pub fn watch_lex(
+        &self,
+        path: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let path: RemotePath = serde_wasm_bindgen::from_value(path)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: LexSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Lex { path, spec },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchRecords)]
+    pub fn watch_records(
+        &self,
+        scan: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Records { scan },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchNode)]
+    pub fn watch_node(
+        &self,
+        id: String,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(&self.state, policy, PullRequestKind::Node { id })
+    }
+
+    #[wasm_bindgen(js_name = watchSnapshot)]
+    pub fn watch_snapshot(
+        &self,
+        root: Option<String>,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::Snapshot { root },
+        )
     }
 
     #[wasm_bindgen(js_name = watchRemoteGet)]
@@ -3584,6 +3933,16 @@ async fn request_remote_result_state(
     result.map_err(|message| JsValue::from_str(&message))
 }
 
+async fn request_remote_result_with_policy_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    policy: RemoteInterestPolicy,
+    request_kind: PullRequestKind,
+) -> std::result::Result<RemoteResult, JsValue> {
+    let capability = pull_capability_for_request(&request_kind);
+    let peer_id = select_relay_peer_for_policy_state(state, &policy, capability)?;
+    request_remote_result_state(state, peer_id, request_kind).await
+}
+
 fn start_remote_watch_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
     target_peer_id: String,
@@ -3643,6 +4002,154 @@ fn start_remote_watch_state(
             }),
         }),
     })
+}
+
+fn start_remote_watch_with_policy_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    policy: RemoteInterestPolicy,
+    request_kind: PullRequestKind,
+) -> std::result::Result<WasmRemoteWatch, JsValue> {
+    let capability = format!("watch_{}", request_kind.kind_name());
+    let peer_id = select_relay_peer_for_policy_state(state, &policy, Some(&capability))?;
+    start_remote_watch_state(state, peer_id, request_kind)
+}
+
+fn remote_policy_from_js(
+    policy: Option<JsValue>,
+) -> std::result::Result<RemoteInterestPolicy, JsValue> {
+    match policy {
+        Some(value) if !value.is_undefined() && !value.is_null() => {
+            serde_wasm_bindgen::from_value(value)
+                .map_err(|error| JsValue::from_str(&error.to_string()))
+        }
+        _ => Ok(RemoteInterestPolicy::default()),
+    }
+}
+
+fn select_relay_peer_for_policy_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    policy: &RemoteInterestPolicy,
+    capability: Option<&str>,
+) -> std::result::Result<String, JsValue> {
+    if let Some(peer_ids) = explicit_policy_peers(policy)? {
+        if peer_ids.is_empty() {
+            return Err(JsValue::from_str(
+                "remote interest policy did not include any peer ids",
+            ));
+        }
+        if !policy.require_capability {
+            return Ok(peer_ids[0].clone());
+        }
+        let borrowed = state.borrow();
+        return peer_ids
+            .into_iter()
+            .find(|peer_id| {
+                borrowed.router.known_peers().iter().any(|peer| {
+                    peer.peer_id == *peer_id && peer_supports_capability(peer, capability)
+                })
+            })
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "no requested peer advertises required capability `{}`",
+                    capability.unwrap_or("unknown")
+                ))
+            });
+    }
+
+    let candidates = relay_peer_candidates_state(state);
+    if let Some(peer) = candidates
+        .iter()
+        .find(|peer| peer_supports_capability(peer, capability))
+    {
+        return Ok(peer.peer_id.clone());
+    }
+    if !policy.require_capability {
+        if let Some(peer) = candidates.first() {
+            return Ok(peer.peer_id.clone());
+        }
+    }
+    let message = match capability {
+        Some(capability) => format!("no connected peer advertises capability `{capability}`"),
+        None => "no connected peer is available for remote interest".to_owned(),
+    };
+    Err(JsValue::from_str(&message))
+}
+
+fn explicit_policy_peers(
+    policy: &RemoteInterestPolicy,
+) -> std::result::Result<Option<Vec<String>>, JsValue> {
+    match policy.target {
+        RemoteInterestTarget::Any => {
+            if !policy.peers.is_empty() {
+                Ok(Some(policy.peers.clone()))
+            } else {
+                Ok(policy.peer_id.clone().map(|peer_id| vec![peer_id]))
+            }
+        }
+        RemoteInterestTarget::Peer => policy
+            .peer_id
+            .clone()
+            .map(|peer_id| Some(vec![peer_id]))
+            .ok_or_else(|| {
+                JsValue::from_str("remote interest policy target `peer` requires peerId")
+            }),
+        RemoteInterestTarget::Peers => Ok(Some(policy.peers.clone())),
+    }
+}
+
+fn relay_peer_candidates_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+) -> Vec<crate::PeerPresence> {
+    let borrowed = state.borrow();
+    let mut recommendations = borrowed
+        .recommendations
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    recommendations.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.peer.peer_id.cmp(&right.peer.peer_id))
+    });
+    let mut candidates = Vec::new();
+    for recommendation in recommendations {
+        if !candidates
+            .iter()
+            .any(|peer: &crate::PeerPresence| peer.peer_id == recommendation.peer.peer_id)
+        {
+            candidates.push(recommendation.peer);
+        }
+    }
+    for peer in borrowed.router.known_peers() {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.peer_id == peer.peer_id)
+        {
+            candidates.push(peer);
+        }
+    }
+    if borrowed.session_auth.require_authenticated_peers {
+        candidates.retain(|peer| borrowed.verified_identities.contains_key(&peer.peer_id));
+    }
+    candidates
+}
+
+fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>) -> bool {
+    capability.is_none_or(|capability| peer.capabilities.iter().any(|item| item == capability))
+}
+
+fn pull_capability_for_request(request: &PullRequestKind) -> Option<&'static str> {
+    match request {
+        PullRequestKind::Get { .. } => Some("pull_get"),
+        PullRequestKind::Query { .. } => Some("pull_query"),
+        PullRequestKind::Lex { .. } => Some("pull_lex"),
+        PullRequestKind::Records { .. } => Some("pull_records"),
+        PullRequestKind::Snapshot { .. } => Some("snapshot"),
+        PullRequestKind::Node { .. } => Some("pull_node"),
+        PullRequestKind::Map { .. } => Some("pull_map"),
+        PullRequestKind::Transaction { .. } => None,
+    }
 }
 
 fn cancel_remote_watch_state(state: &Rc<RefCell<WebSocketSyncState>>, watch_id: &str) {
@@ -4065,6 +4572,123 @@ fn start_mesh_remote_watch_state(
             }),
         }),
     })
+}
+
+fn start_mesh_remote_watch_with_policy_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    policy: RemoteInterestPolicy,
+    request_kind: PullRequestKind,
+) -> std::result::Result<WasmRemoteWatch, JsValue> {
+    let capability = format!("watch_{}", request_kind.kind_name());
+    let peer_id = select_mesh_peer_for_policy_state(state, &policy, Some(&capability))?;
+    start_mesh_remote_watch_state(state, peer_id, request_kind)
+}
+
+fn select_mesh_peer_for_policy_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    policy: &RemoteInterestPolicy,
+    capability: Option<&str>,
+) -> std::result::Result<String, JsValue> {
+    if let Some(peer_ids) = explicit_policy_peers(policy)? {
+        if peer_ids.is_empty() {
+            return Err(JsValue::from_str(
+                "remote interest policy did not include any peer ids",
+            ));
+        }
+        if !policy.require_capability {
+            return Ok(peer_ids[0].clone());
+        }
+        let borrowed = state.borrow();
+        return peer_ids
+            .into_iter()
+            .find(|peer_id| {
+                borrowed
+                    .recommendations
+                    .get(peer_id)
+                    .is_some_and(|recommendation| {
+                        peer_supports_capability(&recommendation.peer, capability)
+                    })
+            })
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "no requested peer advertises required capability `{}`",
+                    capability.unwrap_or("unknown")
+                ))
+            });
+    }
+
+    let candidates = mesh_peer_candidates_state(state);
+    if let Some(peer) = candidates
+        .iter()
+        .find(|peer| peer_supports_capability(peer, capability))
+    {
+        return Ok(peer.peer_id.clone());
+    }
+    if !policy.require_capability {
+        if let Some(peer) = candidates.first() {
+            return Ok(peer.peer_id.clone());
+        }
+    }
+    let message = match capability {
+        Some(capability) => format!("no open mesh peer advertises capability `{capability}`"),
+        None => "no open mesh peer is available for remote interest".to_owned(),
+    };
+    Err(JsValue::from_str(&message))
+}
+
+fn mesh_peer_candidates_state(state: &Rc<RefCell<WebRtcMeshState>>) -> Vec<crate::PeerPresence> {
+    let borrowed = state.borrow();
+    let open_peer_ids = borrowed
+        .peers
+        .iter()
+        .filter_map(|(peer_id, peer)| {
+            peer.channel
+                .as_ref()
+                .is_some_and(mesh_channel_is_open)
+                .then_some(peer_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut recommendations = borrowed
+        .recommendations
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    recommendations.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.peer.peer_id.cmp(&right.peer.peer_id))
+    });
+    let mut candidates = Vec::new();
+    for recommendation in recommendations {
+        if open_peer_ids.contains(&recommendation.peer.peer_id)
+            && !candidates
+                .iter()
+                .any(|peer: &crate::PeerPresence| peer.peer_id == recommendation.peer.peer_id)
+        {
+            candidates.push(recommendation.peer);
+        }
+    }
+    for peer_id in open_peer_ids {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.peer_id == peer_id)
+        {
+            candidates.push(crate::PeerPresence {
+                peer_id,
+                replica_id: String::new(),
+                transport: "webrtc".to_owned(),
+                identity: None,
+                capabilities: Vec::new(),
+                topics: Vec::new(),
+                metadata: BTreeMap::new(),
+            });
+        }
+    }
+    if borrowed.session_auth.require_authenticated_peers {
+        candidates.retain(|peer| borrowed.verified_identities.contains_key(&peer.peer_id));
+    }
+    candidates
 }
 
 fn cancel_mesh_remote_watch_state(state: &Rc<RefCell<WebRtcMeshState>>, watch_id: &str) {
@@ -4835,6 +5459,7 @@ fn send_mesh_presence_state(
                 "watch_query".to_owned(),
                 "watch_lex".to_owned(),
                 "watch_records".to_owned(),
+                "watch_node".to_owned(),
                 "watch_snapshot".to_owned(),
             ],
             vec![format!("mesh:{}", borrowed.room)],

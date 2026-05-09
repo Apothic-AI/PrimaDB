@@ -892,8 +892,15 @@ function generateApiDocs() {
           title: "Keyed records",
           body: [
             "`putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `watchRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.",
-            "`remoteRecords(...)` and `watchRemoteRecords(...)` use the same record-scan request shape as local record watches, so relay and mesh transports do not define separate record semantics.",
+            "`records(...)`, `remoteRecords(...)`, `watchRecords(...)`, and `watchRemoteRecords(...)` use the same record-scan request shape as local record watches, so relay and mesh transports do not define separate record semantics.",
             "Records persist through IndexedDB/OPFS segment persistence and use the same graph transaction, watch, sync, and blob paths as normal graph writes.",
+          ].join("\n\n"),
+        },
+        {
+          title: "Remote interest selection",
+          body: [
+            "Relay `WebSocketSync` exposes peer-agnostic pulls such as `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)`. Relay and mesh handles expose peer-agnostic watches such as `watchQuery(...)` and `watchRecords(...)`.",
+            "The default policy selects any connected/recommended peer. Pass a `RemoteInterestPolicy` object only when a caller needs to pin or constrain selection; explicit `remote*` / `watchRemote*` methods remain available for direct peer targeting.",
           ].join("\n\n"),
         },
         {
@@ -984,6 +991,13 @@ function generateApiDocs() {
       ],
       extraSections: [
         {
+          title: "Remote interest selection",
+          body: [
+            "`WebSocketSync.get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)` select a connected/recommended peer automatically. Relay and mesh watches are available through `watchGet(...)`, `watchQuery(...)`, `watchRecords(...)`, and the other `watch*` helpers.",
+            "Pass `RemoteInterestPolicy` only when needed, for example `{ target: \"peer\", peerId: \"native:ledger\", requireCapability: true }`. The explicit `remote*` and `watchRemote*` methods still target a concrete peer id.",
+          ].join("\n\n"),
+        },
+        {
           title: "Strict consistency and transactions",
           body: strictConsistencyApiBody.replaceAll(
             "`remoteTransaction(...)` / `remote_transaction(...)`",
@@ -1011,6 +1025,13 @@ function generateApiDocs() {
         "This page covers the `primadb-python` package surface. It is generated directly from the public stub file shipped with the package.",
       sourcePath: resolve(repoRoot, "packages", "primadb-python", "python", "primadb", "__init__.pyi"),
       extraSections: [
+        {
+          title: "Remote interest selection",
+          body: [
+            "`WebSocketSync.get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)` select a connected/recommended peer automatically. Relay and mesh watches are available through `watch_get(...)`, `watch_query(...)`, `watch_records(...)`, and the other `watch_*` helpers.",
+            "Pass `RemoteInterestPolicy` only when needed, for example `{\"target\": \"peer\", \"peerId\": \"native:ledger\", \"requireCapability\": True}`. The explicit `remote_*` and `watch_remote_*` methods still target a concrete peer id.",
+          ].join("\n\n"),
+        },
         {
           title: "Strict consistency and transactions",
           body: strictConsistencyApiBody.replaceAll("`remoteTransaction(...)` / `remote_transaction(...)`", "`remote_transaction(...)`"),

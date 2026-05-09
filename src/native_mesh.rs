@@ -3,9 +3,10 @@ use crate::SecureSyncFrame;
 use crate::{
     ChangeSubscription, HookTransport, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
     NodeFetchScheduler, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
-    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
-    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
-    WatchEvent, WatchRequest, WatchRequestKind, error_watch_event,
+    RemoteInterestPolicy, RemoteInterestTarget, RemoteWatchMessage, RemoteWatchSubscription,
+    Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig,
+    SyncEnvelope, SyncFrame, VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind,
+    error_watch_event,
 };
 use async_channel::{Sender, unbounded};
 use futures_util::stream::SplitSink;
@@ -386,6 +387,91 @@ impl NativeWebRtcMesh {
         start_mesh_watch(
             &self.state,
             peer_id.into(),
+            crate::PullRequestKind::Snapshot { root },
+        )
+        .await
+    }
+
+    pub async fn watch_get_with_policy(
+        &self,
+        path: crate::RemotePath,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(&self.state, policy, crate::PullRequestKind::Get { path })
+            .await
+    }
+
+    pub async fn watch_map_with_policy(
+        &self,
+        path: crate::RemotePath,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(&self.state, policy, crate::PullRequestKind::Map { path })
+            .await
+    }
+
+    pub async fn watch_query_with_policy(
+        &self,
+        path: crate::RemotePath,
+        spec: crate::QuerySpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Query { path, spec },
+        )
+        .await
+    }
+
+    pub async fn watch_lex_with_policy(
+        &self,
+        path: crate::RemotePath,
+        spec: crate::LexSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Lex { path, spec },
+        )
+        .await
+    }
+
+    pub async fn watch_records_with_policy(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Records { scan },
+        )
+        .await
+    }
+
+    pub async fn watch_node_with_policy(
+        &self,
+        id: impl Into<String>,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Node { id: id.into() },
+        )
+        .await
+    }
+
+    pub async fn watch_snapshot_with_policy(
+        &self,
+        root: Option<String>,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(
+            &self.state,
+            policy,
             crate::PullRequestKind::Snapshot { root },
         )
         .await
@@ -1466,6 +1552,16 @@ async fn handle_mesh_sync_frame(
     }
 }
 
+async fn start_mesh_watch_with_policy(
+    state: &Arc<NativeWebRtcMeshState>,
+    policy: RemoteInterestPolicy,
+    request_kind: crate::PullRequestKind,
+) -> Result<RemoteWatchSubscription> {
+    let capability = format!("watch_{}", request_kind.kind_name());
+    let peer_id = select_mesh_peer_for_policy(state, &policy, Some(&capability)).await?;
+    start_mesh_watch(state, peer_id, request_kind).await
+}
+
 async fn start_mesh_watch(
     state: &Arc<NativeWebRtcMeshState>,
     target_peer_id: String,
@@ -1518,6 +1614,138 @@ async fn start_mesh_watch(
             }
         });
     }))
+}
+
+async fn select_mesh_peer_for_policy(
+    state: &Arc<NativeWebRtcMeshState>,
+    policy: &RemoteInterestPolicy,
+    capability: Option<&str>,
+) -> Result<String> {
+    if let Some(peer_ids) = explicit_mesh_policy_peers(policy)? {
+        if peer_ids.is_empty() {
+            return Err(PrimadbError::Message(
+                "remote interest policy did not include any peer ids".to_owned(),
+            ));
+        }
+        if !policy.require_capability {
+            return Ok(peer_ids[0].clone());
+        }
+        let recommendations = state.recommendations.lock().await;
+        return peer_ids
+            .into_iter()
+            .find(|peer_id| {
+                recommendations.get(peer_id).is_some_and(|recommendation| {
+                    peer_supports_capability(&recommendation.peer, capability)
+                })
+            })
+            .ok_or_else(|| {
+                PrimadbError::Message(format!(
+                    "no requested peer advertises required capability `{}`",
+                    capability.unwrap_or("unknown")
+                ))
+            });
+    }
+
+    let candidates = mesh_peer_candidates(state).await;
+    if let Some(peer) = candidates
+        .iter()
+        .find(|peer| peer_supports_capability(peer, capability))
+    {
+        return Ok(peer.peer_id.clone());
+    }
+    if !policy.require_capability {
+        if let Some(peer) = candidates.first() {
+            return Ok(peer.peer_id.clone());
+        }
+    }
+    Err(PrimadbError::Message(match capability {
+        Some(capability) => format!("no open mesh peer advertises capability `{capability}`"),
+        None => "no open mesh peer is available for remote interest".to_owned(),
+    }))
+}
+
+fn explicit_mesh_policy_peers(policy: &RemoteInterestPolicy) -> Result<Option<Vec<String>>> {
+    match policy.target {
+        RemoteInterestTarget::Any => {
+            if !policy.peers.is_empty() {
+                Ok(Some(policy.peers.clone()))
+            } else {
+                Ok(policy.peer_id.clone().map(|peer_id| vec![peer_id]))
+            }
+        }
+        RemoteInterestTarget::Peer => policy
+            .peer_id
+            .clone()
+            .map(|peer_id| Some(vec![peer_id]))
+            .ok_or_else(|| {
+                PrimadbError::Message("remote interest policy target `peer` requires peerId".into())
+            }),
+        RemoteInterestTarget::Peers => Ok(Some(policy.peers.clone())),
+    }
+}
+
+async fn mesh_peer_candidates(state: &Arc<NativeWebRtcMeshState>) -> Vec<crate::PeerPresence> {
+    let open_peer_ids = state
+        .peers
+        .lock()
+        .await
+        .iter()
+        .filter_map(|(peer_id, peer)| {
+            peer.channel
+                .as_ref()
+                .is_some_and(mesh_channel_is_open)
+                .then_some(peer_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut recommendations = state
+        .recommendations
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    recommendations.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.peer.peer_id.cmp(&right.peer.peer_id))
+    });
+
+    let mut candidates = Vec::new();
+    for recommendation in recommendations {
+        if open_peer_ids.contains(&recommendation.peer.peer_id)
+            && !candidates
+                .iter()
+                .any(|peer: &crate::PeerPresence| peer.peer_id == recommendation.peer.peer_id)
+        {
+            candidates.push(recommendation.peer);
+        }
+    }
+    for peer_id in open_peer_ids {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.peer_id == peer_id)
+        {
+            candidates.push(crate::PeerPresence {
+                peer_id,
+                replica_id: String::new(),
+                transport: "webrtc".to_owned(),
+                identity: None,
+                capabilities: Vec::new(),
+                topics: Vec::new(),
+                metadata: BTreeMap::new(),
+            });
+        }
+    }
+    if state.session_auth.require_authenticated_peers {
+        let verified = state.verified_identities.lock().await;
+        candidates.retain(|peer| verified.contains_key(&peer.peer_id));
+    }
+    candidates
+}
+
+fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>) -> bool {
+    capability.is_none_or(|capability| peer.capabilities.iter().any(|item| item == capability))
 }
 
 async fn cancel_mesh_watch(state: &Arc<NativeWebRtcMeshState>, watch_id: &str) {
@@ -2154,6 +2382,7 @@ async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
             "watch_query".to_owned(),
             "watch_lex".to_owned(),
             "watch_records".to_owned(),
+            "watch_node".to_owned(),
             "watch_snapshot".to_owned(),
         ],
         vec![format!("mesh:{}", state.room)],

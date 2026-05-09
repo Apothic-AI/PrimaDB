@@ -18,8 +18,9 @@ Current surface:
 - native relay sync through `connect_relay(...)`, including disconnected startup with background relay retry
 - remote strict-scope transaction submission through `remote_transaction(...)` on relay sync clients
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
-- remote keyed-record pulls through `remote_records(...)`
-- live remote watches through `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, `watch_remote_records(...)`, and `watch_remote_snapshot(...)`
+- peer-agnostic relay pulls through `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)`, with optional `RemoteInterestPolicy` constraints
+- peer-agnostic relay/mesh watches through `watch_get(...)`, `watch_map(...)`, `watch_query(...)`, `watch_lex(...)`, `watch_records(...)`, `watch_node(...)`, and `watch_snapshot(...)`
+- explicit peer-targeted pulls and watches through `remote_get(...)`, `remote_query(...)`, `remote_lex(...)`, `remote_records(...)`, `remote_node(...)`, `remote_snapshot(...)`, `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, `watch_remote_records(...)`, `watch_remote_node(...)`, and `watch_remote_snapshot(...)`
 - authenticated relay/mesh session identity through `generate_identity()`, `authenticate_local_user(...)`, `sessionAuth` config, and `context["verifiedIdentity"]`
 - Argon2id password-derived secret-box keys through `derive_password_key(...)`, usable with `set_snapshot_encryption_key(...)` and `set_transport_encryption_key(...)`
 - node-attached scripting through `attach_node_script(...)`, `node_scripts(...)`, `remove_node_script(...)`, and `execute_node_scripts(...)`

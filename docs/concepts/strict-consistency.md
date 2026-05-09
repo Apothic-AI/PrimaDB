@@ -116,5 +116,7 @@ Not implemented yet:
 - strict read routing through `scope.get(...)`
 - treating provisional writes as an overlay in normal reads
 
-Use explicit remote reads such as `remoteGet(...)` / `remote_get(...)` when an application needs to
-ask an authority peer for current data.
+Use remote reads with a peer policy, such as `get(path, { target: "peer", peerId })` /
+`get(path, {"target": "peer", "peerId": peer_id})`, when an application needs to ask an authority
+peer for current data. The explicit `remoteGet(peerId, ...)` / `remote_get(peer_id, ...)` methods
+remain available for direct peer targeting.

@@ -273,6 +273,8 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `PullRequestKind`
 - `PullResponse`
 - `PullResponseBody`
+- `RemoteInterestPolicy`
+- `RemoteInterestTarget`
 - `RemotePath`
 - `RemoteResult`
 - `RemoteWatchMessage`

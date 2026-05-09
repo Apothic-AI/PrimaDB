@@ -17,5 +17,7 @@ docs site content.
 - [gun-record-watch-comparison-progress.md](gun-record-watch-comparison-progress.md)
 - [record-watch-primitive-analysis-plan.md](record-watch-primitive-analysis-plan.md)
 - [record-watch-primitive-analysis-progress.md](record-watch-primitive-analysis-progress.md)
+- [ambient-remote-interest-plan.md](ambient-remote-interest-plan.md)
+- [ambient-remote-interest-progress.md](ambient-remote-interest-progress.md)
 - [path-reference-normalization-plan.md](path-reference-normalization-plan.md)
 - [path-reference-normalization-progress.md](path-reference-normalization-progress.md)

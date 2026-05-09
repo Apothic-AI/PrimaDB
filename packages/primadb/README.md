@@ -12,14 +12,28 @@ sync, auth, and merge behavior.
 The browser crypto bindings expose `derivePasswordKey(...)` for Argon2id password-derived
 secret-box keys, plus SEA-style sign/verify/encrypt/decrypt helpers.
 
-The browser bindings also expose live remote watch helpers on relay and mesh transports:
+The browser bindings expose peer-agnostic remote interests on relay and mesh transports. Use
+`get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)` on relay sync
+handles for remote pulls; use live watch helpers on relay and mesh handles for remote watches:
 
+- `watchGet(...)`
 - `watchRemoteGet(...)`
+- `watchMap(...)`
 - `watchRemoteMap(...)`
+- `watchQuery(...)`
 - `watchRemoteQuery(...)`
+- `watchLex(...)`
 - `watchRemoteLex(...)`
+- `watchRecords(...)`
 - `watchRemoteRecords(...)`
+- `watchNode(...)`
+- `watchRemoteNode(...)`
+- `watchSnapshot(...)`
 - `watchRemoteSnapshot(...)`
+
+The non-`Remote` helpers select a connected/recommended peer automatically. Pass a
+`RemoteInterestPolicy` only when the caller needs to constrain selection; the explicit
+`watchRemote*` / `remote*` methods remain available for concrete peer targeting.
 
 The browser bindings also expose `db.scope(...)`, `db.transaction(...)`, and
 `scope.transaction(...)` for step-based local transactions and strict-scope proposal workflows.

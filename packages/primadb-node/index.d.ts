@@ -316,6 +316,15 @@ export interface RemotePath {
   segments?: string[];
 }
 
+export type RemoteInterestTarget = "any" | "peer" | "peers";
+
+export interface RemoteInterestPolicy {
+  target?: RemoteInterestTarget;
+  peerId?: string | null;
+  peers?: string[];
+  requireCapability?: boolean;
+}
+
 export type ScopeConsistency = "eventual" | "local_transactional" | "coordinated";
 export type ScopeOfflineWrites = "reject" | "queue_provisional";
 export type ScopeIsolation = "serializable";
@@ -634,6 +643,16 @@ export declare class WebSocketSync {
   inflightCount(): number;
   knownPeerCount(): number;
   recommendedPeers(): JsonValue;
+  get(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
+  query(
+    path: RemotePath,
+    spec: QuerySpec,
+    policy?: RemoteInterestPolicy | null,
+  ): Promise<JsonValue>;
+  lex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
+  records(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RecordScanResult>;
+  node(id: string, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
+  snapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
   remoteGet(peerId: string, path: RemotePath): Promise<JsonValue | null>;
   remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
   remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
@@ -646,6 +665,17 @@ export declare class WebSocketSync {
     steps: TransactionStep[],
     options?: TransactionOptions | null,
   ): Promise<TransactionReport>;
+  watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): RemoteWatch;
+  watchMap(path: RemotePath, policy?: RemoteInterestPolicy | null): RemoteWatch;
+  watchQuery(
+    path: RemotePath,
+    spec: QuerySpec,
+    policy?: RemoteInterestPolicy | null,
+  ): RemoteWatch;
+  watchLex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
+  watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteWatch;
+  watchNode(id: string, policy?: RemoteInterestPolicy | null): RemoteWatch;
+  watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): RemoteWatch;
   watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
   watchRemoteMap(peerId: string, path: RemotePath): RemoteWatch;
   watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
@@ -667,6 +697,21 @@ export declare class WebRtcMesh {
   openPeerCount(): Promise<number>;
   inflightCount(): Promise<number>;
   recommendedPeers(): Promise<JsonValue>;
+  watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+  watchMap(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+  watchQuery(
+    path: RemotePath,
+    spec: QuerySpec,
+    policy?: RemoteInterestPolicy | null,
+  ): Promise<RemoteWatch>;
+  watchLex(
+    path: RemotePath,
+    spec: LexSpec,
+    policy?: RemoteInterestPolicy | null,
+  ): Promise<RemoteWatch>;
+  watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+  watchNode(id: string, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+  watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
   watchRemoteGet(peerId: string, path: RemotePath): Promise<RemoteWatch>;
   watchRemoteMap(peerId: string, path: RemotePath): Promise<RemoteWatch>;
   watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<RemoteWatch>;

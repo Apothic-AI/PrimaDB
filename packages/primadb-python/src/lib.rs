@@ -6,7 +6,7 @@ use primadb::{
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation,
     PasswordKeyDerivationOptions, Primadb as CorePrimadb, PublicIdentity, PullRequestKind,
     QuerySpec, RecordBatch, RecordScan, RelayClientConfig, RelayServerConfig, RemotePath,
-    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
+    RemoteInterestPolicy, RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
     RemoteWatchSubscription as CoreRemoteWatch, RecordWatchSubscription as CoreRecordWatchSubscription,
     RoomHookContext, Scope as CoreScope, ScopePolicy, SecretBoxKey, ServeRequestContext,
     ServeResultContext, ScriptExecutionOptions, Subscription as CoreSubscription,
@@ -52,6 +52,13 @@ fn to_py<T: Serialize>(py: Python<'_>, value: T) -> PyResult<Py<PyAny>> {
 
 fn from_py<T: DeserializeOwned>(value: &Bound<'_, PyAny>) -> PyResult<T> {
     depythonize(value).map_err(to_py_err)
+}
+
+fn remote_policy(value: Option<&Bound<'_, PyAny>>) -> PyResult<RemoteInterestPolicy> {
+    match value {
+        Some(value) if !value.is_none() => from_py(value),
+        _ => Ok(RemoteInterestPolicy::default()),
+    }
 }
 
 fn binding_to_json(binding: CoreDurableStorageBinding) -> JsonValue {
@@ -1174,6 +1181,116 @@ impl WebSocketSync {
         to_py(py, peers)
     }
 
+    #[pyo3(signature = (path, policy=None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let path: RemotePath = from_py(path)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_get_with_policy(path, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (path, spec, policy=None))]
+    fn query(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let path: RemotePath = from_py(path)?;
+        let spec: QuerySpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_query_with_policy(path, spec, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (path, spec, policy=None))]
+    fn lex(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let path: RemotePath = from_py(path)?;
+        let spec: LexSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_lex_with_policy(path, spec, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (scan, policy=None))]
+    fn records(
+        &self,
+        py: Python<'_>,
+        scan: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let scan: RecordScan = from_py(scan)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_records_with_policy(scan, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (id, policy=None))]
+    fn node(
+        &self,
+        py: Python<'_>,
+        id: String,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_node_with_policy(id, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (root=None, policy=None))]
+    fn snapshot(
+        &self,
+        py: Python<'_>,
+        root: Option<String>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_snapshot_with_policy(root, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
     fn remote_get(
         &self,
         py: Python<'_>,
@@ -1417,6 +1534,155 @@ impl WebSocketSync {
         })
     }
 
+    #[pyo3(signature = (path, policy=None))]
+    fn watch_get(
+        &self,
+        path: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_get_with_policy(path, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (path, policy=None))]
+    fn watch_map(
+        &self,
+        path: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_map_with_policy(path, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (path, spec, policy=None))]
+    fn watch_query(
+        &self,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: QuerySpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_query_with_policy(path, spec, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (path, spec, policy=None))]
+    fn watch_lex(
+        &self,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: LexSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_lex_with_policy(path, spec, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (scan, policy=None))]
+    fn watch_records(
+        &self,
+        scan: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let scan: RecordScan = from_py(scan)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_records_with_policy(scan, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (id, policy=None))]
+    fn watch_node(
+        &self,
+        id: String,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_node_with_policy(id, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (root=None, policy=None))]
+    fn watch_snapshot(
+        &self,
+        root: Option<String>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_snapshot_with_policy(root, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
     fn flush_pending(&self, py: Python<'_>) -> PyResult<u32> {
         let sync = {
             let mut guard = self.inner.lock().unwrap();
@@ -1643,6 +1909,148 @@ impl WebRtcMesh {
             guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
         };
         let result = py.detach(|| runtime().block_on(mesh.watch_snapshot(peer_id, root)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (path, policy=None))]
+    fn watch_get(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_get_with_policy(path, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (path, policy=None))]
+    fn watch_map(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_map_with_policy(path, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (path, spec, policy=None))]
+    fn watch_query(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: QuerySpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_query_with_policy(path, spec, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (path, spec, policy=None))]
+    fn watch_lex(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let path: RemotePath = from_py(path)?;
+        let spec: LexSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_lex_with_policy(path, spec, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (scan, policy=None))]
+    fn watch_records(
+        &self,
+        py: Python<'_>,
+        scan: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let scan: RecordScan = from_py(scan)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_records_with_policy(scan, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (id, policy=None))]
+    fn watch_node(
+        &self,
+        py: Python<'_>,
+        id: String,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_node_with_policy(id, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (root=None, policy=None))]
+    fn watch_snapshot(
+        &self,
+        py: Python<'_>,
+        root: Option<String>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_snapshot_with_policy(root, policy)));
         self.inner.lock().unwrap().replace(mesh);
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),

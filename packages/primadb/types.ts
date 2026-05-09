@@ -90,6 +90,15 @@ export interface RecordScanResult {
   nextCursor?: string | null;
 }
 
+export type RemoteInterestTarget = "any" | "peer" | "peers";
+
+export interface RemoteInterestPolicy {
+  target?: RemoteInterestTarget;
+  peerId?: string | null;
+  peers?: string[];
+  requireCapability?: boolean;
+}
+
 export type RecordMutation =
   | { kind: "put"; key: string; value: RecordValue }
   | { kind: "delete"; key: string }

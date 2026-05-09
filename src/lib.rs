@@ -128,9 +128,10 @@ pub use storage::{MemoryStorageAdapter, StorageAdapter, StorageReport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{RadiskFileAdapter, SnapshotFileAdapter};
 pub use sync::{
-    PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
-    RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, SyncEnvelope, SyncFrame, WatchEvent,
-    WatchRequest, WatchRequestKind, error_pull_response, error_watch_event, stable_content_hash,
+    PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemoteInterestPolicy,
+    RemoteInterestTarget, RemotePath, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription,
+    SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response,
+    error_watch_event, stable_content_hash,
 };
 pub use traversal::{
     TraversalDirection, TraversalEdge, TraversalEdgeKind, TraversalEntry, TraversalResult,

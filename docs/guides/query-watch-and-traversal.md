@@ -48,18 +48,23 @@ then updated snapshots when relevant touched paths change.
 Use remote watches when another peer may have the data and you want updates over relay or mesh.
 
 ```ts
-const watch = sync.watchRemoteQuery("native:peer-a", {
-  anchor: "notes",
-  segments: ["items"],
-}, {
-  filters: [{ kind: "exists", path: "title" }],
-  limit: 50,
-});
+const watch = sync.watchQuery(
+  {
+    anchor: "notes",
+    segments: ["items"],
+  },
+  {
+    filters: [{ kind: "exists", path: "title" }],
+    limit: 50,
+  },
+);
 ```
 
 Remote watches stream an initial result and then updates. Large responses are chunked.
-Use `watchRemoteRecords(peerId, scan)` for ordered keyed-record scans over the same relay/mesh
-watch pipeline.
+Use `watchRecords(scan)` for ordered keyed-record scans over the same relay/mesh watch pipeline.
+The transport selects a connected/recommended peer by default. Use an optional
+`RemoteInterestPolicy`, or the explicit `watchRemoteRecords(peerId, scan)` method, when a caller
+needs to pin the interest to a known peer.
 
 ## Lexical Scan
 

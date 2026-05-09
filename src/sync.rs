@@ -97,6 +97,28 @@ pub struct PullRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteInterestPolicy {
+    #[serde(default)]
+    pub target: RemoteInterestTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+    #[serde(default)]
+    pub require_capability: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteInterestTarget {
+    #[default]
+    Any,
+    Peer,
+    Peers,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PullChunk {
     pub index: u32,
     pub total: u32,
@@ -226,6 +248,41 @@ impl PullRequestKind {
             Self::Node { id } => Some(id.clone()),
             Self::Snapshot { root } => root.clone(),
             Self::Transaction { scope, .. } => Some(scope.clone()),
+        }
+    }
+}
+
+impl Default for RemoteInterestPolicy {
+    fn default() -> Self {
+        Self {
+            target: RemoteInterestTarget::Any,
+            peer_id: None,
+            peers: Vec::new(),
+            require_capability: false,
+        }
+    }
+}
+
+impl RemoteInterestPolicy {
+    pub fn any() -> Self {
+        Self::default()
+    }
+
+    pub fn peer(peer_id: impl Into<String>) -> Self {
+        Self {
+            target: RemoteInterestTarget::Peer,
+            peer_id: Some(peer_id.into()),
+            peers: Vec::new(),
+            require_capability: false,
+        }
+    }
+
+    pub fn peers(peer_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            target: RemoteInterestTarget::Peers,
+            peer_id: None,
+            peers: peer_ids.into_iter().map(Into::into).collect(),
+            require_capability: false,
         }
     }
 }

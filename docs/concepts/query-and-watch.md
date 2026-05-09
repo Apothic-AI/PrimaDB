@@ -29,6 +29,13 @@ Relay and mesh transports support remote live interests for:
 - `node`
 - `snapshot`
 
+Transport handles expose peer-agnostic helpers for the common connected/meshed case. Use
+`watchQuery(...)`, `watchRecords(...)`, etc. to let the transport select a connected peer. Pass an
+optional `RemoteInterestPolicy` only when the caller needs to constrain selection, for example
+`{ target: "peer", peerId: "native:ledger" }` or `{ target: "peers", peers: ["a", "b"] }`.
+The explicit `watchRemoteQuery(peerId, ...)` / `watchRemoteRecords(peerId, ...)` shape remains
+available for tests, debugging, and authority-targeted reads.
+
 Each watch starts with an initial snapshot and then streams updates. Large results are chunked.
 
 Record watches intentionally use the same `PullRequestKind::Records { scan }` request shape for

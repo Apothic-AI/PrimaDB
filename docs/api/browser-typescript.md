@@ -394,6 +394,27 @@ export interface RecordScanResult {
 }
 ```
 
+#### `RemoteInterestTarget`
+
+Kind: type alias
+
+```ts
+export type RemoteInterestTarget = "any" | "peer" | "peers";
+```
+
+#### `RemoteInterestPolicy`
+
+Kind: interface
+
+```ts
+export interface RemoteInterestPolicy {
+    target?: RemoteInterestTarget;
+    peerId?: string | null;
+    peers?: string[];
+    requireCapability?: boolean;
+}
+```
+
 #### `RecordMutation`
 
 Kind: type alias

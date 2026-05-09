@@ -676,6 +676,27 @@ export interface RemotePath {
 }
 ```
 
+#### `RemoteInterestTarget`
+
+Kind: type alias
+
+```ts
+export type RemoteInterestTarget = "any" | "peer" | "peers";
+```
+
+#### `RemoteInterestPolicy`
+
+Kind: interface
+
+```ts
+export interface RemoteInterestPolicy {
+    target?: RemoteInterestTarget;
+    peerId?: string | null;
+    peers?: string[];
+    requireCapability?: boolean;
+}
+```
+
 #### `ScopeConsistency`
 
 Kind: type alias
@@ -1275,6 +1296,12 @@ export declare class WebSocketSync {
     inflightCount(): number;
     knownPeerCount(): number;
     recommendedPeers(): JsonValue;
+    get(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
+    query(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
+    lex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
+    records(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RecordScanResult>;
+    node(id: string, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
+    snapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
     remoteGet(peerId: string, path: RemotePath): Promise<JsonValue | null>;
     remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
     remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
@@ -1282,6 +1309,13 @@ export declare class WebSocketSync {
     remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
     remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
     remoteTransaction(peerId: string, scope: string, steps: TransactionStep[], options?: TransactionOptions | null): Promise<TransactionReport>;
+    watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchMap(path: RemotePath, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchQuery(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchLex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchNode(id: string, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
     watchRemoteMap(peerId: string, path: RemotePath): RemoteWatch;
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
@@ -1309,6 +1343,13 @@ export declare class WebRtcMesh {
     openPeerCount(): Promise<number>;
     inflightCount(): Promise<number>;
     recommendedPeers(): Promise<JsonValue>;
+    watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchMap(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchQuery(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchLex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchNode(id: string, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchRemoteGet(peerId: string, path: RemotePath): Promise<RemoteWatch>;
     watchRemoteMap(peerId: string, path: RemotePath): Promise<RemoteWatch>;
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<RemoteWatch>;
@@ -1446,6 +1487,12 @@ Kind: function
 ```ts
 export declare function createPrimadbMoqLoopback(options: PrimadbMoqLoopbackOptions): Promise<PrimadbMoqLoopback>;
 ```
+
+## Remote interest selection
+
+`WebSocketSync.get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)` select a connected/recommended peer automatically. Relay and mesh watches are available through `watchGet(...)`, `watchQuery(...)`, `watchRecords(...)`, and the other `watch*` helpers.
+
+Pass `RemoteInterestPolicy` only when needed, for example `{ target: "peer", peerId: "native:ledger", requireCapability: true }`. The explicit `remote*` and `watchRemote*` methods still target a concrete peer id.
 
 ## Strict consistency and transactions
 

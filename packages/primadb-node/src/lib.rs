@@ -10,14 +10,14 @@ use primadb::{
     NativeRelayServer as CoreRelayServer,
     NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
     PasswordKeyDerivationOptions, PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig,
-    RecordBatch, RecordScan, RelayServerConfig, RemotePath, RemoteResult as CoreRemoteResult,
-    RemoteWatchMessage as CoreRemoteWatchMessage, RemoteWatchSubscription as CoreRemoteWatch,
-    RecordWatchSubscription as CoreRecordWatchSubscription, RoomHookContext, SecretBoxKey,
-    ServeRequestContext, ServeResultContext, Scope as CoreScope, ScopePolicy,
-    ScriptExecutionOptions, Subscription as CoreSubscription, TransactionOptions, TransactionStep,
-    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
-    derive_password_key as core_derive_password_key, parse_request_hook_json,
-    parse_result_hook_json, parse_void_hook_json,
+    RecordBatch, RecordScan, RelayServerConfig, RemoteInterestPolicy, RemotePath,
+    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
+    RemoteWatchSubscription as CoreRemoteWatch, RecordWatchSubscription as CoreRecordWatchSubscription,
+    RoomHookContext, SecretBoxKey, ServeRequestContext, ServeResultContext, Scope as CoreScope,
+    ScopePolicy, ScriptExecutionOptions, Subscription as CoreSubscription, TransactionOptions,
+    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    derive_password_key as core_derive_password_key, parse_request_hook_json, parse_result_hook_json,
+    parse_void_hook_json,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,13 @@ fn to_json<T: Serialize>(value: T) -> Result<JsonValue> {
 
 fn from_json<T: DeserializeOwned>(value: JsonValue) -> Result<T> {
     serde_json::from_value(value).map_err(to_napi_error)
+}
+
+fn remote_policy(value: Option<JsonValue>) -> Result<RemoteInterestPolicy> {
+    match value {
+        Some(value) => from_json(value),
+        None => Ok(RemoteInterestPolicy::default()),
+    }
 }
 
 #[napi(js_name = "generateIdentity")]
@@ -1211,6 +1218,116 @@ impl WebSocketSync {
         to_json(peers)
     }
 
+    #[napi(js_name = "get")]
+    pub async fn get(&self, path: JsonValue, policy: Option<JsonValue>) -> Result<JsonValue> {
+        let path: RemotePath = from_json(path)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_get_with_policy(path, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        Ok(result?.unwrap_or(JsonValue::Null))
+    }
+
+    #[napi(js_name = "query")]
+    pub async fn query(
+        &self,
+        path: JsonValue,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let path: RemotePath = from_json(path)?;
+        let spec: QuerySpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_query_with_policy(path, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "lex")]
+    pub async fn lex(
+        &self,
+        path: JsonValue,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let path: RemotePath = from_json(path)?;
+        let spec: LexSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_lex_with_policy(path, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "records")]
+    pub async fn records(&self, scan: JsonValue, policy: Option<JsonValue>) -> Result<JsonValue> {
+        let scan: RecordScan = from_json(scan)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_records_with_policy(scan, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "node")]
+    pub async fn node(&self, id: String, policy: Option<JsonValue>) -> Result<JsonValue> {
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_node_with_policy(id, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "snapshot")]
+    pub async fn snapshot(
+        &self,
+        root: Option<String>,
+        policy: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_snapshot_with_policy(root, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
     #[napi(js_name = "remoteGet")]
     pub async fn remote_get(&self, peer_id: String, path: JsonValue) -> Result<JsonValue> {
         let path: RemotePath = from_json(path)?;
@@ -1455,6 +1572,139 @@ impl WebSocketSync {
         })
     }
 
+    #[napi(js_name = "watchGet")]
+    pub fn watch_get(&self, path: JsonValue, policy: Option<JsonValue>) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_get_with_policy(path, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchMap")]
+    pub fn watch_map(&self, path: JsonValue, policy: Option<JsonValue>) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_map_with_policy(path, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchQuery")]
+    pub fn watch_query(
+        &self,
+        path: JsonValue,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let spec: QuerySpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_query_with_policy(path, spec, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchLex")]
+    pub fn watch_lex(
+        &self,
+        path: JsonValue,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let spec: LexSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_lex_with_policy(path, spec, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchRecords")]
+    pub fn watch_records(&self, scan: JsonValue, policy: Option<JsonValue>) -> Result<RemoteWatch> {
+        let scan: RecordScan = from_json(scan)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_records_with_policy(scan, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchNode")]
+    pub fn watch_node(&self, id: String, policy: Option<JsonValue>) -> Result<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_node_with_policy(id, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchSnapshot")]
+    pub fn watch_snapshot(
+        &self,
+        root: Option<String>,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_snapshot_with_policy(root, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
     #[napi(js_name = "flushPending")]
     pub async fn flush_pending(&self) -> Result<u32> {
         let sync = {
@@ -1683,6 +1933,150 @@ impl WebRtcMesh {
             guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
         };
         let result = mesh.watch_snapshot(peer_id, root).await.map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchGet")]
+    pub async fn watch_get(&self, path: JsonValue, policy: Option<JsonValue>) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_get_with_policy(path, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchMap")]
+    pub async fn watch_map(&self, path: JsonValue, policy: Option<JsonValue>) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_map_with_policy(path, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchQuery")]
+    pub async fn watch_query(
+        &self,
+        path: JsonValue,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let spec: QuerySpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_query_with_policy(path, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchLex")]
+    pub async fn watch_lex(
+        &self,
+        path: JsonValue,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let path: RemotePath = from_json(path)?;
+        let spec: LexSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_lex_with_policy(path, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchRecords")]
+    pub async fn watch_records(
+        &self,
+        scan: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let scan: RecordScan = from_json(scan)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_records_with_policy(scan, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchNode")]
+    pub async fn watch_node(&self, id: String, policy: Option<JsonValue>) -> Result<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_node_with_policy(id, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchSnapshot")]
+    pub async fn watch_snapshot(
+        &self,
+        root: Option<String>,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_snapshot_with_policy(root, policy)
+            .await
+            .map_err(to_napi_error);
         self.inner.lock().unwrap().replace(mesh);
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(result?))),

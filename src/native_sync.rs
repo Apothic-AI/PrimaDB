@@ -3,10 +3,10 @@ use crate::SecureSyncFrame;
 use crate::{
     ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, NodeFetchScheduler,
     Operation, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
-    RelayClientConfig, RemotePath, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription,
-    Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig,
-    SyncEnvelope, SyncFrame, VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind,
-    error_pull_response, error_watch_event,
+    RelayClientConfig, RemoteInterestPolicy, RemoteInterestTarget, RemotePath, RemoteResult,
+    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
+    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
+    WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
@@ -428,6 +428,84 @@ impl NativeWebSocketSync {
         )
     }
 
+    pub fn watch_get_with_policy(
+        &self,
+        path: RemotePath,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(&self.state, policy, crate::PullRequestKind::Get { path })
+    }
+
+    pub fn watch_map_with_policy(
+        &self,
+        path: RemotePath,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(&self.state, policy, crate::PullRequestKind::Map { path })
+    }
+
+    pub fn watch_query_with_policy(
+        &self,
+        path: RemotePath,
+        spec: crate::QuerySpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Query { path, spec },
+        )
+    }
+
+    pub fn watch_lex_with_policy(
+        &self,
+        path: RemotePath,
+        spec: crate::LexSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Lex { path, spec },
+        )
+    }
+
+    pub fn watch_records_with_policy(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Records { scan },
+        )
+    }
+
+    pub fn watch_node_with_policy(
+        &self,
+        id: impl Into<String>,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Node { id: id.into() },
+        )
+    }
+
+    pub fn watch_snapshot_with_policy(
+        &self,
+        root: Option<String>,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Snapshot { root },
+        )
+    }
+
     pub async fn remote_get(
         &self,
         peer_id: impl Into<String>,
@@ -544,6 +622,122 @@ impl NativeWebSocketSync {
         }
     }
 
+    pub async fn remote_get_with_policy(
+        &self,
+        path: RemotePath,
+        policy: RemoteInterestPolicy,
+    ) -> Result<Option<JsonValue>> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Get { path },
+        )
+        .await?
+        {
+            RemoteResult::Get { value } => Ok(value),
+            other => Err(PrimadbError::Message(format!(
+                "expected get result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_query_with_policy(
+        &self,
+        path: RemotePath,
+        spec: crate::QuerySpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<Vec<MapEntry>> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Query { path, spec },
+        )
+        .await?
+        {
+            RemoteResult::Query { entries } => Ok(entries),
+            other => Err(PrimadbError::Message(format!(
+                "expected query result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_lex_with_policy(
+        &self,
+        path: RemotePath,
+        spec: crate::LexSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<Vec<LexEntry>> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Lex { path, spec },
+        )
+        .await?
+        {
+            RemoteResult::Lex { entries } => Ok(entries),
+            other => Err(PrimadbError::Message(format!(
+                "expected lex result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_records_with_policy(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RecordScanResult> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Records { scan },
+        )
+        .await?
+        {
+            RemoteResult::Records { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected records result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_node_with_policy(
+        &self,
+        id: impl Into<String>,
+        policy: RemoteInterestPolicy,
+    ) -> Result<Option<crate::NodeState>> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Node { id: id.into() },
+        )
+        .await?
+        {
+            RemoteResult::Node { node } => Ok(node),
+            other => Err(PrimadbError::Message(format!(
+                "expected node result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_snapshot_with_policy(
+        &self,
+        root: Option<String>,
+        policy: RemoteInterestPolicy,
+    ) -> Result<crate::DatabaseSnapshot> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Snapshot { root },
+        )
+        .await?
+        {
+            RemoteResult::Snapshot { snapshot } => Ok(snapshot),
+            other => Err(PrimadbError::Message(format!(
+                "expected snapshot result, received {other:?}"
+            ))),
+        }
+    }
+
     pub async fn remote_transaction(
         &self,
         peer_id: impl Into<String>,
@@ -611,6 +805,16 @@ impl Drop for NativeWebSocketSync {
     }
 }
 
+async fn request_remote_result_with_policy(
+    state: &Arc<NativeWebSocketSyncState>,
+    policy: RemoteInterestPolicy,
+    request_kind: crate::PullRequestKind,
+) -> Result<RemoteResult> {
+    let capability = pull_capability_for_request(&request_kind);
+    let peer_id = select_relay_peer_for_policy(state, &policy, capability)?;
+    request_remote_result(state, peer_id, request_kind).await
+}
+
 async fn request_remote_result(
     state: &Arc<NativeWebSocketSyncState>,
     target_peer_id: String,
@@ -653,6 +857,16 @@ async fn request_remote_result(
         .await
         .map_err(|error| PrimadbError::Message(error.to_string()))?
         .map_err(PrimadbError::Message)
+}
+
+fn start_remote_watch_with_policy(
+    state: &Arc<NativeWebSocketSyncState>,
+    policy: RemoteInterestPolicy,
+    request_kind: crate::PullRequestKind,
+) -> Result<RemoteWatchSubscription> {
+    let capability = Some(watch_capability_for_request(&request_kind));
+    let peer_id = select_relay_peer_for_policy(state, &policy, capability.as_deref())?;
+    start_remote_watch(state, peer_id, request_kind)
 }
 
 fn start_remote_watch(
@@ -700,6 +914,132 @@ fn start_remote_watch(
     Ok(RemoteWatchSubscription::new(receiver, move || {
         cancel_remote_watch(&cancel_state, &watch_id);
     }))
+}
+
+fn select_relay_peer_for_policy(
+    state: &Arc<NativeWebSocketSyncState>,
+    policy: &RemoteInterestPolicy,
+    capability: Option<&str>,
+) -> Result<String> {
+    if let Some(peer_ids) = explicit_policy_peers(policy)? {
+        if peer_ids.is_empty() {
+            return Err(PrimadbError::Message(
+                "remote interest policy did not include any peer ids".to_owned(),
+            ));
+        }
+        if !policy.require_capability {
+            return Ok(peer_ids[0].clone());
+        }
+        let known = state.router.known_peers();
+        return peer_ids
+            .into_iter()
+            .find(|peer_id| {
+                known.iter().any(|peer| {
+                    peer.peer_id == *peer_id && peer_supports_capability(peer, capability)
+                })
+            })
+            .ok_or_else(|| {
+                PrimadbError::Message(format!(
+                    "no requested peer advertises required capability `{}`",
+                    capability.unwrap_or("unknown")
+                ))
+            });
+    }
+
+    let candidates = relay_peer_candidates(state);
+    if let Some(peer) = candidates
+        .iter()
+        .find(|peer| peer_supports_capability(peer, capability))
+    {
+        return Ok(peer.peer_id.clone());
+    }
+    if !policy.require_capability {
+        if let Some(peer) = candidates.first() {
+            return Ok(peer.peer_id.clone());
+        }
+    }
+    Err(PrimadbError::Message(match capability {
+        Some(capability) => format!("no connected peer advertises capability `{capability}`"),
+        None => "no connected peer is available for remote interest".to_owned(),
+    }))
+}
+
+fn explicit_policy_peers(policy: &RemoteInterestPolicy) -> Result<Option<Vec<String>>> {
+    match policy.target {
+        RemoteInterestTarget::Any => {
+            if !policy.peers.is_empty() {
+                Ok(Some(policy.peers.clone()))
+            } else {
+                Ok(policy.peer_id.clone().map(|peer_id| vec![peer_id]))
+            }
+        }
+        RemoteInterestTarget::Peer => policy
+            .peer_id
+            .clone()
+            .map(|peer_id| Some(vec![peer_id]))
+            .ok_or_else(|| {
+                PrimadbError::Message("remote interest policy target `peer` requires peerId".into())
+            }),
+        RemoteInterestTarget::Peers => Ok(Some(policy.peers.clone())),
+    }
+}
+
+fn relay_peer_candidates(state: &Arc<NativeWebSocketSyncState>) -> Vec<crate::PeerPresence> {
+    let mut peers = state
+        .recommendations
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    peers.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.peer.peer_id.cmp(&right.peer.peer_id))
+    });
+    let mut candidates = Vec::new();
+    for recommendation in peers {
+        if !candidates
+            .iter()
+            .any(|peer: &crate::PeerPresence| peer.peer_id == recommendation.peer.peer_id)
+        {
+            candidates.push(recommendation.peer);
+        }
+    }
+    for peer in state.router.known_peers() {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.peer_id == peer.peer_id)
+        {
+            candidates.push(peer);
+        }
+    }
+    if state.session_auth.require_authenticated_peers {
+        candidates.retain(|peer| verified_identity_for_peer(state, &peer.peer_id).is_some());
+    }
+    candidates
+}
+
+fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>) -> bool {
+    capability.is_none_or(|capability| peer.capabilities.iter().any(|item| item == capability))
+}
+
+fn pull_capability_for_request(request: &crate::PullRequestKind) -> Option<&'static str> {
+    match request {
+        crate::PullRequestKind::Get { .. } => Some("pull_get"),
+        crate::PullRequestKind::Query { .. } => Some("pull_query"),
+        crate::PullRequestKind::Lex { .. } => Some("pull_lex"),
+        crate::PullRequestKind::Records { .. } => Some("pull_records"),
+        crate::PullRequestKind::Snapshot { .. } => Some("snapshot"),
+        crate::PullRequestKind::Node { .. } => Some("pull_node"),
+        crate::PullRequestKind::Map { .. } => Some("pull_map"),
+        crate::PullRequestKind::Transaction { .. } => None,
+    }
+}
+
+fn watch_capability_for_request(request: &crate::PullRequestKind) -> String {
+    format!("watch_{}", request.kind_name())
 }
 
 fn cancel_remote_watch(state: &Arc<NativeWebSocketSyncState>, watch_id: &str) {
@@ -1231,14 +1571,17 @@ fn build_relay_presence_route(state: &Arc<NativeWebSocketSyncState>, url: &str) 
             "snapshot".to_owned(),
             "batch".to_owned(),
             "pull_get".to_owned(),
+            "pull_map".to_owned(),
             "pull_query".to_owned(),
             "pull_lex".to_owned(),
             "pull_records".to_owned(),
+            "pull_node".to_owned(),
             "watch_get".to_owned(),
             "watch_map".to_owned(),
             "watch_query".to_owned(),
             "watch_lex".to_owned(),
             "watch_records".to_owned(),
+            "watch_node".to_owned(),
             "watch_snapshot".to_owned(),
             "peer_exchange".to_owned(),
         ],

@@ -263,6 +263,19 @@ class WebSocketSync {
   pendingCount(): number;
   inflightCount(): number;
   recommendedPeers(): any;
+  get(path: any, policy: any | null): Promise<any>;
+  query(path: any, spec: any, policy: any | null): Promise<any>;
+  lex(path: any, spec: any, policy: any | null): Promise<any>;
+  records(scan: any, policy: any | null): Promise<any>;
+  node(id: string, policy: any | null): Promise<any>;
+  snapshot(root: string | null, policy: any | null): Promise<any>;
+  watchGet(path: any, policy: any | null): RemoteWatch;
+  watchMap(path: any, policy: any | null): RemoteWatch;
+  watchQuery(path: any, spec: any, policy: any | null): RemoteWatch;
+  watchLex(path: any, spec: any, policy: any | null): RemoteWatch;
+  watchRecords(scan: any, policy: any | null): RemoteWatch;
+  watchNode(id: string, policy: any | null): RemoteWatch;
+  watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
   watchRemoteGet(peer_id: string, path: any): RemoteWatch;
   watchRemoteMap(peer_id: string, path: any): RemoteWatch;
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
@@ -294,6 +307,13 @@ class WebRtcMesh {
   peerCount(): number;
   openPeerCount(): number;
   inflightCount(): number;
+  watchGet(path: any, policy: any | null): RemoteWatch;
+  watchMap(path: any, policy: any | null): RemoteWatch;
+  watchQuery(path: any, spec: any, policy: any | null): RemoteWatch;
+  watchLex(path: any, spec: any, policy: any | null): RemoteWatch;
+  watchRecords(scan: any, policy: any | null): RemoteWatch;
+  watchNode(id: string, policy: any | null): RemoteWatch;
+  watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
   watchRemoteGet(peer_id: string, path: any): RemoteWatch;
   watchRemoteMap(peer_id: string, path: any): RemoteWatch;
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
@@ -321,9 +341,15 @@ Use OPFS segments for large or high-churn browser-local datasets when `navigator
 
 `putRecord(...)`, `putRecordBytes(...)`, `putRecordBlob(...)`, `getRecord(...)`, `scanRecords(...)`, `watchRecords(...)`, `applyRecordBatch(...)`, and `deleteRecord(...)` expose graph-native ordered records in the browser runtime.
 
-`remoteRecords(...)` and `watchRemoteRecords(...)` use the same record-scan request shape as local record watches, so relay and mesh transports do not define separate record semantics.
+`records(...)`, `remoteRecords(...)`, `watchRecords(...)`, and `watchRemoteRecords(...)` use the same record-scan request shape as local record watches, so relay and mesh transports do not define separate record semantics.
 
 Records persist through IndexedDB/OPFS segment persistence and use the same graph transaction, watch, sync, and blob paths as normal graph writes.
+
+## Remote interest selection
+
+Relay `WebSocketSync` exposes peer-agnostic pulls such as `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)`. Relay and mesh handles expose peer-agnostic watches such as `watchQuery(...)` and `watchRecords(...)`.
+
+The default policy selects any connected/recommended peer. Pass a `RemoteInterestPolicy` object only when a caller needs to pin or constrain selection; explicit `remote*` / `watchRemote*` methods remain available for direct peer targeting.
 
 ## Strict consistency and transactions
 
