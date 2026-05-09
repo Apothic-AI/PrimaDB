@@ -17,7 +17,7 @@ Full API reference:
 ## Install
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+cd /path/to/primadb/packages/primadb-python
 uv sync
 ```
 

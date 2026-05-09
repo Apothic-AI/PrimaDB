@@ -4,11 +4,13 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import process from "node:process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const EXAMPLES_ROOT =
-  process.env.PRIMADB_PACKAGE_EXAMPLES_ROOT ??
-  "/home/bitnom/Code/gunport/primadb/packages/primadb/examples";
+  process.env.PRIMADB_PACKAGE_EXAMPLES_ROOT ?? resolve(SCRIPT_DIR, "..");
 const ROOT_URL = process.env.PRIMADB_PACKAGE_MOQ_URL ?? "http://127.0.0.1:4181/moq-sync/";
 const SERVER_PORT = Number(process.env.PRIMADB_PACKAGE_PORT ?? "4181");
 const CHROME_PATH = process.env.PLAYWRIGHT_BROWSER_PATH ?? "/usr/bin/google-chrome-stable";

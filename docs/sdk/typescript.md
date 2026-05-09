@@ -26,7 +26,7 @@ Full API reference:
 ## Build
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /path/to/primadb/packages/primadb
 pnpm install
 pnpm run build
 ```

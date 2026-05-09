@@ -57,7 +57,7 @@ nonce challenge/response before exposing `context.verifiedIdentity` to hooks.
 From the repo root:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /path/to/primadb/packages/primadb
 pnpm install
 pnpm run build
 ```
@@ -78,20 +78,20 @@ The threaded subpath still has the same runtime requirements as the rest of Prim
 
 ## Package Examples
 
-Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport/primadb/packages/primadb/examples):
+Runnable package-local examples live under [examples/](examples):
 
-- [examples/default-notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/default-notes/README.md)
-- [examples/indexeddb-segments/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/indexeddb-segments/README.md)
-- [examples/opfs-segments/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/opfs-segments/README.md)
-- [examples/threaded-mesh/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/threaded-mesh/README.md)
-- [examples/binary-stream-room/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/binary-stream-room/README.md)
-- [examples/text-voice-chat/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/text-voice-chat/README.md)
-- [examples/moq-sync/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/moq-sync/README.md)
+- [examples/default-notes/README.md](examples/default-notes/README.md)
+- [examples/indexeddb-segments/README.md](examples/indexeddb-segments/README.md)
+- [examples/opfs-segments/README.md](examples/opfs-segments/README.md)
+- [examples/threaded-mesh/README.md](examples/threaded-mesh/README.md)
+- [examples/binary-stream-room/README.md](examples/binary-stream-room/README.md)
+- [examples/text-voice-chat/README.md](examples/text-voice-chat/README.md)
+- [examples/moq-sync/README.md](examples/moq-sync/README.md)
 
 Run them with Vite:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm install
 pnpm run dev
 ```

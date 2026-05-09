@@ -46,7 +46,7 @@ Peers should discover each other automatically and exchange changes over WebRTC.
 Run the two-page default P2P smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-mesh-notes/test-two-page-smoke.sh
 ```
 
@@ -57,6 +57,6 @@ confirms that a note replicates live without a reload.
 Run the browser/native mixed-host smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-mesh-notes/test-browser-native-smoke.sh
 ```

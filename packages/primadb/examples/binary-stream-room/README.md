@@ -19,14 +19,14 @@ buffers do not grow without bound.
 Start the local relay:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 Run the package examples app:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm install
 pnpm run dev
 ```
@@ -61,6 +61,6 @@ http://127.0.0.1:4181/binary-stream-room/?signal=broadcast&capture=synthetic
 ## Smoke Test
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 bash ./binary-stream-room/test-smoke.sh
 ```

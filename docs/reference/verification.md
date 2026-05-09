@@ -20,7 +20,7 @@ PrimaDB is not relying on a single smoke check. The repo currently exercises:
 ## Core Verification Commands
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 cargo test --features "crypto native-websocket native-webrtc"
 cargo check --target wasm32-unknown-unknown --features crypto
 bash examples/test-native-relay-smoke.sh
@@ -34,7 +34,7 @@ bash examples/test-all-targets-mesh-e2e.sh
 Browser package:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /path/to/primadb/packages/primadb
 pnpm install
 pnpm run build
 pnpm run typecheck
@@ -44,7 +44,7 @@ pnpm run smoke
 Node package:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+cd /path/to/primadb/packages/primadb-node
 pnpm install
 pnpm run smoke
 ```
@@ -52,7 +52,7 @@ pnpm run smoke
 Python package:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+cd /path/to/primadb/packages/primadb-python
 uv sync
 uv run python scripts/smoke_core.py
 uv run python scripts/smoke_hooks.py
@@ -63,7 +63,7 @@ uv run python scripts/smoke_mesh.py
 Docs site:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/website
+cd /path/to/primadb/website
 pnpm install
 pnpm run generate:api
 pnpm run build

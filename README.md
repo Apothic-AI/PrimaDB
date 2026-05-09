@@ -5,8 +5,8 @@
 ## Documentation
 
 PrimaDB now has a Docusaurus docs site in
-[website/](/home/bitnom/Code/gunport/primadb/website), with authored content living under
-[docs/](/home/bitnom/Code/gunport/primadb/docs).
+[website/](website), with authored content living under
+[docs/](docs).
 
 The published site target is Cloudflare Workers.
 
@@ -17,7 +17,7 @@ Current docs URL:
 Run it locally with:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/website
+cd /path/to/primadb/website
 pnpm install
 pnpm run start
 ```
@@ -25,13 +25,13 @@ pnpm run start
 Deploy it with:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/website
+cd /path/to/primadb/website
 pnpm install
 pnpm run deploy
 ```
 
 The earlier planning notes were moved out of `docs/` and are temporarily parked under
-[tmp/planning-docs/README.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/README.md).
+[tmp/planning-docs/README.md](tmp/planning-docs/README.md).
 
 ## Current Capabilities
 
@@ -67,7 +67,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Data-level auth in the core database for signed user-owned fields, certificate-authorized delegated writes, and read-time signature verification/unwrapping.
 - Authenticated relay/mesh session presence with nonce challenge/response, verified peer identity in hooks, and optional strict `sessionAuth` transport mode.
 - Optional network-boundary hooks for connection gating, mesh room gating, pull/watch request rewriting or denial, and served-result redaction without turning the core graph into an ACL engine.
-- Gun-compatible browser runtime in [js/primadb-gun.js](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
+- Gun-compatible browser runtime in [js/primadb-gun.js](js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
 - SEA-style browser crypto surface with pair generation, password-derived keys, sign/verify, encrypt/decrypt, HKDF-backed shared-secret derivation, and certificates.
 - Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
@@ -101,8 +101,8 @@ That gives the project a more inspectable merge model and makes it easier to tes
 ## Temporary Planning Notes
 
 Planning notes are temporarily parked under
-[tmp/planning-docs/README.md](/home/bitnom/Code/gunport/primadb/tmp/planning-docs/README.md)
-so [docs/](/home/bitnom/Code/gunport/primadb/docs) can become the canonical site-content
+[tmp/planning-docs/README.md](tmp/planning-docs/README.md)
+so [docs/](docs) can become the canonical site-content
 directory.
 
 ## Rust Example
@@ -236,7 +236,7 @@ The canonical threaded build entrypoint is:
 That produces a threaded package in `./pkg` by default. Example-level threaded `build.sh` scripts
 wrap this same path with example-specific output directories.
 
-The dedicated example in [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md)
+The dedicated example in [examples/browser-threaded-query/README.md](examples/browser-threaded-query/README.md)
 shows the intended JS bootstrap pattern:
 
 ```js
@@ -250,18 +250,18 @@ console.log(primadb.parallelEnabled(), primadb.parallelThreadCount());
 ```
 
 For a full threaded browser P2P example on top of the same bootstrap path, see
-[examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md).
+[examples/browser-threaded-mesh-notes/README.md](examples/browser-threaded-mesh-notes/README.md).
 
 ## TypeScript Package
 
 Primadb now also has an in-repo TypeScript package in
-[packages/primadb](/home/bitnom/Code/gunport/primadb/packages/primadb). It wraps the existing
+[packages/primadb](packages/primadb). It wraps the existing
 Rust/WASM browser runtime instead of reimplementing it.
 
 Build it from the repo with:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /path/to/primadb/packages/primadb
 pnpm install
 pnpm run build
 ```
@@ -301,25 +301,25 @@ const mesh = db.connectMesh({
 });
 ```
 
-See [packages/primadb/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/README.md)
+See [packages/primadb/README.md](packages/primadb/README.md)
 for the full package-specific flow.
 
 For a real browser app that consumes the package through npm and Vite, see
-[examples/browser-package-notes-vite/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite/README.md).
+[examples/browser-package-notes-vite/README.md](examples/browser-package-notes-vite/README.md).
 
 For runnable package-local browser examples, see
-[packages/primadb/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/README.md).
+[packages/primadb/examples/README.md](packages/primadb/examples/README.md).
 
 ## Native Node Package
 
 Primadb also now has a native Node.js package in
-[packages/primadb-node](/home/bitnom/Code/gunport/primadb/packages/primadb-node). Unlike the
+[packages/primadb-node](packages/primadb-node). Unlike the
 browser package, this one wraps the native Rust runtime directly through a Node addon.
 
 Build it with:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+cd /path/to/primadb/packages/primadb-node
 pnpm install
 pnpm run build
 ```
@@ -342,7 +342,7 @@ db.chain("notes").field("items").set({
 });
 ```
 
-See [packages/primadb-node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/README.md)
+See [packages/primadb-node/README.md](packages/primadb-node/README.md)
 for the full package-specific flow.
 
 The Node package now also exposes network-boundary callback hooks directly on the `Primadb`
@@ -359,18 +359,18 @@ db.setNetworkHooks({
 ```
 
 For runnable package-local Node examples, see
-[packages/primadb-node/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/README.md).
+[packages/primadb-node/examples/README.md](packages/primadb-node/examples/README.md).
 
 ## Native Python Package
 
 Primadb also now has a native Python package in
-[packages/primadb-python](/home/bitnom/Code/gunport/primadb/packages/primadb-python). Like the
+[packages/primadb-python](packages/primadb-python). Like the
 Node package, it wraps the native Rust runtime directly instead of the browser WASM layer.
 
 Install it locally with:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+cd /path/to/primadb/packages/primadb-python
 uv sync
 ```
 
@@ -398,7 +398,7 @@ db.chain("notes").field("items").set(
 Smoke it with:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+cd /path/to/primadb/packages/primadb-python
 uv sync
 uv run python scripts/smoke_core.py
 uv run python scripts/smoke_relay.py
@@ -406,7 +406,7 @@ uv run python scripts/smoke_mesh.py
 uv run python scripts/pack_check.py
 ```
 
-See [packages/primadb-python/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/README.md)
+See [packages/primadb-python/README.md](packages/primadb-python/README.md)
 for the package-specific flow.
 
 Like the browser and Node packages, the Python package now exposes network-boundary callback hooks
@@ -424,22 +424,22 @@ db.set_network_hooks(
 ```
 
 For runnable package-local Python examples, see
-[packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md).
+[packages/primadb-python/examples/README.md](packages/primadb-python/examples/README.md).
 
 ## Versioning And Releases
 
 Primadb uses lockstep versioning across the Rust crate and the in-repo packages:
 
-- [Cargo.toml](/home/bitnom/Code/gunport/primadb/Cargo.toml)
-- [packages/primadb/package.json](/home/bitnom/Code/gunport/primadb/packages/primadb/package.json)
-- [packages/primadb-node/package.json](/home/bitnom/Code/gunport/primadb/packages/primadb-node/package.json)
-- [packages/primadb-python/pyproject.toml](/home/bitnom/Code/gunport/primadb/packages/primadb-python/pyproject.toml)
+- [Cargo.toml](Cargo.toml)
+- [packages/primadb/package.json](packages/primadb/package.json)
+- [packages/primadb-node/package.json](packages/primadb-node/package.json)
+- [packages/primadb-python/pyproject.toml](packages/primadb-python/pyproject.toml)
 
 `Cargo.toml` is the source of truth. Use the repo-level script in
-[scripts/version-sync.mjs](/home/bitnom/Code/gunport/primadb/scripts/version-sync.mjs):
+[scripts/version-sync.mjs](scripts/version-sync.mjs):
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 
 # verify there is no manifest drift
 node ./scripts/version-sync.mjs check
@@ -456,8 +456,8 @@ node ./scripts/cut-release.mjs 0.1.1
 
 Automation:
 
-- [version-sync.yml](/home/bitnom/Code/gunport/primadb/.github/workflows/version-sync.yml) fails CI on push/PR if versions drift.
-- [release.yml](/home/bitnom/Code/gunport/primadb/.github/workflows/release.yml) creates a GitHub release when a `v*.*.*` tag is pushed and that tagged commit is on `master`.
+- [version-sync.yml](.github/workflows/version-sync.yml) fails CI on push/PR if versions drift.
+- [release.yml](.github/workflows/release.yml) creates a GitHub release when a `v*.*.*` tag is pushed and that tagged commit is on `master`.
   It also attaches release artifacts for:
   `primadb-<version>.crate`,
   the browser package tarball,
@@ -468,7 +468,7 @@ Automation:
 Typical release flow:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 node ./scripts/cut-release.mjs 0.1.1
 git push --follow-tags origin master
 ```
@@ -504,50 +504,50 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 
 ## Examples
 
-- [examples/browser-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-notes/README.md): Browser-only local-first board with IndexedDB persistence and cross-tab sync over `BroadcastChannel`.
-- [examples/browser-segment-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-segment-notes/README.md): Browser-only local-first board using the canonical node/index segment records in IndexedDB plus cross-tab sync over `BroadcastChannel`.
-- [examples/browser-relay-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-relay-notes/README.md): Browser board using Primadb's relay client API, automatic IndexedDB persistence, and the included relay server.
-- [examples/browser-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-mesh-notes/README.md): Default browser mesh board using Primadb's shared `connectMesh(...)` facade, relay-backed signaling by default, optional `BroadcastChannel` fallback, and browser/native smoke coverage.
-- [examples/browser-gun-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, the DAM relay, and a browser runtime smoke test for `load/not/map/back`.
-- [examples/browser-package-notes-vite/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite/README.md): Vite browser app that installs the local `primadb` package with `pnpm`, exercises IndexedDB-backed persistence, and can optionally join the relay-signaled mesh through query params.
-- [packages/primadb/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb/examples/README.md): package-local browser demos for the default and threaded npm entrypoints, including binary media chunk streaming, text/voice chat over PrimaDB bytes, and MoQ sync.
-- [packages/primadb-node/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/README.md): package-local native Node demos for durable local storage, relay-signaled mesh peers, full-node anchor deployments, and MoQ sync.
-- [packages/primadb-python/examples/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/README.md): package-local native Python demos for durable local storage, relay-signaled mesh peers, full-node anchor deployments, and MoQ sync.
-- [examples/browser-threaded-query/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-query/README.md): Opt-in `wasm-threads` browser demo that initializes `initThreadPool(...)` and exercises the Rayon-backed query path under COOP/COEP.
-- [examples/browser-threaded-mesh-notes/README.md](/home/bitnom/Code/gunport/primadb/examples/browser-threaded-mesh-notes/README.md): Opt-in `wasm-threads` browser P2P demo using `WebRtcMesh`, relay-backed signaling by default, COOP/COEP serving, configurable ICE servers, and a threaded shared-query workload over WebRTC-synced notes.
-- [examples/ws_relay_server.rs](/home/bitnom/Code/gunport/primadb/examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010`.
-- [examples/full_node.rs](/home/bitnom/Code/gunport/primadb/examples/full_node.rs): Rust full-node anchor example that runs the relay and a colocated mesh peer together, runnable with `cargo run --features native-webrtc --example full_node -- --relay-bind 127.0.0.1:9010 --room demo`.
-- [examples/native_relay_client.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
-- [examples/native_relay_probe.rs](/home/bitnom/Code/gunport/primadb/examples/native_relay_probe.rs): Native relay probe used by the browser/native and native/native relay smoke tests.
-- [examples/native_mesh_probe.rs](/home/bitnom/Code/gunport/primadb/examples/native_mesh_probe.rs): Native WebRTC mesh probe interoperable with the browser relay-signaled mesh.
-- [examples/native_mesh_agent.rs](/home/bitnom/Code/gunport/primadb/examples/native_mesh_agent.rs): Native mesh/storage agent used by the mixed-target end-to-end suite.
-- [examples/test-all-targets-mesh-e2e.sh](/home/bitnom/Code/gunport/primadb/examples/test-all-targets-mesh-e2e.sh): Cross-target suite that builds and runs the default WASM demo, threaded WASM demo, npm browser app, native Node package, native Python package, and Rust native mesh together.
-- [examples/native_parallel_query.rs](/home/bitnom/Code/gunport/primadb/examples/native_parallel_query.rs): Native Rayon verification example, runnable with `cargo run --example native_parallel_query`.
-- [examples/crypto_foundation.rs](/home/bitnom/Code/gunport/primadb/examples/crypto_foundation.rs): Signing and encryption primitives, runnable with `cargo run --features crypto --example crypto_foundation`.
-- [examples/authenticated_sync.rs](/home/bitnom/Code/gunport/primadb/examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
-- [examples/radisk_storage.rs](/home/bitnom/Code/gunport/primadb/examples/radisk_storage.rs): Incremental segment-backed native storage demo through the current `use_radisk_storage(...)` entrypoint, runnable with `cargo run --example radisk_storage`.
-- [examples/gun_compat.rs](/home/bitnom/Code/gunport/primadb/examples/gun_compat.rs): Gun-compatible API demo, runnable with `cargo run --example gun_compat`.
+- [examples/browser-notes/README.md](examples/browser-notes/README.md): Browser-only local-first board with IndexedDB persistence and cross-tab sync over `BroadcastChannel`.
+- [examples/browser-segment-notes/README.md](examples/browser-segment-notes/README.md): Browser-only local-first board using the canonical node/index segment records in IndexedDB plus cross-tab sync over `BroadcastChannel`.
+- [examples/browser-relay-notes/README.md](examples/browser-relay-notes/README.md): Browser board using Primadb's relay client API, automatic IndexedDB persistence, and the included relay server.
+- [examples/browser-mesh-notes/README.md](examples/browser-mesh-notes/README.md): Default browser mesh board using Primadb's shared `connectMesh(...)` facade, relay-backed signaling by default, optional `BroadcastChannel` fallback, and browser/native smoke coverage.
+- [examples/browser-gun-notes/README.md](examples/browser-gun-notes/README.md): Gun-compatible browser app using `js/primadb-gun.js`, SEA-style users, the DAM relay, and a browser runtime smoke test for `load/not/map/back`.
+- [examples/browser-package-notes-vite/README.md](examples/browser-package-notes-vite/README.md): Vite browser app that installs the local `primadb` package with `pnpm`, exercises IndexedDB-backed persistence, and can optionally join the relay-signaled mesh through query params.
+- [packages/primadb/examples/README.md](packages/primadb/examples/README.md): package-local browser demos for the default and threaded npm entrypoints, including binary media chunk streaming, text/voice chat over PrimaDB bytes, and MoQ sync.
+- [packages/primadb-node/examples/README.md](packages/primadb-node/examples/README.md): package-local native Node demos for durable local storage, relay-signaled mesh peers, full-node anchor deployments, and MoQ sync.
+- [packages/primadb-python/examples/README.md](packages/primadb-python/examples/README.md): package-local native Python demos for durable local storage, relay-signaled mesh peers, full-node anchor deployments, and MoQ sync.
+- [examples/browser-threaded-query/README.md](examples/browser-threaded-query/README.md): Opt-in `wasm-threads` browser demo that initializes `initThreadPool(...)` and exercises the Rayon-backed query path under COOP/COEP.
+- [examples/browser-threaded-mesh-notes/README.md](examples/browser-threaded-mesh-notes/README.md): Opt-in `wasm-threads` browser P2P demo using `WebRtcMesh`, relay-backed signaling by default, COOP/COEP serving, configurable ICE servers, and a threaded shared-query workload over WebRTC-synced notes.
+- [examples/ws_relay_server.rs](examples/ws_relay_server.rs): DAM-style Rust WebSocket relay with peer presence, targeted routing, and signaling, runnable with `cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010`.
+- [examples/full_node.rs](examples/full_node.rs): Rust full-node anchor example that runs the relay and a colocated mesh peer together, runnable with `cargo run --features native-webrtc --example full_node -- --relay-bind 127.0.0.1:9010 --room demo`.
+- [examples/native_relay_client.rs](examples/native_relay_client.rs): Native relay client, runnable with `cargo run --features native-websocket --example native_relay_client -- ws://127.0.0.1:9010`.
+- [examples/native_relay_probe.rs](examples/native_relay_probe.rs): Native relay probe used by the browser/native and native/native relay smoke tests.
+- [examples/native_mesh_probe.rs](examples/native_mesh_probe.rs): Native WebRTC mesh probe interoperable with the browser relay-signaled mesh.
+- [examples/native_mesh_agent.rs](examples/native_mesh_agent.rs): Native mesh/storage agent used by the mixed-target end-to-end suite.
+- [examples/test-all-targets-mesh-e2e.sh](examples/test-all-targets-mesh-e2e.sh): Cross-target suite that builds and runs the default WASM demo, threaded WASM demo, npm browser app, native Node package, native Python package, and Rust native mesh together.
+- [examples/native_parallel_query.rs](examples/native_parallel_query.rs): Native Rayon verification example, runnable with `cargo run --example native_parallel_query`.
+- [examples/crypto_foundation.rs](examples/crypto_foundation.rs): Signing and encryption primitives, runnable with `cargo run --features crypto --example crypto_foundation`.
+- [examples/authenticated_sync.rs](examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
+- [examples/radisk_storage.rs](examples/radisk_storage.rs): Incremental segment-backed native storage demo through the current `use_radisk_storage(...)` entrypoint, runnable with `cargo run --example radisk_storage`.
+- [examples/gun_compat.rs](examples/gun_compat.rs): Gun-compatible API demo, runnable with `cargo run --example gun_compat`.
 
 ## Running Examples
 
 Standard browser build:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm.sh
 ```
 
 Threaded browser build:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm-threads.sh
 ```
 
 Vite browser app consuming the local package:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
+cd /path/to/primadb/examples/browser-package-notes-vite
 pnpm install
 pnpm run dev
 ```
@@ -567,7 +567,7 @@ http://127.0.0.1:4182/?room=demo-room&signal=relay&relay=ws://127.0.0.1:9010
 Local-only browser board:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-notes/build.sh
 ./examples/browser-notes/serve.sh
 ```
@@ -581,7 +581,7 @@ http://127.0.0.1:4173/examples/browser-notes/
 Relay-backed browser board:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-relay-notes/build.sh
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
@@ -589,7 +589,7 @@ cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:901
 In a second terminal:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-relay-notes/serve.sh
 ```
 
@@ -602,7 +602,7 @@ http://127.0.0.1:4173/examples/browser-relay-notes/
 Default relay-signaled WebRTC mesh example:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-mesh-notes/build.sh
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
@@ -610,7 +610,7 @@ cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:901
 In a second terminal:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-mesh-notes/serve.sh
 ```
 
@@ -623,7 +623,7 @@ http://127.0.0.1:4173/examples/browser-mesh-notes/
 Gun-style relay example:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-gun-notes/build.sh
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
@@ -631,7 +631,7 @@ cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:901
 In a second terminal:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-gun-notes/serve.sh
 ```
 
@@ -644,7 +644,7 @@ http://127.0.0.1:4173/examples/browser-gun-notes/
 Threaded relay-signaled WebRTC mesh example:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-threaded-mesh-notes/build.sh
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
@@ -652,7 +652,7 @@ cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:901
 In a second terminal:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-threaded-mesh-notes/serve.sh
 ```
 
@@ -665,21 +665,21 @@ http://127.0.0.1:4175/examples/browser-threaded-mesh-notes/
 Cross-target mesh and storage suite:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/test-all-targets-mesh-e2e.sh
 ```
 
 For faster reruns while iterating on the harness itself:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 PRIMADB_E2E_SKIP_BUILD=1 bash examples/test-all-targets-mesh-e2e.sh
 ```
 
 Browser smoke tests:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-segment-notes/test-live-sync.sh
 bash examples/browser-relay-notes/test-browser-native-smoke.sh
 bash examples/browser-mesh-notes/test-two-page-smoke.sh
@@ -695,7 +695,7 @@ bash examples/test-native-mesh-smoke.sh
 Package browser smoke:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
+cd /path/to/primadb/examples/browser-package-notes-vite
 pnpm run smoke
 ```
 

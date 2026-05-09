@@ -5,7 +5,7 @@ This browser-only regression page verifies that package OPFS segment persistence
 Run it directly:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm run smoke:opfs
 ```
 

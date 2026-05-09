@@ -3,11 +3,13 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-const ROOT = process.env.PRIMADB_ROOT ?? "/home/bitnom/Code/gunport/primadb";
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const ROOT = process.env.PRIMADB_ROOT ?? resolve(SCRIPT_DIR, "..");
 const require = createRequire(import.meta.url);
 
 const PORTS = {

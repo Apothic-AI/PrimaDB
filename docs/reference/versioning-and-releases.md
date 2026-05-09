@@ -15,7 +15,7 @@ PrimaDB uses lockstep versioning across:
 ## Version Sync Script
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 node ./scripts/version-sync.mjs check
 node ./scripts/version-sync.mjs sync
 node ./scripts/version-sync.mjs set 0.1.1

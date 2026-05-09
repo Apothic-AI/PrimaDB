@@ -19,14 +19,14 @@ audio chunks do not accumulate forever.
 Start the local relay:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
 Run the package examples app:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm install
 pnpm run dev
 ```
@@ -63,6 +63,6 @@ http://127.0.0.1:4181/text-voice-chat/?signal=broadcast&capture=synthetic
 ## Smoke Test
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 bash ./text-voice-chat/test-smoke.sh
 ```

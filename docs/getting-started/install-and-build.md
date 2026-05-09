@@ -26,7 +26,7 @@ At the repo level, expect these tools:
 ## Core Rust Build
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 cargo test --features "crypto native-websocket native-webrtc"
 ```
 
@@ -35,7 +35,7 @@ That covers the current richest native feature set.
 ## Default Browser WASM Build
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm.sh
 ```
 
@@ -44,7 +44,7 @@ This is the stable browser path. It does not require the threaded WebAssembly to
 ## Threaded Browser WASM Build
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm-threads.sh
 ```
 
@@ -59,7 +59,7 @@ Use this only when you want the opt-in `wasm-threads` build. It has stricter req
 ## TypeScript Package
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb
+cd /path/to/primadb/packages/primadb
 pnpm install
 pnpm run build
 ```
@@ -69,7 +69,7 @@ This packages the browser WASM build into a browser-first npm surface.
 ## Native Node Package
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+cd /path/to/primadb/packages/primadb-node
 pnpm install
 pnpm run build
 ```
@@ -79,7 +79,7 @@ This builds the native addon-backed Node surface.
 ## Native Python Package
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+cd /path/to/primadb/packages/primadb-python
 uv sync
 ```
 
@@ -92,7 +92,7 @@ but all authored docs live in the repo’s top-level [docs/](https://github.com/
 directory.
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/website
+cd /path/to/primadb/website
 pnpm install
 pnpm run start
 ```

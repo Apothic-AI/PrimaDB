@@ -14,7 +14,7 @@ It demonstrates:
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm install
 pnpm run dev
 ```

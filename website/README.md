@@ -9,7 +9,7 @@ only the site shell, theme config, and pnpm-managed toolchain.
 ## Local Development
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/website
+cd /path/to/primadb/website
 pnpm install
 pnpm run generate:api
 pnpm run start
@@ -18,7 +18,7 @@ pnpm run start
 ## Production Build
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/website
+cd /path/to/primadb/website
 pnpm run generate:api
 pnpm run build
 ```
@@ -35,7 +35,7 @@ Current public URL:
 Deploy it with:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/website
+cd /path/to/primadb/website
 pnpm install
 pnpm run deploy
 ```

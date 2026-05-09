@@ -46,7 +46,7 @@ cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:901
 Run the browser/native relay smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-relay-notes/test-browser-native-smoke.sh
 ```
 
@@ -55,6 +55,6 @@ That script proves native -> browser live relay sync against the real relay serv
 Run the browser relay watch smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-relay-notes/test-watch-smoke.sh
 ```

@@ -1,7 +1,7 @@
 # `primadb-python`
 
 `primadb-python` is a native Python package for Primadb. Like
-[packages/primadb-node](/home/bitnom/Code/gunport/primadb/packages/primadb-node), it wraps the
+[packages/primadb-node](../primadb-node), it wraps the
 native Rust runtime directly instead of going through the browser WASM layer.
 
 Current surface:
@@ -27,17 +27,17 @@ Current surface:
 
 ## Package Examples
 
-Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples):
+Runnable package-local examples live under [examples/](examples):
 
-- [examples/local_notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/local_notes/README.md)
-- [examples/mesh_peer/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/mesh_peer/README.md)
-- [examples/full_node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/full_node/README.md)
-- [examples/moq_sync/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/moq_sync/README.md)
+- [examples/local_notes/README.md](examples/local_notes/README.md)
+- [examples/mesh_peer/README.md](examples/mesh_peer/README.md)
+- [examples/full_node/README.md](examples/full_node/README.md)
+- [examples/moq_sync/README.md](examples/moq_sync/README.md)
 
 ## Install
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+cd /path/to/primadb/packages/primadb-python
 uv sync
 ```
 
@@ -159,7 +159,7 @@ db.close_durable_storage()
 ## Smoke Tests
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python
+cd /path/to/primadb/packages/primadb-python
 uv sync
 uv run python scripts/smoke_core.py
 uv run python scripts/smoke_hooks.py

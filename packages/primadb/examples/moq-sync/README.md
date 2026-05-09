@@ -10,7 +10,7 @@ and WebSocket fallback selection.
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm install
 pnpm run dev
 ```
@@ -24,6 +24,6 @@ http://127.0.0.1:4181/moq-sync/
 ## Smoke Test
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm run smoke:moq
 ```

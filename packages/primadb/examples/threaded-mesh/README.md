@@ -15,7 +15,7 @@ By default it tries to connect to a local relay at `ws://127.0.0.1:9010`. Start 
 relay before opening the page:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
@@ -28,7 +28,7 @@ retries the relay connection on the configured interval in the background.
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 pnpm install
 pnpm run dev
 ```
@@ -74,7 +74,7 @@ The example includes a browser smoke that verifies the threaded build boots, ope
 segment persistence successfully, and reloads persisted cards:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb/examples
+cd /path/to/primadb/packages/primadb/examples
 bash ./threaded-mesh/test-smoke.sh
 ```
 

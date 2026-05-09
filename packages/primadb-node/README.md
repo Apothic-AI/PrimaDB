@@ -1,7 +1,7 @@
 # `primadb-node`
 
 `primadb-node` is a native Node.js package for Primadb. Unlike the browser package in
-[packages/primadb](/home/bitnom/Code/gunport/primadb/packages/primadb), this package wraps the
+[packages/primadb](../primadb), this package wraps the
 native Rust runtime directly through a Node addon.
 
 Current surface:
@@ -27,17 +27,17 @@ Current surface:
 
 ## Package Examples
 
-Runnable package-local examples live under [examples/](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples):
+Runnable package-local examples live under [examples/](examples):
 
-- [examples/local-notes/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/local-notes/README.md)
-- [examples/mesh-peer/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/mesh-peer/README.md)
-- [examples/full-node/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/full-node/README.md)
-- [examples/moq-sync/README.md](/home/bitnom/Code/gunport/primadb/packages/primadb-node/examples/moq-sync/README.md)
+- [examples/local-notes/README.md](examples/local-notes/README.md)
+- [examples/mesh-peer/README.md](examples/mesh-peer/README.md)
+- [examples/full-node/README.md](examples/full-node/README.md)
+- [examples/moq-sync/README.md](examples/moq-sync/README.md)
 
 ## Build
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+cd /path/to/primadb/packages/primadb-node
 pnpm install
 pnpm run build
 ```

@@ -15,7 +15,7 @@ The default build is the compatibility-first path. The threaded build is the per
 Build:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm.sh
 ```
 
@@ -50,7 +50,7 @@ await db.openDurableStorage({
 Build:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm-threads.sh
 ```
 

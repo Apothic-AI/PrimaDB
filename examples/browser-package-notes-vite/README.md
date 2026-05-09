@@ -1,7 +1,7 @@
 # Browser Package Notes Vite Example
 
 `browser-package-notes-vite` is a real browser app that consumes the in-repo package in
-[packages/primadb](/home/bitnom/Code/gunport/primadb/packages/primadb) through Vite instead of
+[packages/primadb](../../packages/primadb) through Vite instead of
 importing raw generated WASM bindings directly.
 
 It demonstrates:
@@ -15,7 +15,7 @@ It demonstrates:
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
+cd /path/to/primadb/examples/browser-package-notes-vite
 pnpm install
 pnpm run dev
 ```
@@ -35,7 +35,7 @@ http://127.0.0.1:4182/?room=demo-room&signal=relay&relay=ws://127.0.0.1:9010
 ## Smoke Test
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/examples/browser-package-notes-vite
+cd /path/to/primadb/examples/browser-package-notes-vite
 pnpm run smoke
 ```
 

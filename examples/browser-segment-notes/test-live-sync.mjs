@@ -4,16 +4,18 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import process from "node:process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 const ROOT_URL =
   process.env.PRIMADB_SEGMENT_NOTES_URL ??
   "http://127.0.0.1:4176/examples/browser-segment-notes/";
 const SERVER_PORT = Number(process.env.PRIMADB_SEGMENT_NOTES_PORT ?? "4176");
 const SERVER_ROOT =
-  process.env.PRIMADB_SEGMENT_NOTES_ROOT ??
-  "/home/bitnom/Code/gunport/primadb";
+  process.env.PRIMADB_SEGMENT_NOTES_ROOT ?? resolve(SCRIPT_DIR, "../..");
 const CHROME_PATH =
   process.env.PLAYWRIGHT_BROWSER_PATH ?? "/usr/bin/google-chrome-stable";
 

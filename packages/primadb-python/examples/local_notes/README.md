@@ -6,7 +6,7 @@ a package-local data directory.
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/local_notes
+cd /path/to/primadb/packages/primadb-python/examples/local_notes
 uv sync
 uv run python main.py
 ```

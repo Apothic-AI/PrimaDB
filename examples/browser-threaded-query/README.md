@@ -14,21 +14,21 @@ threaded WASM needs:
 Build:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm-threads.sh --out-dir examples/browser-threaded-query/pkg
 ```
 
 or use the example wrapper:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-threaded-query/build.sh
 ```
 
 Serve:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-threaded-query/serve.sh
 ```
 

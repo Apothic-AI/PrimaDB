@@ -2,8 +2,11 @@
 
 import { spawn } from "node:child_process";
 import process from "node:process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = process.env.PRIMADB_ROOT ?? "/home/bitnom/Code/gunport/primadb";
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const ROOT = process.env.PRIMADB_ROOT ?? resolve(SCRIPT_DIR, "..");
 const RELAY_ADDR = process.env.PRIMADB_NATIVE_MESH_RELAY_ADDR ?? "127.0.0.1:9010";
 const RELAY_URL = process.env.PRIMADB_NATIVE_MESH_RELAY_URL ?? `ws://${RELAY_ADDR}`;
 const RELAY_PORT = Number(RELAY_ADDR.split(":").at(-1) ?? "9010");

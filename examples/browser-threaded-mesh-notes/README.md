@@ -17,28 +17,28 @@ It demonstrates:
 1. Build the threaded WASM package:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./build-wasm-threads.sh --out-dir examples/browser-threaded-mesh-notes/pkg
 ```
 
 or use the example wrapper:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-threaded-mesh-notes/build.sh
 ```
 
 2. Serve the repo root with COOP/COEP headers:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 ./examples/browser-threaded-mesh-notes/serve.sh
 ```
 
 3. Start the relay:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 cargo run --features native-websocket --example ws_relay_server -- 127.0.0.1:9010
 ```
 
@@ -57,7 +57,7 @@ By default the demo uses relay signaling at `ws://<current-host>:9010`. Append
 Run the two-page threaded P2P smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-threaded-mesh-notes/test-two-page-smoke.sh
 ```
 
@@ -69,7 +69,7 @@ reload, seeds the shared load, and verifies the parallel query output.
 Run the cross-browser smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-threaded-mesh-notes/test-cross-browser-smoke.sh
 ```
 
@@ -79,7 +79,7 @@ cross-browser replication over WebRTC.
 Run the threaded browser/native mixed-host smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-threaded-mesh-notes/test-browser-native-smoke.sh
 ```
 

@@ -1,7 +1,7 @@
 # browser-gun-notes
 
 `browser-gun-notes` is the Gun-compatible Primadb browser demo. It runs the
-browser runtime from [`js/primadb-gun.js`](/home/bitnom/Code/gunport/primadb/js/primadb-gun.js)
+browser runtime from [`js/primadb-gun.js`](../../js/primadb-gun.js)
 on top of the Primadb WASM bindings and exercises:
 
 - `gun.user().create(...)`, `auth(...)`, `recall(...)`, and `leave()`
@@ -46,7 +46,7 @@ on top of the Primadb WASM bindings and exercises:
 Run the Gun runtime browser smoke test:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb
+cd /path/to/primadb
 bash examples/browser-gun-notes/test-runtime-smoke.sh
 ```
 

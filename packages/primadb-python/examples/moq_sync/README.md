@@ -11,7 +11,7 @@ SDK-level PrimaDB MoQ API and sync-envelope mapping.
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/moq_sync
+cd /path/to/primadb/packages/primadb-python/examples/moq_sync
 uv sync
 uv run python main.py
 ```

@@ -7,7 +7,7 @@ require a public MoQ relay.
 ## Run
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+cd /path/to/primadb/packages/primadb-node
 pnpm install
 pnpm run build
 node ./examples/moq-sync/index.mjs

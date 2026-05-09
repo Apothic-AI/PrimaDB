@@ -9,7 +9,7 @@ at its relay URL.
 ## Build The Package
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+cd /path/to/primadb/packages/primadb-node
 pnpm install
 pnpm run build
 ```
@@ -17,7 +17,7 @@ pnpm run build
 ## Run One Full Node
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-node
+cd /path/to/primadb/packages/primadb-node
 node ./examples/full-node/index.mjs --room package-full-node --name node-anchor --message "hello from the anchor node"
 ```
 

@@ -9,7 +9,7 @@ at its relay URL.
 ## Run It
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/full_node
+cd /path/to/primadb/packages/primadb-python/examples/full_node
 uv sync
 uv run python main.py --room package-full-node --name py-anchor --message "hello from the anchor node"
 ```
@@ -50,7 +50,7 @@ uv run python main.py \
 For example, from the Python mesh peer example:
 
 ```bash
-cd /home/bitnom/Code/gunport/primadb/packages/primadb-python/examples/mesh_peer
+cd /path/to/primadb/packages/primadb-python/examples/mesh_peer
 uv sync
 uv run python main.py --room package-full-node --relay ws://127.0.0.1:9010 --name py-leaf
 ```

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/bitnom/Code/gunport/primadb"
-EXAMPLE_DIR="$ROOT/packages/primadb-python/examples/mesh_peer"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${PRIMADB_ROOT:-$(cd -- "$SCRIPT_DIR/../../../.." && pwd)}"
+EXAMPLE_DIR="${PRIMADB_PYTHON_MESH_PEER_EXAMPLE_DIR:-$SCRIPT_DIR}"
 PORT="${PRIMADB_TEST_RELAY_PORT:-9012}"
 RELAY_URL="ws://127.0.0.1:${PORT}"
 ROOM="offline-retry-${RANDOM}-${RANDOM}"
