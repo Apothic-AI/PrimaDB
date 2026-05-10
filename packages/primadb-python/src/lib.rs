@@ -12,6 +12,8 @@ use primadb::{
     ServeResultContext, ScriptExecutionOptions, Subscription as CoreSubscription,
     TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
     TraversalSpec, UserGrant,
+    VectorCollectionConfig, VectorSearchSpec,
+    VectorWatchSubscription as CoreVectorWatchSubscription,
     derive_password_key as core_derive_password_key, parse_request_hook_json,
     parse_result_hook_json, parse_void_hook_json,
 };
@@ -102,6 +104,7 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         | CoreRemoteResult::Query { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Records { result } => serde_json::to_value(result).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::VectorSearch { result } => serde_json::to_value(result).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Transaction { report } => serde_json::to_value(report).unwrap_or(JsonValue::Null),
@@ -115,6 +118,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Query { .. } => "query",
         CoreRemoteResult::Lex { .. } => "lex",
         CoreRemoteResult::Records { .. } => "records",
+        CoreRemoteResult::VectorSearch { .. } => "vector_search",
         CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
         CoreRemoteResult::Transaction { .. } => "transaction",
@@ -308,6 +312,11 @@ struct TraversalSubscription {
 #[pyclass(module = "primadb._native")]
 struct RecordWatchSubscription {
     inner: Arc<Mutex<Option<CoreRecordWatchSubscription>>>,
+}
+
+#[pyclass(module = "primadb._native")]
+struct VectorWatchSubscription {
+    inner: Arc<Mutex<Option<CoreVectorWatchSubscription>>>,
 }
 
 #[pyclass(module = "primadb._native")]
@@ -519,6 +528,72 @@ impl Primadb {
         let scan: RecordScan = from_py(scan)?;
         let subscription = self.inner.watch_records(scan).map_err(to_py_err)?;
         Ok(RecordWatchSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
+    }
+
+    fn create_vector_collection(
+        &self,
+        name: String,
+        config: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let config: VectorCollectionConfig = from_py(config)?;
+        self.inner
+            .create_vector_collection(name, config)
+            .map_err(to_py_err)
+    }
+
+    fn put_vector(
+        &self,
+        collection: String,
+        id: String,
+        vector: Vec<f32>,
+        metadata: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let metadata = metadata.map(from_py::<JsonValue>).transpose()?;
+        self.inner
+            .put_vector(collection, id, vector, metadata)
+            .map_err(to_py_err)
+    }
+
+    fn delete_vector(&self, collection: String, id: String) -> PyResult<()> {
+        self.inner
+            .delete_vector(collection, id)
+            .map_err(to_py_err)
+    }
+
+    fn get_vector(&self, py: Python<'_>, collection: String, id: String) -> PyResult<Py<PyAny>> {
+        to_py(py, self.inner.get_vector(collection, id).map_err(to_py_err)?)
+    }
+
+    fn search_vectors(
+        &self,
+        py: Python<'_>,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        to_py(
+            py,
+            self.inner
+                .search_vectors(collection, query, spec)
+                .map_err(to_py_err)?,
+        )
+    }
+
+    fn watch_vector_search(
+        &self,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<VectorWatchSubscription> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        let subscription = self
+            .inner
+            .watch_vector_search(collection, query, spec)
+            .map_err(to_py_err)?;
+        Ok(VectorWatchSubscription {
             inner: Arc::new(Mutex::new(Some(subscription))),
         })
     }
@@ -1008,6 +1083,64 @@ impl RecordWatchSubscription {
 }
 
 #[pymethods]
+impl VectorWatchSubscription {
+    fn next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("vector watch subscription"))?
+        };
+
+        let message = py.detach(|| runtime().block_on(subscription.recv()));
+        let response = match message {
+            Some(value) => {
+                self.inner.lock().unwrap().replace(subscription);
+                json!({
+                    "done": false,
+                    "value": value,
+                })
+            }
+            None => json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }),
+        };
+
+        to_py(py, response)
+    }
+
+    fn try_next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return to_py(
+                py,
+                json!({
+                    "done": true,
+                    "value": JsonValue::Null,
+                }),
+            );
+        };
+
+        let message = match subscription.try_recv() {
+            Some(value) => json!({
+                "done": false,
+                "value": value,
+            }),
+            None => json!({
+                "done": false,
+                "value": JsonValue::Null,
+            }),
+        };
+        to_py(py, message)
+    }
+
+    fn close(&self) {
+        let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[pymethods]
 impl RelayServer {
     #[staticmethod]
     fn listen(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<RelayServer> {
@@ -1257,6 +1390,27 @@ impl WebSocketSync {
         to_py(py, result.map_err(to_py_err)?)
     }
 
+    #[pyo3(signature = (collection, query, spec, policy=None))]
+    fn vector_search(
+        &self,
+        py: Python<'_>,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(sync.remote_vector_search_with_policy(collection, query, spec, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
     #[pyo3(signature = (id, policy=None))]
     fn node(
         &self,
@@ -1355,6 +1509,25 @@ impl WebSocketSync {
             guard.take().ok_or_else(|| closed_error("websocket sync"))?
         };
         let result = py.detach(|| runtime().block_on(sync.remote_records(peer_id, scan)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    fn remote_vector_search(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(sync.remote_vector_search(peer_id, collection, query, spec)));
         self.inner.lock().unwrap().replace(sync);
         to_py(py, result.map_err(to_py_err)?)
     }
@@ -1505,6 +1678,27 @@ impl WebSocketSync {
         })
     }
 
+    fn watch_remote_vector_search(
+        &self,
+        peer_id: String,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_vector_search(peer_id, collection, query, spec)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
     fn watch_remote_node(&self, peer_id: String, id: String) -> PyResult<RemoteWatch> {
         let watch = self
             .inner
@@ -1637,6 +1831,29 @@ impl WebSocketSync {
             .as_ref()
             .ok_or_else(|| closed_error("websocket sync"))?
             .watch_records_with_policy(scan, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (collection, query, spec, policy=None))]
+    fn watch_vector_search(
+        &self,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_vector_search_with_policy(collection, query, spec, policy)
             .map_err(to_py_err)?;
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(watch))),
@@ -1880,6 +2097,27 @@ impl WebRtcMesh {
         })
     }
 
+    fn watch_remote_vector_search(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(mesh.watch_vector_search(peer_id, collection, query, spec)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
     fn watch_remote_node(
         &self,
         py: Python<'_>,
@@ -2019,6 +2257,29 @@ impl WebRtcMesh {
         })
     }
 
+    #[pyo3(signature = (collection, query, spec, policy=None))]
+    fn watch_vector_search(
+        &self,
+        py: Python<'_>,
+        collection: String,
+        query: Vec<f32>,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let spec: VectorSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(mesh.watch_vector_search_with_policy(collection, query, spec, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
     #[pyo3(signature = (id, policy=None))]
     fn watch_node(
         &self,
@@ -2120,6 +2381,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Subscription>()?;
     module.add_class::<TraversalSubscription>()?;
     module.add_class::<RecordWatchSubscription>()?;
+    module.add_class::<VectorWatchSubscription>()?;
     module.add_class::<RelayServer>()?;
     module.add_class::<RemoteWatch>()?;
     module.add_class::<WebSocketSync>()?;

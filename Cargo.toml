@@ -33,6 +33,9 @@ wasm-threads = [
     "dep:rayon",
     "dep:wasm-bindgen-rayon",
 ]
+vector-edgevec = [
+    "dep:edgevec",
+]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -47,6 +50,7 @@ base64ct = { version = "1.8", features = ["alloc"] }
 blake3 = "1.8"
 chacha20poly1305 = { version = "0.10", optional = true }
 ed25519-dalek = { version = "2.2", features = ["rand_core"], optional = true }
+edgevec = { path = "../edgevec", default-features = false, optional = true }
 futures-util = { version = "0.3", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }
 hkdf = { version = "0.12", optional = true }
@@ -60,6 +64,7 @@ x25519-dalek = { version = "2.0", features = ["static_secrets"], optional = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fs2 = "0.4"
+memmap2 = "0.9"
 rayon = "1.11"
 
 [dev-dependencies]

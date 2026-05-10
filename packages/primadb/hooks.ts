@@ -1,5 +1,5 @@
 import type { Primadb } from "./vendor/default/primadb.js";
-import type { RecordScan, RecordScanResult } from "./types.js";
+import type { RecordScan, RecordScanResult, VectorSearchResult, VectorSearchSpec } from "./types.js";
 
 export interface PresenceIdentity {
   publicKey: string;
@@ -55,6 +55,7 @@ export type PullRequestKind =
   | { kind: "query"; path: { anchor: string; segments?: string[] }; spec: Record<string, unknown> }
   | { kind: "lex"; path: { anchor: string; segments?: string[] }; spec: Record<string, unknown> }
   | { kind: "records"; scan: RecordScan }
+  | { kind: "vector_search"; collection: string; query: number[]; spec: VectorSearchSpec }
   | { kind: "node"; id: string }
   | { kind: "snapshot"; root?: string | null };
 
@@ -64,6 +65,7 @@ export type RemoteResult =
   | { kind: "query"; entries: unknown[] }
   | { kind: "lex"; entries: unknown[] }
   | { kind: "records"; result: RecordScanResult }
+  | { kind: "vector_search"; result: VectorSearchResult }
   | { kind: "node"; node: unknown | null }
   | { kind: "snapshot"; snapshot: unknown };
 

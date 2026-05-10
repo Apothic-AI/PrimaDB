@@ -40,6 +40,17 @@ use crate::traversal::{
     TraversalSpec, TraversalStrategy,
 };
 use crate::value::{FieldState, FieldValue, NodeId, NodeState, SetState};
+use crate::vector::{
+    VectorBackendKind, VectorCacheEntry, VectorCollectionCache, VectorCollectionConfig,
+    VectorEntry, VectorIndexStats, VectorItemMeta, VectorManagerState, VectorMetric,
+    VectorSearchResult, VectorSearchSpec, VectorStalePolicy, build_vector_ann,
+    build_vector_cache_files, checksum_bytes, chunk_from_record, collection_cache_from_cache_files,
+    collection_config_from_record, encode_f32_le, encode_vector_chunk, item_meta_from_record,
+    records_source_hash, search_vector_collection, validate_collection_config, validate_vector,
+    vector_collection_from_record_key, vector_collection_items_prefix, vector_collection_meta_key,
+    vector_item_chunk_key, vector_item_chunks_prefix, vector_item_id_from_record_key,
+    vector_item_meta_key,
+};
 #[cfg(feature = "crypto")]
 use crate::{
     Identity, PublicIdentity, SecretBoxKey, SecureSyncFrame, SecurityState, StoredSnapshot,
@@ -110,6 +121,10 @@ pub struct TraversalSubscription {
 
 pub struct RecordWatchSubscription {
     inner: Arc<RecordWatchSubscriptionInner>,
+}
+
+pub struct VectorWatchSubscription {
+    inner: Arc<VectorWatchSubscriptionInner>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +198,12 @@ struct RecordWatchSubscriptionInner {
     receiver: Receiver<RecordScanResult>,
 }
 
+struct VectorWatchSubscriptionInner {
+    id: u64,
+    db: Weak<Mutex<Inner>>,
+    receiver: Receiver<VectorSearchResult>,
+}
+
 struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
@@ -191,10 +212,12 @@ struct Inner {
     subscriptions: std::collections::BTreeMap<u64, Watcher>,
     traversal_subscriptions: std::collections::BTreeMap<u64, TraversalWatcher>,
     record_subscriptions: std::collections::BTreeMap<u64, RecordWatcher>,
+    vector_subscriptions: std::collections::BTreeMap<u64, VectorWatcher>,
     change_subscriptions: std::collections::BTreeMap<u64, ChangeWatcher>,
     next_subscription_id: u64,
     next_traversal_subscription_id: u64,
     next_record_subscription_id: u64,
+    next_vector_subscription_id: u64,
     next_change_subscription_id: u64,
     change_revision: u64,
     persistence: Option<PersistenceTarget>,
@@ -214,6 +237,9 @@ struct Inner {
     next_storage_tx_id: u64,
     limits: PrimadbLimits,
     network_hooks: Option<Arc<dyn NetworkHooks>>,
+    vector_collections: BTreeMap<String, VectorCollectionCache>,
+    #[cfg(not(target_arch = "wasm32"))]
+    vector_cache_root: Option<std::path::PathBuf>,
     #[cfg(feature = "crypto")]
     security: SecurityState,
 }
@@ -291,6 +317,15 @@ struct RecordWatcher {
     scan: RecordScan,
     last_hash: Option<String>,
     sender: Sender<RecordScanResult>,
+}
+
+#[derive(Debug, Clone)]
+struct VectorWatcher {
+    collection: String,
+    query: Vec<f32>,
+    spec: VectorSearchSpec,
+    last_hash: Option<String>,
+    sender: Sender<VectorSearchResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -457,10 +492,12 @@ impl Primadb {
                 subscriptions: Default::default(),
                 traversal_subscriptions: Default::default(),
                 record_subscriptions: Default::default(),
+                vector_subscriptions: Default::default(),
                 change_subscriptions: Default::default(),
                 next_subscription_id: 0,
                 next_traversal_subscription_id: 0,
                 next_record_subscription_id: 0,
+                next_vector_subscription_id: 0,
                 next_change_subscription_id: 0,
                 change_revision: 0,
                 persistence: None,
@@ -479,6 +516,9 @@ impl Primadb {
                 next_storage_tx_id: 1,
                 limits: PrimadbLimits::default(),
                 network_hooks: None,
+                vector_collections: BTreeMap::new(),
+                #[cfg(not(target_arch = "wasm32"))]
+                vector_cache_root: None,
                 #[cfg(feature = "crypto")]
                 security: SecurityState::default(),
             })),
@@ -487,6 +527,13 @@ impl Primadb {
 
     pub fn replica_id(&self) -> String {
         self.inner.lock().unwrap().clock.actor().to_owned()
+    }
+
+    fn next_vector_write_id(&self) -> String {
+        let mut inner = self.inner.lock().unwrap();
+        let actor = inner.clock.actor().to_owned();
+        let op_id = inner.clock.next_op_id("vector-write");
+        format!("{actor}:{op_id}")
     }
 
     pub fn root(&self, node: impl Into<String>) -> Chain {
@@ -628,6 +675,278 @@ impl Primadb {
         let reference = self.store_blob(data.as_ref(), media_type)?;
         self.put_record(key, RecordValue::Blob(reference.clone()))?;
         Ok(reference)
+    }
+
+    pub fn create_vector_collection(
+        &self,
+        name: impl AsRef<str>,
+        mut config: VectorCollectionConfig,
+    ) -> Result<()> {
+        if config.chunking.chunk_bytes == 0 {
+            config.chunking = Default::default();
+        }
+        validate_collection_config(&config)?;
+        self.put_record_value(vector_collection_meta_key(name.as_ref()), config)
+    }
+
+    pub fn vector_collection_config(&self, collection: &str) -> Result<VectorCollectionConfig> {
+        let Some(entry) = self.get_record(&vector_collection_meta_key(collection))? else {
+            return Err(PrimadbError::Message(format!(
+                "vector collection `{collection}` does not exist"
+            )));
+        };
+        collection_config_from_record(&entry)
+    }
+
+    pub fn put_vector(
+        &self,
+        collection: impl AsRef<str>,
+        id: impl AsRef<str>,
+        vector: impl AsRef<[f32]>,
+        metadata: Option<JsonValue>,
+    ) -> Result<()> {
+        let collection = collection.as_ref();
+        let id = id.as_ref();
+        let config = self.vector_collection_config(collection)?;
+        let vector = vector.as_ref();
+        validate_vector(vector, config.dim)?;
+
+        let write_id = self.next_vector_write_id();
+        let bytes = encode_f32_le(vector);
+        let checksum = checksum_bytes(&bytes);
+        let chunk_size = config.chunking.chunk_bytes.max(1);
+        let chunk_count = bytes.len().div_ceil(chunk_size).max(1);
+        let meta = VectorItemMeta {
+            id: id.to_owned(),
+            write_id: write_id.clone(),
+            dim: config.dim,
+            encoding: crate::vector::VECTOR_ENCODING_F32_LE.to_owned(),
+            byte_length: bytes.len(),
+            checksum: checksum.clone(),
+            chunk_count,
+            metadata,
+            deleted: false,
+            updated_at: Some(now_millis().to_string()),
+        };
+
+        let mut mutations = Vec::with_capacity(chunk_count + 2);
+        mutations.push(RecordMutation::DeleteRange {
+            scan: RecordScan {
+                prefix: Some(vector_item_chunks_prefix(collection, id)),
+                ..RecordScan::default()
+            },
+        });
+        mutations.push(RecordMutation::Put {
+            key: vector_item_meta_key(collection, id),
+            value: RecordValue::Json(serde_json::to_value(meta)?),
+        });
+        for (chunk_index, chunk) in bytes.chunks(chunk_size).enumerate() {
+            let header = crate::VectorChunkHeader {
+                write_id: write_id.clone(),
+                chunk_index,
+                chunk_count,
+                byte_offset: chunk_index * chunk_size,
+                checksum: checksum_bytes(chunk),
+            };
+            mutations.push(RecordMutation::Put {
+                key: vector_item_chunk_key(collection, id, chunk_index),
+                value: RecordValue::Bytes(encode_vector_chunk(&header, chunk)?),
+            });
+        }
+
+        self.apply_record_batch(RecordBatch {
+            preconditions: Vec::new(),
+            mutations,
+        })?;
+        Ok(())
+    }
+
+    pub fn delete_vector(&self, collection: impl AsRef<str>, id: impl AsRef<str>) -> Result<()> {
+        let collection = collection.as_ref();
+        let id = id.as_ref();
+        let config = self.vector_collection_config(collection)?;
+        let write_id = self.next_vector_write_id();
+        let meta = VectorItemMeta {
+            id: id.to_owned(),
+            write_id,
+            dim: config.dim,
+            encoding: crate::vector::VECTOR_ENCODING_F32_LE.to_owned(),
+            byte_length: 0,
+            checksum: checksum_bytes(&[]),
+            chunk_count: 0,
+            metadata: None,
+            deleted: true,
+            updated_at: Some(now_millis().to_string()),
+        };
+        self.apply_record_batch(RecordBatch {
+            preconditions: Vec::new(),
+            mutations: vec![
+                RecordMutation::Put {
+                    key: vector_item_meta_key(collection, id),
+                    value: RecordValue::Json(serde_json::to_value(meta)?),
+                },
+                RecordMutation::DeleteRange {
+                    scan: RecordScan {
+                        prefix: Some(vector_item_chunks_prefix(collection, id)),
+                        ..RecordScan::default()
+                    },
+                },
+            ],
+        })?;
+        Ok(())
+    }
+
+    pub fn get_vector(
+        &self,
+        collection: impl AsRef<str>,
+        id: impl AsRef<str>,
+    ) -> Result<Option<VectorEntry>> {
+        let collection = collection.as_ref();
+        let id = id.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        Ok(inner
+            .vector_collections
+            .get(collection)
+            .and_then(|cache| cache.entries.get(id))
+            .map(|entry| VectorEntry {
+                id: id.to_owned(),
+                vector: entry.vector.clone(),
+                metadata: entry.metadata.clone(),
+                write_id: entry.write_id.clone(),
+                checksum: entry.checksum.clone(),
+            }))
+    }
+
+    pub fn search_vectors(
+        &self,
+        collection: impl AsRef<str>,
+        query: impl AsRef<[f32]>,
+        spec: VectorSearchSpec,
+    ) -> Result<VectorSearchResult> {
+        let collection = collection.as_ref();
+        let query = query.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        let cache = inner.vector_collections.get(collection).ok_or_else(|| {
+            PrimadbError::Message(format!("vector collection `{collection}` is not loaded"))
+        })?;
+        if spec.stale_policy == VectorStalePolicy::Error && cache.state != VectorManagerState::Ready
+        {
+            return Err(PrimadbError::Message(format!(
+                "vector collection `{collection}` is {:?}",
+                cache.state
+            )));
+        }
+        search_vector_collection(cache, query, &spec)
+    }
+
+    pub fn watch_vector_search(
+        &self,
+        collection: impl Into<String>,
+        query: impl AsRef<[f32]>,
+        spec: VectorSearchSpec,
+    ) -> Result<VectorWatchSubscription> {
+        self.subscribe_to_vector_search(collection.into(), query.as_ref().to_vec(), spec)
+    }
+
+    pub fn vector_index_stats(&self, collection: impl AsRef<str>) -> Result<VectorIndexStats> {
+        let collection = collection.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        inner
+            .vector_collections
+            .get(collection)
+            .map(VectorCollectionCache::stats)
+            .ok_or_else(|| {
+                PrimadbError::Message(format!("vector collection `{collection}` is not loaded"))
+            })
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn export_vector_cache_files(
+        &self,
+        collection: impl AsRef<str>,
+    ) -> Result<crate::VectorCacheFiles> {
+        let collection = collection.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        let cache = inner.vector_collections.get(collection).ok_or_else(|| {
+            PrimadbError::Message(format!("vector collection `{collection}` is not loaded"))
+        })?;
+        build_vector_cache_files(collection, cache, now_millis().to_string())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn import_vector_cache_files(
+        &self,
+        collection: impl AsRef<str>,
+        files: crate::VectorCacheFiles,
+    ) -> Result<()> {
+        let collection = collection.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        let (config, source_hash) =
+            vector_collection_config_and_source_hash_locked(&mut inner, collection)?;
+        if files.manifest.collection != collection
+            || files.manifest.record_prefix != vector_collection_items_prefix(collection)
+        {
+            return Err(PrimadbError::Message(
+                "vector cache manifest belongs to another collection".to_owned(),
+            ));
+        }
+        let cache = collection_cache_from_cache_files(config, files, &source_hash)?;
+        inner
+            .vector_collections
+            .insert(collection.to_owned(), cache);
+        Ok(())
+    }
+
+    pub fn vector_presence_capabilities(&self) -> Vec<String> {
+        let mut capabilities = vec![
+            "vector_exact".to_owned(),
+            "vector_metric:cosine".to_owned(),
+            "vector_metric:l2".to_owned(),
+            "vector_metric:dot".to_owned(),
+        ];
+        #[cfg(feature = "vector-edgevec")]
+        capabilities.push("vector_ann:edgevec".to_owned());
+
+        let mut inner = self.inner.lock().unwrap();
+        let scan = RecordScan {
+            prefix: Some(format!("{}/", crate::vector::VECTOR_RECORD_PREFIX)),
+            ..RecordScan::default()
+        };
+        let Ok(entries) = collect_record_entries_for_scan_locked(&mut inner, &scan) else {
+            return capabilities;
+        };
+        for entry in entries {
+            if !entry.key.ends_with("/meta") || entry.key.contains("/items/") {
+                continue;
+            }
+            let Some(collection) = vector_collection_from_record_key(&entry.key) else {
+                continue;
+            };
+            let Ok(config) = collection_config_from_record(&entry) else {
+                continue;
+            };
+            let state = inner
+                .vector_collections
+                .get(&collection)
+                .map(|cache| cache.state)
+                .unwrap_or(VectorManagerState::Ready);
+            let backend = config.backend.unwrap_or_default();
+            capabilities.push(format!(
+                "vector_collection:{}:{}:{}:{}:{}",
+                crate::encode_component(&collection),
+                config.dim,
+                vector_metric_capability_name(config.metric),
+                vector_manager_state_capability_name(state),
+                vector_backend_capability_name(backend)
+            ));
+        }
+        capabilities.sort();
+        capabilities.dedup();
+        capabilities
     }
 
     pub fn delete_record(&self, key: impl Into<String>) -> Result<()> {
@@ -1414,6 +1733,13 @@ impl Primadb {
             PullRequestKind::Records { scan } => Ok(RemoteResult::Records {
                 result: self.scan_records(scan.clone())?,
             }),
+            PullRequestKind::VectorSearch {
+                collection,
+                query,
+                spec,
+            } => Ok(RemoteResult::VectorSearch {
+                result: self.search_vectors(collection, query, spec.clone())?,
+            }),
             PullRequestKind::Node { id } => Ok(RemoteResult::Node {
                 node: self.node_state(id)?,
             }),
@@ -1683,7 +2009,9 @@ impl Primadb {
         directory: impl Into<std::path::PathBuf>,
         journal_retention: usize,
     ) -> Result<bool> {
-        let store = crate::SegmentFileStore::new(directory, journal_retention)?;
+        let directory = directory.into();
+        let store = crate::SegmentFileStore::new(directory.clone(), journal_retention)?;
+        self.inner.lock().unwrap().vector_cache_root = Some(directory.join("vector-cache"));
         self.attach_incremental_store(Arc::new(store))
     }
 
@@ -1716,6 +2044,7 @@ impl Primadb {
                 durability,
                 lock_mode,
             } => {
+                let cache_root = std::path::PathBuf::from(&directory).join("vector-cache");
                 let store = crate::SegmentFileStore::with_options(
                     directory,
                     journal_retention,
@@ -1725,6 +2054,7 @@ impl Primadb {
                     },
                 )?;
                 let loaded = self.attach_incremental_store(Arc::new(store))?;
+                self.inner.lock().unwrap().vector_cache_root = Some(cache_root);
                 Ok(DurableStorageBinding {
                     backend: "segment_file".to_owned(),
                     incremental: true,
@@ -2098,9 +2428,11 @@ impl Primadb {
         };
         self.persist_if_needed()?;
         if event.data_changed {
+            self.mark_vector_collections_dirty(&event);
             self.notify_subscribers(&event)?;
             self.notify_traversal_subscribers(&event)?;
             self.notify_record_subscribers(&event)?;
+            self.notify_vector_subscribers(&event)?;
         }
         self.notify_change_subscribers(event)?;
         Ok(())
@@ -2112,6 +2444,29 @@ impl Primadb {
             ChangeImpact::from_ops(&inner.unflushed_ops)
         };
         self.finalize_change(impact)
+    }
+
+    fn mark_vector_collections_dirty(&self, event: &ChangeEvent) {
+        if !event.full_refresh && !event.records_changed {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if event.full_refresh || event.touched_record_keys.is_empty() {
+            for cache in inner.vector_collections.values_mut() {
+                cache.dirty = true;
+                cache.state = VectorManagerState::Stale;
+            }
+            return;
+        }
+        for key in &event.touched_record_keys {
+            let Some(collection) = vector_collection_from_record_key(key) else {
+                continue;
+            };
+            if let Some(cache) = inner.vector_collections.get_mut(&collection) {
+                cache.dirty = true;
+                cache.state = VectorManagerState::Stale;
+            }
+        }
     }
 
     fn materialize(&self, anchor: &str, segments: &[String]) -> Result<Option<JsonValue>> {
@@ -2509,6 +2864,43 @@ impl Primadb {
         })
     }
 
+    fn subscribe_to_vector_search(
+        &self,
+        collection: String,
+        query: Vec<f32>,
+        spec: VectorSearchSpec,
+    ) -> Result<VectorWatchSubscription> {
+        let result = self.search_vectors(&collection, &query, spec.clone())?;
+        let last_hash = crate::stable_content_hash(&result);
+
+        let (sender, receiver) = async_channel::unbounded();
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_vector_subscription_id = inner.next_vector_subscription_id.saturating_add(1);
+            let id = inner.next_vector_subscription_id;
+            inner.vector_subscriptions.insert(
+                id,
+                VectorWatcher {
+                    collection,
+                    query,
+                    spec,
+                    last_hash,
+                    sender: sender.clone(),
+                },
+            );
+            id
+        };
+        let _ = sender.try_send(result);
+
+        Ok(VectorWatchSubscription {
+            inner: Arc::new(VectorWatchSubscriptionInner {
+                id,
+                db: Arc::downgrade(&self.inner),
+                receiver,
+            }),
+        })
+    }
+
     fn notify_subscribers(&self, event: &ChangeEvent) -> Result<()> {
         let watchers: Vec<(u64, Watcher)> = {
             let inner = self.inner.lock().unwrap();
@@ -2591,6 +2983,50 @@ impl Primadb {
             }
             for id in stale {
                 inner.record_subscriptions.remove(&id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn notify_vector_subscribers(&self, event: &ChangeEvent) -> Result<()> {
+        let watchers: Vec<(u64, VectorWatcher)> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .vector_subscriptions
+                .iter()
+                .map(|(id, watcher)| (*id, watcher.clone()))
+                .collect()
+        };
+
+        let mut stale = Vec::new();
+        let mut hash_updates = Vec::new();
+        for (id, watcher) in watchers {
+            if !vector_watch_change_overlaps(&watcher.collection, event) {
+                continue;
+            }
+            let result =
+                self.search_vectors(&watcher.collection, &watcher.query, watcher.spec.clone())?;
+            let result_hash = crate::stable_content_hash(&result);
+            if result_hash == watcher.last_hash {
+                continue;
+            }
+            if watcher.sender.try_send(result).is_err() {
+                stale.push(id);
+            } else {
+                hash_updates.push((id, result_hash));
+            }
+        }
+
+        if !stale.is_empty() || !hash_updates.is_empty() {
+            let mut inner = self.inner.lock().unwrap();
+            for (id, hash) in hash_updates {
+                if let Some(watcher) = inner.vector_subscriptions.get_mut(&id) {
+                    watcher.last_hash = hash;
+                }
+            }
+            for id in stale {
+                inner.vector_subscriptions.remove(&id);
             }
         }
 
@@ -2974,6 +3410,327 @@ fn record_scan_result(mut entries: Vec<RecordEntry>, scan: &RecordScan) -> Recor
         entries,
         next_cursor,
     }
+}
+
+#[derive(Debug, Default)]
+struct PendingVectorItem {
+    meta: Option<VectorItemMeta>,
+    chunks: BTreeMap<usize, (crate::VectorChunkHeader, Vec<u8>)>,
+    malformed: bool,
+}
+
+fn ensure_vector_collection_ready_locked(inner: &mut Inner, collection: &str) -> Result<()> {
+    let needs_rebuild = inner
+        .vector_collections
+        .get(collection)
+        .map(|cache| cache.dirty || cache.state != VectorManagerState::Ready)
+        .unwrap_or(true);
+    if !needs_rebuild {
+        return Ok(());
+    }
+    rebuild_vector_collection_locked(inner, collection)
+}
+
+fn rebuild_vector_collection_locked(inner: &mut Inner, collection: &str) -> Result<()> {
+    if let Some(cache) = inner.vector_collections.get_mut(collection) {
+        cache.state = VectorManagerState::Rebuilding;
+    }
+
+    let (config, record_entries, source_hash) =
+        vector_collection_records_and_source_hash_locked(inner, collection)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(root) = &inner.vector_cache_root
+        && let Ok(Some(cache)) =
+            read_native_vector_cache(root, collection, config.clone(), &source_hash)
+    {
+        inner
+            .vector_collections
+            .insert(collection.to_owned(), cache);
+        return Ok(());
+    }
+    let cache = assemble_vector_collection_cache(collection, config, &record_entries, source_hash);
+    inner
+        .vector_collections
+        .insert(collection.to_owned(), cache.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(root) = &inner.vector_cache_root {
+        let _ = write_native_vector_cache(root, collection, &cache);
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn vector_collection_config_and_source_hash_locked(
+    inner: &mut Inner,
+    collection: &str,
+) -> Result<(VectorCollectionConfig, String)> {
+    let (config, _records, source_hash) =
+        vector_collection_records_and_source_hash_locked(inner, collection)?;
+    Ok((config, source_hash))
+}
+
+fn vector_collection_records_and_source_hash_locked(
+    inner: &mut Inner,
+    collection: &str,
+) -> Result<(VectorCollectionConfig, Vec<RecordEntry>, String)> {
+    let meta_key = vector_collection_meta_key(collection);
+    let Some(meta_entry) = record_entry_from_inner(inner, &meta_key)? else {
+        inner.vector_collections.remove(collection);
+        return Err(PrimadbError::Message(format!(
+            "vector collection `{collection}` does not exist"
+        )));
+    };
+    let config = collection_config_from_record(&meta_entry)?;
+    let scan = RecordScan {
+        prefix: Some(vector_collection_items_prefix(collection)),
+        ..RecordScan::default()
+    };
+    let mut record_entries = collect_record_entries_for_scan_locked(inner, &scan)?;
+    record_entries.push(meta_entry);
+    let source_hash = records_source_hash(&record_entries);
+    Ok((config, record_entries, source_hash))
+}
+
+fn assemble_vector_collection_cache(
+    collection: &str,
+    config: VectorCollectionConfig,
+    records: &[RecordEntry],
+    source_hash: String,
+) -> VectorCollectionCache {
+    let mut items: BTreeMap<String, PendingVectorItem> = BTreeMap::new();
+    for entry in records {
+        let Some(item_id) = vector_item_id_from_record_key(collection, &entry.key) else {
+            continue;
+        };
+        let item = items.entry(item_id).or_default();
+        if entry.key.ends_with("/meta") {
+            match item_meta_from_record(entry) {
+                Ok(meta) => item.meta = Some(meta),
+                Err(_) => item.malformed = true,
+            }
+        } else if entry.key.contains("/chunks/") {
+            match chunk_from_record(entry) {
+                Ok((header, payload)) => {
+                    item.chunks.insert(header.chunk_index, (header, payload));
+                }
+                Err(_) => item.malformed = true,
+            }
+        }
+    }
+
+    let mut cache = VectorCollectionCache::empty(config.clone());
+    cache.source_hash = source_hash;
+    for (path_id, item) in items {
+        let Some(meta) = item.meta else {
+            cache.incomplete_count = cache.incomplete_count.saturating_add(1);
+            continue;
+        };
+        if item.malformed || meta.id != path_id {
+            cache.incomplete_count = cache.incomplete_count.saturating_add(1);
+            continue;
+        }
+        if meta.deleted {
+            cache.deleted_count = cache.deleted_count.saturating_add(1);
+            continue;
+        }
+        match assemble_complete_vector_item(&config, &meta, &item.chunks) {
+            Ok(entry) => {
+                cache.entries.insert(meta.id.clone(), entry);
+            }
+            Err(_) => {
+                cache.incomplete_count = cache.incomplete_count.saturating_add(1);
+            }
+        }
+    }
+    cache.state = VectorManagerState::Ready;
+    cache.dirty = false;
+    let _ = build_vector_ann(&mut cache);
+    cache
+}
+
+fn assemble_complete_vector_item(
+    config: &VectorCollectionConfig,
+    meta: &VectorItemMeta,
+    chunks: &BTreeMap<usize, (crate::VectorChunkHeader, Vec<u8>)>,
+) -> Result<VectorCacheEntry> {
+    if meta.dim != config.dim
+        || meta.encoding != crate::vector::VECTOR_ENCODING_F32_LE
+        || meta.chunk_count == 0
+        || meta.byte_length != config.dim.saturating_mul(4)
+    {
+        return Err(PrimadbError::Message(
+            "vector item metadata is incomplete".to_owned(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(meta.byte_length);
+    for index in 0..meta.chunk_count {
+        let Some((header, payload)) = chunks.get(&index) else {
+            return Err(PrimadbError::Message("missing vector chunk".to_owned()));
+        };
+        if header.write_id != meta.write_id
+            || header.chunk_index != index
+            || header.chunk_count != meta.chunk_count
+            || header.byte_offset != bytes.len()
+            || header.checksum != checksum_bytes(payload)
+        {
+            return Err(PrimadbError::Message(
+                "vector chunk header mismatch".to_owned(),
+            ));
+        }
+        bytes.extend_from_slice(payload);
+    }
+    if bytes.len() != meta.byte_length || checksum_bytes(&bytes) != meta.checksum {
+        return Err(PrimadbError::Message("vector checksum mismatch".to_owned()));
+    }
+    let vector = crate::vector::decode_f32_le(&bytes)?;
+    validate_vector(&vector, config.dim)?;
+    Ok(VectorCacheEntry {
+        vector,
+        metadata: meta.metadata.clone(),
+        write_id: meta.write_id.clone(),
+        checksum: meta.checksum.clone(),
+    })
+}
+
+fn vector_watch_change_overlaps(collection: &str, event: &ChangeEvent) -> bool {
+    if event.full_refresh {
+        return true;
+    }
+    if !event.records_changed {
+        return false;
+    }
+    event.touched_record_keys.is_empty()
+        || event
+            .touched_record_keys
+            .iter()
+            .any(|key| vector_collection_from_record_key(key).as_deref() == Some(collection))
+}
+
+fn vector_metric_capability_name(metric: VectorMetric) -> &'static str {
+    match metric {
+        VectorMetric::Cosine => "cosine",
+        VectorMetric::L2 => "l2",
+        VectorMetric::Dot => "dot",
+    }
+}
+
+fn vector_backend_capability_name(backend: VectorBackendKind) -> &'static str {
+    match backend {
+        VectorBackendKind::Exact => "exact",
+        VectorBackendKind::Edgevec => "edgevec",
+    }
+}
+
+fn vector_manager_state_capability_name(state: VectorManagerState) -> &'static str {
+    match state {
+        VectorManagerState::Ready => "ready",
+        VectorManagerState::CatchingUp => "catching_up",
+        VectorManagerState::Rebuilding => "rebuilding",
+        VectorManagerState::Stale => "stale",
+        VectorManagerState::Failed => "failed",
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_native_vector_cache(
+    root: &std::path::Path,
+    collection: &str,
+    config: VectorCollectionConfig,
+    source_hash: &str,
+) -> Result<Option<VectorCollectionCache>> {
+    let collection_dir = root.join(crate::encode_component(collection));
+    let manifest_path = collection_dir.join("manifest.json");
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let manifest = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    let vectors_f32 = read_native_vector_cache_file(&collection_dir.join("vectors.f32"))?;
+    let keys_bin = read_native_vector_cache_file(&collection_dir.join("keys.bin"))?;
+    let metadata_bin = read_native_vector_cache_file(&collection_dir.join("metadata.bin"))?;
+    let backend_edgevec =
+        match read_native_vector_cache_file(&collection_dir.join("backend.edgevec")) {
+            Ok(bytes) => Some(bytes),
+            Err(PrimadbError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+    let files = crate::VectorCacheFiles {
+        manifest,
+        vectors_f32,
+        keys_bin,
+        metadata_bin,
+        backend_edgevec,
+    };
+    if files.manifest.collection != collection
+        || files.manifest.record_prefix != vector_collection_items_prefix(collection)
+    {
+        return Err(PrimadbError::Message(
+            "vector cache manifest belongs to another collection".to_owned(),
+        ));
+    }
+    collection_cache_from_cache_files(config, files, source_hash).map(Some)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_native_vector_cache_file(path: &std::path::Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    // SAFETY: the file is opened read-only and copied into an owned Vec before
+    // returning, so no mapped reference escapes this function.
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    Ok(mmap.to_vec())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_native_vector_cache(
+    root: &std::path::Path,
+    collection: &str,
+    cache: &VectorCollectionCache,
+) -> Result<()> {
+    let collection_dir = root.join(crate::encode_component(collection));
+    std::fs::create_dir_all(&collection_dir)?;
+    let files = build_vector_cache_files(collection, cache, now_millis().to_string())?;
+    std::fs::write(collection_dir.join("vectors.f32.tmp"), &files.vectors_f32)?;
+    std::fs::write(collection_dir.join("keys.bin.tmp"), &files.keys_bin)?;
+    std::fs::write(collection_dir.join("metadata.bin.tmp"), &files.metadata_bin)?;
+    if let Some(edgevec) = &files.backend_edgevec {
+        std::fs::write(collection_dir.join("backend.edgevec.tmp"), edgevec)?;
+    }
+    std::fs::write(
+        collection_dir.join("manifest.json.tmp"),
+        serde_json::to_vec_pretty(&files.manifest)?,
+    )?;
+    std::fs::rename(
+        collection_dir.join("vectors.f32.tmp"),
+        collection_dir.join("vectors.f32"),
+    )?;
+    std::fs::rename(
+        collection_dir.join("keys.bin.tmp"),
+        collection_dir.join("keys.bin"),
+    )?;
+    std::fs::rename(
+        collection_dir.join("metadata.bin.tmp"),
+        collection_dir.join("metadata.bin"),
+    )?;
+    if files.backend_edgevec.is_some() {
+        std::fs::rename(
+            collection_dir.join("backend.edgevec.tmp"),
+            collection_dir.join("backend.edgevec"),
+        )?;
+    } else {
+        match std::fs::remove_file(collection_dir.join("backend.edgevec")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    std::fs::rename(
+        collection_dir.join("manifest.json.tmp"),
+        collection_dir.join("manifest.json"),
+    )?;
+    Ok(())
 }
 
 fn unset_inner(inner: &mut Inner, anchor: &str, segments: &[String]) -> Result<()> {
@@ -3891,6 +4648,25 @@ impl RecordWatchSubscription {
     }
 }
 
+impl VectorWatchSubscription {
+    pub fn receiver(&self) -> Receiver<VectorSearchResult> {
+        self.inner.receiver.clone()
+    }
+
+    pub async fn recv(&self) -> Option<VectorSearchResult> {
+        self.inner.receiver.recv().await.ok()
+    }
+
+    pub fn try_recv(&self) -> Option<VectorSearchResult> {
+        self.inner.receiver.try_recv().ok()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn recv_blocking(&self) -> Option<VectorSearchResult> {
+        self.inner.receiver.recv_blocking().ok()
+    }
+}
+
 impl Clone for Subscription {
     fn clone(&self) -> Self {
         Self {
@@ -3916,6 +4692,14 @@ impl Clone for TraversalSubscription {
 }
 
 impl Clone for RecordWatchSubscription {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Clone for VectorWatchSubscription {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -3958,6 +4742,16 @@ impl Drop for RecordWatchSubscriptionInner {
         if let Some(db) = self.db.upgrade() {
             if let Ok(mut inner) = db.lock() {
                 inner.record_subscriptions.remove(&self.id);
+            }
+        }
+    }
+}
+
+impl Drop for VectorWatchSubscriptionInner {
+    fn drop(&mut self) {
+        if let Some(db) = self.db.upgrade() {
+            if let Ok(mut inner) = db.lock() {
+                inner.vector_subscriptions.remove(&self.id);
             }
         }
     }
@@ -5814,6 +6608,12 @@ fn build_pull_responses(
             result,
             limits.max_query_entries_per_chunk.max(1),
         ),
+        RemoteResult::VectorSearch { result } => vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::VectorSearch { result },
+        }],
         RemoteResult::Node { node } => vec![PullResponse {
             request_id: request_id.to_owned(),
             chunk: PullChunk { index: 0, total: 1 },
@@ -6421,10 +7221,23 @@ mod tests {
         RecordScanResult, RecordValue, RemotePath, Result, RoomHookContext, ScopeAuthority,
         ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext, ServeResultContext,
         TransactionOptions, TransactionStatus, TransactionStep, TraversalDirection, TraversalSpec,
+        VectorCollectionConfig, VectorFilter, VectorMetric, VectorSearchSpec,
     };
     use serde_json::json;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn vector_search_spec() -> VectorSearchSpec {
+        VectorSearchSpec {
+            limit: 10,
+            ef: None,
+            filter: None::<VectorFilter>,
+            include_vector: false,
+            include_metadata: false,
+            exact: true,
+            stale_policy: Default::default(),
+        }
+    }
 
     #[test]
     fn nested_put_materializes_as_linked_graph() -> Result<()> {
@@ -6488,6 +7301,296 @@ mod tests {
             .once_json()?
             .unwrap();
         assert_eq!(members["$set"].as_array().unwrap().len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn vectors_are_stored_as_split_records_and_search_exactly() -> Result<()> {
+        let db = Primadb::with_replica_id("vector-a");
+        db.create_vector_collection(
+            "docs",
+            VectorCollectionConfig {
+                dim: 3,
+                metric: VectorMetric::L2,
+                backend: None,
+                hnsw: None,
+                chunking: crate::VectorChunkingConfig { chunk_bytes: 8 },
+            },
+        )?;
+        db.put_vector(
+            "docs",
+            "alpha",
+            vec![0.0, 0.0, 0.0],
+            Some(json!({"kind": "note", "title": "alpha"})),
+        )?;
+        db.put_vector(
+            "docs",
+            "beta",
+            vec![10.0, 0.0, 0.0],
+            Some(json!({"kind": "note", "title": "beta"})),
+        )?;
+
+        let records = db.scan_records(RecordScan {
+            prefix: Some("__primadb_vectors/".to_owned()),
+            ..RecordScan::default()
+        })?;
+        assert!(
+            records
+                .entries
+                .iter()
+                .any(|entry| entry.key.ends_with("/items/616c706861/meta"))
+        );
+        assert!(
+            records
+                .entries
+                .iter()
+                .any(|entry| entry.key.ends_with("/items/616c706861/chunks/0"))
+        );
+        assert!(
+            records
+                .entries
+                .iter()
+                .any(|entry| entry.key.ends_with("/items/616c706861/chunks/1"))
+        );
+
+        let result = db.search_vectors(
+            "docs",
+            vec![1.0, 0.0, 0.0],
+            VectorSearchSpec {
+                limit: 2,
+                include_metadata: true,
+                ..vector_search_spec()
+            },
+        )?;
+        assert_eq!(result.matches.len(), 2);
+        assert_eq!(result.matches[0].id, "alpha");
+        assert_eq!(result.matches[1].id, "beta");
+        assert_eq!(
+            result.matches[0].metadata.as_ref().unwrap()["title"],
+            "alpha"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vector_search_ignores_incomplete_split_items() -> Result<()> {
+        let db = Primadb::with_replica_id("vector-b");
+        db.create_vector_collection(
+            "docs",
+            VectorCollectionConfig {
+                dim: 3,
+                metric: VectorMetric::L2,
+                backend: None,
+                hnsw: None,
+                chunking: crate::VectorChunkingConfig { chunk_bytes: 8 },
+            },
+        )?;
+        db.put_vector("docs", "complete", vec![0.0, 0.0, 0.0], None)?;
+        db.put_record_value(
+            "__primadb_vectors/646f6373/items/696e636f6d706c657465/meta",
+            crate::VectorItemMeta {
+                id: "incomplete".to_owned(),
+                write_id: "partial".to_owned(),
+                dim: 3,
+                encoding: "f32_le".to_owned(),
+                byte_length: 12,
+                checksum: "blake3:missing".to_owned(),
+                chunk_count: 2,
+                metadata: Some(json!({"bad": true})),
+                deleted: false,
+                updated_at: None,
+            },
+        )?;
+
+        let result = db.search_vectors("docs", vec![0.0, 0.0, 0.0], vector_search_spec())?;
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].id, "complete");
+        assert_eq!(db.vector_index_stats("docs")?.incomplete_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn vector_watches_emit_on_result_change() -> Result<()> {
+        let db = Primadb::with_replica_id("vector-watch");
+        db.create_vector_collection(
+            "docs",
+            VectorCollectionConfig {
+                dim: 2,
+                metric: VectorMetric::Cosine,
+                backend: None,
+                hnsw: None,
+                chunking: Default::default(),
+            },
+        )?;
+        db.put_vector("docs", "left", vec![1.0, 0.0], None)?;
+        let watch = db.watch_vector_search("docs", vec![1.0, 0.0], vector_search_spec())?;
+        let initial = watch.recv_blocking().unwrap();
+        assert_eq!(initial.matches[0].id, "left");
+
+        db.put_vector("docs", "right", vec![0.99, 0.0], None)?;
+        let updated = watch.recv_blocking().unwrap();
+        assert_eq!(updated.matches.len(), 2);
+        assert_eq!(updated.matches[0].id, "left");
+        Ok(())
+    }
+
+    #[test]
+    fn vector_remote_result_chunks_round_trip() -> Result<()> {
+        let result = crate::VectorSearchResult {
+            matches: vec![crate::VectorMatch {
+                id: "a".to_owned(),
+                distance: 0.0,
+                metadata: None,
+                vector: None,
+            }],
+            exact: true,
+            backend: crate::VectorBackendKind::Exact,
+            state: crate::VectorManagerState::Ready,
+            stale: false,
+            approximate_reason: None,
+        };
+        let responses = build_pull_responses(
+            "request-1",
+            crate::RemoteResult::VectorSearch {
+                result: result.clone(),
+            },
+            &PrimadbLimits::default(),
+        );
+        assert_eq!(responses.len(), 1);
+        match &responses[0].result {
+            PullResponseBody::VectorSearch { result: actual } => assert_eq!(actual, &result),
+            other => panic!("unexpected response body: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn vector_cache_files_round_trip_against_authoritative_records() -> Result<()> {
+        let db = Primadb::with_replica_id("vector-cache-a");
+        db.create_vector_collection(
+            "docs",
+            VectorCollectionConfig {
+                dim: 2,
+                metric: VectorMetric::L2,
+                backend: None,
+                hnsw: None,
+                chunking: Default::default(),
+            },
+        )?;
+        db.put_vector("docs", "a", vec![0.0, 0.0], Some(json!({"rank": 1})))?;
+        db.put_vector("docs", "b", vec![3.0, 0.0], Some(json!({"rank": 2})))?;
+
+        let files = db.export_vector_cache_files("docs")?;
+        let replica = Primadb::with_replica_id("vector-cache-b");
+        replica.apply_sync_envelope(db.sync_envelope())?;
+        replica.import_vector_cache_files("docs", files)?;
+
+        let result = replica.search_vectors(
+            "docs",
+            vec![0.1, 0.0],
+            VectorSearchSpec {
+                include_metadata: true,
+                ..vector_search_spec()
+            },
+        )?;
+        assert_eq!(result.matches[0].id, "a");
+        assert_eq!(result.matches[0].metadata.as_ref().unwrap()["rank"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn vector_presence_capabilities_include_collections() -> Result<()> {
+        let db = Primadb::with_replica_id("vector-caps");
+        db.create_vector_collection(
+            "docs",
+            VectorCollectionConfig {
+                dim: 1536,
+                metric: VectorMetric::Cosine,
+                backend: Some(crate::VectorBackendKind::Edgevec),
+                hnsw: None,
+                chunking: Default::default(),
+            },
+        )?;
+        let capabilities = db.vector_presence_capabilities();
+        assert!(capabilities.iter().any(|item| item == "vector_exact"));
+        assert!(
+            capabilities.iter().any(
+                |item| item.starts_with("vector_collection:646f6373:1536:cosine:ready:edgevec")
+            )
+        );
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_segment_storage_writes_vector_cache_files() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-vector-cache-{unique}"));
+
+        let first = Primadb::with_replica_id("vector-cache-native-a");
+        assert!(!first.use_segment_storage(path.clone(), 2)?);
+        first.create_vector_collection(
+            "docs",
+            VectorCollectionConfig {
+                dim: 2,
+                metric: VectorMetric::L2,
+                backend: None,
+                hnsw: None,
+                chunking: Default::default(),
+            },
+        )?;
+        first.put_vector("docs", "a", vec![0.0, 0.0], None)?;
+        let _ = first.search_vectors("docs", vec![0.0, 0.0], vector_search_spec())?;
+        let cache_dir = path
+            .join("vector-cache")
+            .join(crate::encode_component("docs"));
+        assert!(cache_dir.join("manifest.json").exists());
+        assert!(cache_dir.join("vectors.f32").exists());
+        assert!(cache_dir.join("keys.bin").exists());
+        assert!(cache_dir.join("metadata.bin").exists());
+        drop(first);
+
+        let second = Primadb::with_replica_id("vector-cache-native-b");
+        assert!(second.use_segment_storage(path.clone(), 2)?);
+        let result = second.search_vectors("docs", vec![0.0, 0.0], vector_search_spec())?;
+        assert_eq!(result.matches[0].id, "a");
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(feature = "vector-edgevec")]
+    #[test]
+    fn edgevec_backend_serves_ann_search() -> Result<()> {
+        let db = Primadb::with_replica_id("vector-edgevec");
+        db.create_vector_collection(
+            "docs",
+            VectorCollectionConfig {
+                dim: 3,
+                metric: VectorMetric::Cosine,
+                backend: Some(crate::VectorBackendKind::Edgevec),
+                hnsw: None,
+                chunking: Default::default(),
+            },
+        )?;
+        db.put_vector("docs", "x", vec![1.0, 0.0, 0.0], None)?;
+        db.put_vector("docs", "y", vec![0.0, 1.0, 0.0], None)?;
+
+        let result = db.search_vectors(
+            "docs",
+            vec![1.0, 0.0, 0.0],
+            VectorSearchSpec {
+                limit: 1,
+                exact: false,
+                ..vector_search_spec()
+            },
+        )?;
+        assert_eq!(result.backend, crate::VectorBackendKind::Edgevec);
+        assert!(!result.exact);
+        assert_eq!(result.matches[0].id, "x");
         Ok(())
     }
 

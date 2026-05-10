@@ -122,6 +122,76 @@ export interface RecordBatchReport {
   operationCount: number;
 }
 
+export type VectorMetric = "cosine" | "l2" | "dot";
+export type VectorBackendKind = "exact" | "edgevec";
+export type VectorManagerState = "ready" | "catching_up" | "rebuilding" | "stale" | "failed";
+export type VectorStalePolicy = "fallback_exact" | "allow_stale" | "error";
+
+export interface VectorHnswConfig {
+  m?: number | null;
+  efConstruction?: number | null;
+  efSearch?: number | null;
+  tombstoneRebuildRatio?: number | null;
+}
+
+export interface VectorChunkingConfig {
+  chunkBytes: number;
+}
+
+export interface VectorCollectionConfig {
+  dim: number;
+  metric?: VectorMetric;
+  backend?: VectorBackendKind | null;
+  hnsw?: VectorHnswConfig | null;
+  chunking?: VectorChunkingConfig;
+}
+
+export interface VectorEntry {
+  id: string;
+  vector: number[];
+  metadata?: JsonValue | null;
+  writeId: string;
+  checksum: string;
+}
+
+export interface VectorMetadataFilter {
+  eq?: Record<string, JsonValue>;
+  prefix?: Record<string, string>;
+  exists?: string[];
+}
+
+export interface VectorFilter {
+  idPrefix?: string | null;
+  ids?: string[];
+  metadata?: VectorMetadataFilter | null;
+}
+
+export interface VectorSearchSpec {
+  limit: number;
+  ef?: number | null;
+  filter?: VectorFilter | null;
+  includeVector?: boolean;
+  includeMetadata?: boolean;
+  exact?: boolean;
+  stalePolicy?: VectorStalePolicy;
+}
+
+export interface VectorMatch {
+  id: string;
+  distance: number;
+  metadata?: JsonValue | null;
+  vector?: number[] | null;
+}
+
+export interface VectorSearchResult {
+  matches: VectorMatch[];
+  exact: boolean;
+  backend: VectorBackendKind;
+  state: VectorManagerState;
+  stale: boolean;
+  approximateReason?: string | null;
+}
+
 export interface StorageSyncReport {
   backend: string;
   durability: string;

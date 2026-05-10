@@ -52,6 +52,7 @@ bridges.
 - [Query and watch](concepts/query-and-watch)
 - [Auth and privacy](concepts/auth-and-privacy)
 - [Storage and durability](concepts/storage)
+- [Vector storage and search](concepts/vector-search)
 - [Scripting](concepts/scripting)
 
 ## Guides

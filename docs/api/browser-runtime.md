@@ -107,6 +107,12 @@ class Primadb {
   getRecord(key: string): any;
   scanRecords(scan: any): any;
   watchRecords(scan: any, callback: Function): RecordWatchSubscription;
+  createVectorCollection(name: string, config: any): void;
+  putVector(collection: string, id: string, vector: any, metadata: any | null): void;
+  deleteVector(collection: string, id: string): void;
+  getVector(collection: string, id: string): any;
+  searchVectors(collection: string, query: any, spec: any): any;
+  watchVectorSearch(collection: string, query: any, spec: any, callback: Function): VectorWatchSubscription;
   applyRecordBatch(batch: any): any;
   deleteRecord(key: string): void;
   syncStorage(): any;
@@ -129,6 +135,8 @@ class Primadb {
   saveOpfsSegments(directory: string, namespace: string): Promise<void>;
   loadOpfsSegments(directory: string, namespace: string): Promise<boolean>;
   enableOpfsSegmentPersistence(directory: string, namespace: string, load_existing: boolean | null): Promise<OpfsSegmentPersistence>;
+  saveVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<any>;
+  loadVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<boolean>;
   openBlobStorage(config: any): any;
   enableIndexedDbBlobStorage(database_name: string, store_name: string, namespace: string): IndexedDbBlobStorage;
   connectWebSocket(url: string, retry_interval_ms: number | null): WebSocketSync;
@@ -187,6 +195,14 @@ class TraversalSubscription {
 
 ```ts
 class RecordWatchSubscription {
+  cancel(): void;
+}
+```
+
+### `VectorWatchSubscription`
+
+```ts
+class VectorWatchSubscription {
   cancel(): void;
 }
 ```
@@ -267,6 +283,7 @@ class WebSocketSync {
   query(path: any, spec: any, policy: any | null): Promise<any>;
   lex(path: any, spec: any, policy: any | null): Promise<any>;
   records(scan: any, policy: any | null): Promise<any>;
+  vectorSearch(collection: string, query: any, spec: any, policy: any | null): Promise<any>;
   node(id: string, policy: any | null): Promise<any>;
   snapshot(root: string | null, policy: any | null): Promise<any>;
   watchGet(path: any, policy: any | null): RemoteWatch;
@@ -274,6 +291,7 @@ class WebSocketSync {
   watchQuery(path: any, spec: any, policy: any | null): RemoteWatch;
   watchLex(path: any, spec: any, policy: any | null): RemoteWatch;
   watchRecords(scan: any, policy: any | null): RemoteWatch;
+  watchVectorSearch(collection: string, query: any, spec: any, policy: any | null): RemoteWatch;
   watchNode(id: string, policy: any | null): RemoteWatch;
   watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
   watchRemoteGet(peer_id: string, path: any): RemoteWatch;
@@ -281,12 +299,14 @@ class WebSocketSync {
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteLex(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteRecords(peer_id: string, scan: any): RemoteWatch;
+  watchRemoteVectorSearch(peer_id: string, collection: string, query: any, spec: any): RemoteWatch;
   watchRemoteNode(peer_id: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peer_id: string, root: string | null): RemoteWatch;
   remoteGet(peer_id: string, path: any): Promise<any>;
   remoteQuery(peer_id: string, path: any, spec: any): Promise<any>;
   remoteLex(peer_id: string, path: any, spec: any): Promise<any>;
   remoteRecords(peer_id: string, scan: any): Promise<any>;
+  remoteVectorSearch(peer_id: string, collection: string, query: any, spec: any): Promise<any>;
   remoteNode(peer_id: string, id: string): Promise<any>;
   remoteSnapshot(peer_id: string, root: string | null): Promise<any>;
   remoteTransaction(peer_id: string, scope: string, steps: any, options: any): Promise<any>;
@@ -312,6 +332,7 @@ class WebRtcMesh {
   watchQuery(path: any, spec: any, policy: any | null): RemoteWatch;
   watchLex(path: any, spec: any, policy: any | null): RemoteWatch;
   watchRecords(scan: any, policy: any | null): RemoteWatch;
+  watchVectorSearch(collection: string, query: any, spec: any, policy: any | null): RemoteWatch;
   watchNode(id: string, policy: any | null): RemoteWatch;
   watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
   watchRemoteGet(peer_id: string, path: any): RemoteWatch;
@@ -319,6 +340,7 @@ class WebRtcMesh {
   watchRemoteQuery(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteLex(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteRecords(peer_id: string, scan: any): RemoteWatch;
+  watchRemoteVectorSearch(peer_id: string, collection: string, query: any, spec: any): RemoteWatch;
   watchRemoteNode(peer_id: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peer_id: string, root: string | null): RemoteWatch;
   flushPending(): number;

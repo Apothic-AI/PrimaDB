@@ -217,6 +217,76 @@ export interface RecordBatchReport {
   operationCount: number;
 }
 
+export type VectorMetric = "cosine" | "l2" | "dot";
+export type VectorBackendKind = "exact" | "edgevec";
+export type VectorManagerState = "ready" | "catching_up" | "rebuilding" | "stale" | "failed";
+export type VectorStalePolicy = "fallback_exact" | "allow_stale" | "error";
+
+export interface VectorHnswConfig {
+  m?: number | null;
+  efConstruction?: number | null;
+  efSearch?: number | null;
+  tombstoneRebuildRatio?: number | null;
+}
+
+export interface VectorChunkingConfig {
+  chunkBytes: number;
+}
+
+export interface VectorCollectionConfig {
+  dim: number;
+  metric?: VectorMetric;
+  backend?: VectorBackendKind | null;
+  hnsw?: VectorHnswConfig | null;
+  chunking?: VectorChunkingConfig;
+}
+
+export interface VectorEntry {
+  id: string;
+  vector: number[];
+  metadata?: JsonValue | null;
+  writeId: string;
+  checksum: string;
+}
+
+export interface VectorMetadataFilter {
+  eq?: Record<string, JsonValue>;
+  prefix?: Record<string, string>;
+  exists?: string[];
+}
+
+export interface VectorFilter {
+  idPrefix?: string | null;
+  ids?: string[];
+  metadata?: VectorMetadataFilter | null;
+}
+
+export interface VectorSearchSpec {
+  limit: number;
+  ef?: number | null;
+  filter?: VectorFilter | null;
+  includeVector?: boolean;
+  includeMetadata?: boolean;
+  exact?: boolean;
+  stalePolicy?: VectorStalePolicy;
+}
+
+export interface VectorMatch {
+  id: string;
+  distance: number;
+  metadata?: JsonValue | null;
+  vector?: number[] | null;
+}
+
+export interface VectorSearchResult {
+  matches: VectorMatch[];
+  exact: boolean;
+  backend: VectorBackendKind;
+  state: VectorManagerState;
+  stale: boolean;
+  approximateReason?: string | null;
+}
+
 export interface StorageSyncReport {
   backend: string;
   durability: string;
@@ -435,6 +505,7 @@ export type PullRequestKind =
   | { kind: "query"; path: { anchor: string; segments?: string[] }; spec: QuerySpec }
   | { kind: "lex"; path: { anchor: string; segments?: string[] }; spec: LexSpec }
   | { kind: "records"; scan: RecordScan }
+  | { kind: "vector_search"; collection: string; query: number[]; spec: VectorSearchSpec }
   | { kind: "node"; id: string }
   | { kind: "snapshot"; root?: string | null }
   | {
@@ -450,6 +521,7 @@ export type RemoteResult =
   | { kind: "query"; entries: JsonValue[] }
   | { kind: "lex"; entries: JsonValue[] }
   | { kind: "records"; result: RecordScanResult }
+  | { kind: "vector_search"; result: VectorSearchResult }
   | { kind: "node"; node: JsonValue | null }
   | { kind: "snapshot"; snapshot: JsonValue }
   | { kind: "transaction"; report: TransactionReport };
@@ -555,6 +627,16 @@ export declare class Primadb {
   getRecord(key: string): RecordEntry | null;
   scanRecords(scan: RecordScan): RecordScanResult;
   watchRecords(scan: RecordScan): RecordWatchSubscription;
+  createVectorCollection(name: string, config: VectorCollectionConfig): void;
+  putVector(collection: string, id: string, vector: number[], metadata?: JsonValue | null): void;
+  deleteVector(collection: string, id: string): void;
+  getVector(collection: string, id: string): VectorEntry | null;
+  searchVectors(collection: string, query: number[], spec: VectorSearchSpec): VectorSearchResult;
+  watchVectorSearch(
+    collection: string,
+    query: number[],
+    spec: VectorSearchSpec,
+  ): VectorWatchSubscription;
   applyRecordBatch(batch: RecordBatch): RecordBatchReport;
   deleteRecord(key: string): void;
   attachNodeScript(path: RemotePath, script: NodeScript): void;
@@ -622,6 +704,12 @@ export declare class RecordWatchSubscription {
   close(): void;
 }
 
+export declare class VectorWatchSubscription {
+  next(): Promise<{ done: boolean; value?: VectorSearchResult | null }>;
+  tryNext(): { done: boolean; value?: VectorSearchResult | null };
+  close(): void;
+}
+
 export declare class RelayServer {
   static listen(config: RelayServerConfig): Promise<RelayServer>;
   bindAddr(): string;
@@ -651,12 +739,24 @@ export declare class WebSocketSync {
   ): Promise<JsonValue>;
   lex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
   records(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RecordScanResult>;
+  vectorSearch(
+    collection: string,
+    query: number[],
+    spec: VectorSearchSpec,
+    policy?: RemoteInterestPolicy | null,
+  ): Promise<VectorSearchResult>;
   node(id: string, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
   snapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
   remoteGet(peerId: string, path: RemotePath): Promise<JsonValue | null>;
   remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
   remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
   remoteRecords(peerId: string, scan: RecordScan): Promise<RecordScanResult>;
+  remoteVectorSearch(
+    peerId: string,
+    collection: string,
+    query: number[],
+    spec: VectorSearchSpec,
+  ): Promise<VectorSearchResult>;
   remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
   remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
   remoteTransaction(
@@ -674,6 +774,12 @@ export declare class WebSocketSync {
   ): RemoteWatch;
   watchLex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
   watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteWatch;
+  watchVectorSearch(
+    collection: string,
+    query: number[],
+    spec: VectorSearchSpec,
+    policy?: RemoteInterestPolicy | null,
+  ): RemoteWatch;
   watchNode(id: string, policy?: RemoteInterestPolicy | null): RemoteWatch;
   watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): RemoteWatch;
   watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
@@ -681,6 +787,12 @@ export declare class WebSocketSync {
   watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
   watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): RemoteWatch;
   watchRemoteRecords(peerId: string, scan: RecordScan): RemoteWatch;
+  watchRemoteVectorSearch(
+    peerId: string,
+    collection: string,
+    query: number[],
+    spec: VectorSearchSpec,
+  ): RemoteWatch;
   watchRemoteNode(peerId: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peerId: string, root?: string | null): RemoteWatch;
   flushPending(): Promise<number>;
@@ -710,6 +822,12 @@ export declare class WebRtcMesh {
     policy?: RemoteInterestPolicy | null,
   ): Promise<RemoteWatch>;
   watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+  watchVectorSearch(
+    collection: string,
+    query: number[],
+    spec: VectorSearchSpec,
+    policy?: RemoteInterestPolicy | null,
+  ): Promise<RemoteWatch>;
   watchNode(id: string, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
   watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
   watchRemoteGet(peerId: string, path: RemotePath): Promise<RemoteWatch>;
@@ -717,6 +835,12 @@ export declare class WebRtcMesh {
   watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<RemoteWatch>;
   watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<RemoteWatch>;
   watchRemoteRecords(peerId: string, scan: RecordScan): Promise<RemoteWatch>;
+  watchRemoteVectorSearch(
+    peerId: string,
+    collection: string,
+    query: number[],
+    spec: VectorSearchSpec,
+  ): Promise<RemoteWatch>;
   watchRemoteNode(peerId: string, id: string): Promise<RemoteWatch>;
   watchRemoteSnapshot(peerId: string, root?: string | null): Promise<RemoteWatch>;
   flushPending(): Promise<number>;

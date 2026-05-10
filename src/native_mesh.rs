@@ -83,6 +83,9 @@ enum PullAccumulator {
         entries: Vec<RecordEntry>,
         next_cursor: Option<String>,
     },
+    VectorSearch {
+        result: Option<crate::VectorSearchResult>,
+    },
     Node {
         node: Option<crate::NodeState>,
     },
@@ -366,6 +369,25 @@ impl NativeWebRtcMesh {
         .await
     }
 
+    pub async fn watch_vector_search(
+        &self,
+        peer_id: impl Into<String>,
+        collection: impl Into<String>,
+        query: Vec<f32>,
+        spec: crate::VectorSearchSpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::VectorSearch {
+                collection: collection.into(),
+                query,
+                spec,
+            },
+        )
+        .await
+    }
+
     pub async fn watch_node(
         &self,
         peer_id: impl Into<String>,
@@ -447,6 +469,25 @@ impl NativeWebRtcMesh {
             &self.state,
             policy,
             crate::PullRequestKind::Records { scan },
+        )
+        .await
+    }
+
+    pub async fn watch_vector_search_with_policy(
+        &self,
+        collection: impl Into<String>,
+        query: Vec<f32>,
+        spec: crate::VectorSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_mesh_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::VectorSearch {
+                collection: collection.into(),
+                query,
+                spec,
+            },
         )
         .await
     }
@@ -816,6 +857,7 @@ async fn maybe_send_mesh_auth_challenge_to_peer(
 
     #[cfg(not(feature = "crypto"))]
     {
+        let _ = remote_peer;
         let _ = identity;
     }
 
@@ -1558,7 +1600,8 @@ async fn start_mesh_watch_with_policy(
     request_kind: crate::PullRequestKind,
 ) -> Result<RemoteWatchSubscription> {
     let capability = format!("watch_{}", request_kind.kind_name());
-    let peer_id = select_mesh_peer_for_policy(state, &policy, Some(&capability)).await?;
+    let peer_id =
+        select_mesh_peer_for_policy(state, &policy, Some(&capability), Some(&request_kind)).await?;
     start_mesh_watch(state, peer_id, request_kind).await
 }
 
@@ -1620,6 +1663,7 @@ async fn select_mesh_peer_for_policy(
     state: &Arc<NativeWebRtcMeshState>,
     policy: &RemoteInterestPolicy,
     capability: Option<&str>,
+    request: Option<&crate::PullRequestKind>,
 ) -> Result<String> {
     if let Some(peer_ids) = explicit_mesh_policy_peers(policy)? {
         if peer_ids.is_empty() {
@@ -1635,7 +1679,7 @@ async fn select_mesh_peer_for_policy(
             .into_iter()
             .find(|peer_id| {
                 recommendations.get(peer_id).is_some_and(|recommendation| {
-                    peer_supports_capability(&recommendation.peer, capability)
+                    peer_supports_request(&recommendation.peer, capability, request)
                 })
             })
             .ok_or_else(|| {
@@ -1646,10 +1690,11 @@ async fn select_mesh_peer_for_policy(
             });
     }
 
-    let candidates = mesh_peer_candidates(state).await;
+    let mut candidates = mesh_peer_candidates(state).await;
+    prefer_vector_request_candidates(&mut candidates, request);
     if let Some(peer) = candidates
         .iter()
-        .find(|peer| peer_supports_capability(peer, capability))
+        .find(|peer| peer_supports_request(peer, capability, request))
     {
         return Ok(peer.peer_id.clone());
     }
@@ -1746,6 +1791,63 @@ async fn mesh_peer_candidates(state: &Arc<NativeWebRtcMeshState>) -> Vec<crate::
 
 fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>) -> bool {
     capability.is_none_or(|capability| peer.capabilities.iter().any(|item| item == capability))
+}
+
+fn peer_supports_request(
+    peer: &crate::PeerPresence,
+    capability: Option<&str>,
+    request: Option<&crate::PullRequestKind>,
+) -> bool {
+    if !peer_supports_capability(peer, capability) {
+        return false;
+    }
+    vector_request_hint_score(peer, request) != Some(0)
+}
+
+fn prefer_vector_request_candidates(
+    candidates: &mut [crate::PeerPresence],
+    request: Option<&crate::PullRequestKind>,
+) {
+    candidates.sort_by(|left, right| {
+        vector_request_hint_score(right, request)
+            .unwrap_or(1)
+            .cmp(&vector_request_hint_score(left, request).unwrap_or(1))
+    });
+}
+
+fn vector_request_hint_score(
+    peer: &crate::PeerPresence,
+    request: Option<&crate::PullRequestKind>,
+) -> Option<u8> {
+    let Some(crate::PullRequestKind::VectorSearch {
+        collection,
+        query,
+        spec,
+    }) = request
+    else {
+        return None;
+    };
+    let prefix = format!("vector_collection:{}:", crate::encode_component(collection));
+    let hints = peer
+        .capabilities
+        .iter()
+        .filter(|item| item.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    if hints.is_empty() {
+        return None;
+    }
+    let allow_stale = spec.stale_policy == crate::VectorStalePolicy::AllowStale;
+    let query_dim = query.len().to_string();
+    Some(
+        hints
+            .iter()
+            .any(|hint| {
+                let parts = hint.split(':').collect::<Vec<_>>();
+                parts.len() >= 6 && parts[2] == query_dim && (allow_stale || parts[4] == "ready")
+            })
+            .then_some(2)
+            .unwrap_or(0),
+    )
 }
 
 async fn cancel_mesh_watch(state: &Arc<NativeWebRtcMeshState>, watch_id: &str) {
@@ -2071,6 +2173,14 @@ fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEve
                     .iter()
                     .any(|key| scan.matches_key(key)));
     }
+    if let crate::PullRequestKind::VectorSearch { collection, .. } = &watch.request_kind {
+        return event.records_changed
+            && (event.touched_record_keys.is_empty()
+                || event.touched_record_keys.iter().any(|key| {
+                    crate::vector_collection_from_record_key(key).as_deref()
+                        == Some(collection.as_str())
+                }));
+    }
     event.full_refresh
         || watch.interest_path.as_ref().map_or(true, |path| {
             event
@@ -2370,21 +2480,24 @@ fn mesh_signal_target(signal: &MeshSignal) -> RouteTarget {
 }
 
 async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<()> {
+    let mut capabilities = vec![
+        "signal".to_owned(),
+        "webrtc".to_owned(),
+        "peer_exchange".to_owned(),
+        "watch_get".to_owned(),
+        "watch_map".to_owned(),
+        "watch_query".to_owned(),
+        "watch_lex".to_owned(),
+        "watch_records".to_owned(),
+        "watch_vector_search".to_owned(),
+        "watch_node".to_owned(),
+        "watch_snapshot".to_owned(),
+    ];
+    capabilities.extend(state.db.vector_presence_capabilities());
     let mut route = state.router.presence(
         state.db.replica_id(),
         "webrtc-relay",
-        vec![
-            "signal".to_owned(),
-            "webrtc".to_owned(),
-            "peer_exchange".to_owned(),
-            "watch_get".to_owned(),
-            "watch_map".to_owned(),
-            "watch_query".to_owned(),
-            "watch_lex".to_owned(),
-            "watch_records".to_owned(),
-            "watch_node".to_owned(),
-            "watch_snapshot".to_owned(),
-        ],
+        capabilities,
         vec![format!("mesh:{}", state.room)],
     );
     if let RoutePayload::Presence { peer } = &mut route.payload {
@@ -2490,6 +2603,12 @@ fn apply_response_body(
                     *current_cursor = next_cursor.clone();
                 }
             }
+            None
+        }
+        crate::PullResponseBody::VectorSearch { result } => {
+            *accumulator = PullAccumulator::VectorSearch {
+                result: Some(result.clone()),
+            };
             None
         }
         crate::PullResponseBody::Node { node } => {
@@ -2672,6 +2791,7 @@ impl PullAccumulator {
                 entries: Vec::new(),
                 next_cursor: None,
             },
+            crate::PullRequestKind::VectorSearch { .. } => Self::VectorSearch { result: None },
             crate::PullRequestKind::Node { .. } => Self::Node { node: None },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -2697,6 +2817,13 @@ impl PullAccumulator {
                     entries,
                     next_cursor,
                 },
+            }),
+            Self::VectorSearch { result } => Ok(crate::RemoteResult::VectorSearch {
+                result: result.ok_or_else(|| {
+                    PrimadbError::Message(
+                        "vector search response completed without a result".to_owned(),
+                    )
+                })?,
             }),
             Self::Node { node } => Ok(crate::RemoteResult::Node { node }),
             Self::Snapshot {

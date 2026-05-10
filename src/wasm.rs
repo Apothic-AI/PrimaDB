@@ -2,7 +2,7 @@
 use crate::SecureSyncFrame;
 use crate::wasm_opfs::{
     apply_segment_transaction_opfs, estimate_segment_namespace_opfs, load_segment_snapshot_opfs,
-    replace_segment_transaction_opfs,
+    load_vector_cache_opfs, replace_segment_transaction_opfs, write_vector_cache_opfs,
 };
 use crate::{
     BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext,
@@ -15,8 +15,9 @@ use crate::{
     RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
     RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
     SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
-    TraversalSubscription as CoreTraversalSubscription, VerifiedIdentity, WatchEvent, WatchRequest,
-    WatchRequestKind, encode_component, error_pull_response, error_watch_event,
+    TraversalSubscription as CoreTraversalSubscription, VectorCollectionConfig, VectorSearchSpec,
+    VectorWatchSubscription as CoreVectorWatchSubscription, VerifiedIdentity, WatchEvent,
+    WatchRequest, WatchRequestKind, encode_component, error_pull_response, error_watch_event,
 };
 #[cfg(feature = "scripting")]
 use crate::{NodeScript, ScriptExecutionOptions};
@@ -77,6 +78,11 @@ pub struct WasmTraversalSubscription {
 #[wasm_bindgen(js_name = RecordWatchSubscription)]
 pub struct WasmRecordWatchSubscription {
     inner: Option<CoreRecordWatchSubscription>,
+}
+
+#[wasm_bindgen(js_name = VectorWatchSubscription)]
+pub struct WasmVectorWatchSubscription {
+    inner: Option<CoreVectorWatchSubscription>,
 }
 
 #[wasm_bindgen(js_name = RemoteWatch)]
@@ -173,7 +179,7 @@ pub(crate) struct WasmSegmentStorageEstimate {
     pub origin_quota: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct WasmSegmentWriteSummary {
     pub entries_written: u64,
     pub entries_deleted: u64,
@@ -299,6 +305,9 @@ enum PullAccumulator {
     Records {
         entries: Vec<RecordEntry>,
         next_cursor: Option<String>,
+    },
+    VectorSearch {
+        result: Option<crate::VectorSearchResult>,
     },
     Node {
         node: Option<crate::NodeState>,
@@ -961,6 +970,143 @@ impl WasmPrimadb {
         })
     }
 
+    #[wasm_bindgen(js_name = createVectorCollection)]
+    pub fn create_vector_collection(
+        &self,
+        name: String,
+        config: JsValue,
+    ) -> std::result::Result<(), JsValue> {
+        let config: VectorCollectionConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.inner
+            .create_vector_collection(name, config)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = putVector)]
+    pub fn put_vector(
+        &self,
+        collection: String,
+        id: String,
+        vector: JsValue,
+        metadata: JsValue,
+    ) -> std::result::Result<(), JsValue> {
+        let vector: Vec<f32> = serde_wasm_bindgen::from_value(vector)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let metadata: Option<JsonValue> = if metadata.is_null() || metadata.is_undefined() {
+            None
+        } else {
+            Some(
+                serde_wasm_bindgen::from_value(metadata)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?,
+            )
+        };
+        self.inner
+            .put_vector(collection, id, vector, metadata)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = deleteVector)]
+    pub fn delete_vector(
+        &self,
+        collection: String,
+        id: String,
+    ) -> std::result::Result<(), JsValue> {
+        self.inner
+            .delete_vector(collection, id)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = getVector)]
+    pub fn get_vector(
+        &self,
+        collection: String,
+        id: String,
+    ) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.get_vector(collection, id).map_err(to_js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = searchVectors)]
+    pub fn search_vectors(
+        &self,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        to_js(
+            &self
+                .inner
+                .search_vectors(collection, query, spec)
+                .map_err(to_js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchVectorSearch)]
+    pub fn watch_vector_search(
+        &self,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+        callback: js_sys::Function,
+    ) -> std::result::Result<WasmVectorWatchSubscription, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let subscription = self
+            .inner
+            .watch_vector_search(collection, query, spec)
+            .map_err(to_js_error)?;
+        let receiver = subscription.receiver();
+        let callback = callback.clone();
+
+        spawn_local(async move {
+            while let Ok(result) = receiver.recv().await {
+                let js_value = to_js(&result).unwrap_or(JsValue::NULL);
+                let _ = callback.call1(&JsValue::NULL, &js_value);
+            }
+        });
+
+        Ok(WasmVectorWatchSubscription {
+            inner: Some(subscription),
+        })
+    }
+
+    #[wasm_bindgen(js_name = saveVectorCacheOpfs)]
+    pub async fn save_vector_cache_opfs(
+        &self,
+        directory: String,
+        namespace: String,
+        collection: String,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let files = self
+            .inner
+            .export_vector_cache_files(&collection)
+            .map_err(to_js_error)?;
+        let summary = write_vector_cache_opfs(&directory, &namespace, &collection, &files).await?;
+        to_js(&summary)
+    }
+
+    #[wasm_bindgen(js_name = loadVectorCacheOpfs)]
+    pub async fn load_vector_cache_opfs(
+        &self,
+        directory: String,
+        namespace: String,
+        collection: String,
+    ) -> std::result::Result<bool, JsValue> {
+        let Some(files) = load_vector_cache_opfs(&directory, &namespace, &collection).await? else {
+            return Ok(false);
+        };
+        self.inner
+            .import_vector_cache_files(&collection, files)
+            .map_err(to_js_error)?;
+        Ok(true)
+    }
+
     #[wasm_bindgen(js_name = applyRecordBatch)]
     pub fn apply_record_batch(&self, batch: JsValue) -> std::result::Result<JsValue, JsValue> {
         let batch: RecordBatch = serde_wasm_bindgen::from_value(batch)
@@ -1586,30 +1732,34 @@ impl WasmPrimadb {
         let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
             let mut route = {
                 let borrowed = onopen_state.borrow();
+                let mut capabilities = vec![
+                    "sync".to_owned(),
+                    "ack".to_owned(),
+                    "routing".to_owned(),
+                    "snapshot".to_owned(),
+                    "batch".to_owned(),
+                    "pull_get".to_owned(),
+                    "pull_map".to_owned(),
+                    "pull_query".to_owned(),
+                    "pull_lex".to_owned(),
+                    "pull_records".to_owned(),
+                    "pull_vector_search".to_owned(),
+                    "pull_node".to_owned(),
+                    "watch_get".to_owned(),
+                    "watch_map".to_owned(),
+                    "watch_query".to_owned(),
+                    "watch_lex".to_owned(),
+                    "watch_records".to_owned(),
+                    "watch_vector_search".to_owned(),
+                    "watch_node".to_owned(),
+                    "watch_snapshot".to_owned(),
+                    "peer_exchange".to_owned(),
+                ];
+                capabilities.extend(borrowed.db.vector_presence_capabilities());
                 borrowed.router.presence(
                     borrowed.db.replica_id(),
                     "websocket",
-                    vec![
-                        "sync".to_owned(),
-                        "ack".to_owned(),
-                        "routing".to_owned(),
-                        "snapshot".to_owned(),
-                        "batch".to_owned(),
-                        "pull_get".to_owned(),
-                        "pull_map".to_owned(),
-                        "pull_query".to_owned(),
-                        "pull_lex".to_owned(),
-                        "pull_records".to_owned(),
-                        "pull_node".to_owned(),
-                        "watch_get".to_owned(),
-                        "watch_map".to_owned(),
-                        "watch_query".to_owned(),
-                        "watch_lex".to_owned(),
-                        "watch_records".to_owned(),
-                        "watch_node".to_owned(),
-                        "watch_snapshot".to_owned(),
-                        "peer_exchange".to_owned(),
-                    ],
+                    capabilities,
                     vec!["primadb-sync".to_owned()],
                 )
             };
@@ -2153,6 +2303,13 @@ impl WasmRecordWatchSubscription {
     }
 }
 
+#[wasm_bindgen(js_class = VectorWatchSubscription)]
+impl WasmVectorWatchSubscription {
+    pub fn cancel(&mut self) {
+        self.inner.take();
+    }
+}
+
 fn remote_result_kind(result: &RemoteResult) -> &'static str {
     match result {
         RemoteResult::Get { .. } => "get",
@@ -2160,6 +2317,7 @@ fn remote_result_kind(result: &RemoteResult) -> &'static str {
         RemoteResult::Query { .. } => "query",
         RemoteResult::Lex { .. } => "lex",
         RemoteResult::Records { .. } => "records",
+        RemoteResult::VectorSearch { .. } => "vector_search",
         RemoteResult::Node { .. } => "node",
         RemoteResult::Snapshot { .. } => "snapshot",
         RemoteResult::Transaction { .. } => "transaction",
@@ -2177,6 +2335,7 @@ fn remote_result_to_js(result: &RemoteResult) -> std::result::Result<JsValue, Js
         }
         RemoteResult::Lex { entries } => lex_entries_to_js(entries),
         RemoteResult::Records { result } => to_js(result),
+        RemoteResult::VectorSearch { result } => to_js(result),
         RemoteResult::Node { node } => to_js(node),
         RemoteResult::Snapshot { snapshot } => to_js(snapshot),
         RemoteResult::Transaction { report } => to_js(report),
@@ -2573,6 +2732,37 @@ impl WasmWebSocketSync {
         }
     }
 
+    #[wasm_bindgen(js_name = vectorSearch)]
+    pub async fn vector_search(
+        &self,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::VectorSearch {
+                collection,
+                query,
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::VectorSearch { result } => to_js(&result),
+            other => Err(JsValue::from_str(&format!(
+                "expected vector_search result, received {other:?}"
+            ))),
+        }
+    }
+
     pub async fn node(
         &self,
         id: String,
@@ -2687,6 +2877,30 @@ impl WasmWebSocketSync {
         start_remote_watch_with_policy_state(&self.state, policy, PullRequestKind::Records { scan })
     }
 
+    #[wasm_bindgen(js_name = watchVectorSearch)]
+    pub fn watch_vector_search(
+        &self,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::VectorSearch {
+                collection,
+                query,
+                spec,
+            },
+        )
+    }
+
     #[wasm_bindgen(js_name = watchNode)]
     pub fn watch_node(
         &self,
@@ -2770,6 +2984,29 @@ impl WasmWebSocketSync {
         let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         start_remote_watch_state(&self.state, peer_id, PullRequestKind::Records { scan })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteVectorSearch)]
+    pub fn watch_remote_vector_search(
+        &self,
+        peer_id: String,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_remote_watch_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::VectorSearch {
+                collection,
+                query,
+                spec,
+            },
+        )
     }
 
     #[wasm_bindgen(js_name = watchRemoteNode)]
@@ -2871,6 +3108,36 @@ impl WasmWebSocketSync {
             RemoteResult::Records { result } => to_js(&result),
             other => Err(JsValue::from_str(&format!(
                 "expected records result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = remoteVectorSearch)]
+    pub async fn remote_vector_search(
+        &self,
+        peer_id: String,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        match request_remote_result_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::VectorSearch {
+                collection,
+                query,
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::VectorSearch { result } => to_js(&result),
+            other => Err(JsValue::from_str(&format!(
+                "expected vector_search result, received {other:?}"
             ))),
         }
     }
@@ -3127,6 +3394,30 @@ impl WasmWebRtcMesh {
         )
     }
 
+    #[wasm_bindgen(js_name = watchVectorSearch)]
+    pub fn watch_vector_search(
+        &self,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::VectorSearch {
+                collection,
+                query,
+                spec,
+            },
+        )
+    }
+
     #[wasm_bindgen(js_name = watchNode)]
     pub fn watch_node(
         &self,
@@ -3210,6 +3501,29 @@ impl WasmWebRtcMesh {
         let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         start_mesh_remote_watch_state(&self.state, peer_id, PullRequestKind::Records { scan })
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteVectorSearch)]
+    pub fn watch_remote_vector_search(
+        &self,
+        peer_id: String,
+        collection: String,
+        query: JsValue,
+        spec: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let query: Vec<f32> = serde_wasm_bindgen::from_value(query)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let spec: VectorSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_mesh_remote_watch_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::VectorSearch {
+                collection,
+                query,
+                spec,
+            },
+        )
     }
 
     #[wasm_bindgen(js_name = watchRemoteNode)]
@@ -3939,7 +4253,8 @@ async fn request_remote_result_with_policy_state(
     request_kind: PullRequestKind,
 ) -> std::result::Result<RemoteResult, JsValue> {
     let capability = pull_capability_for_request(&request_kind);
-    let peer_id = select_relay_peer_for_policy_state(state, &policy, capability)?;
+    let peer_id =
+        select_relay_peer_for_policy_state(state, &policy, capability, Some(&request_kind))?;
     request_remote_result_state(state, peer_id, request_kind).await
 }
 
@@ -4010,7 +4325,8 @@ fn start_remote_watch_with_policy_state(
     request_kind: PullRequestKind,
 ) -> std::result::Result<WasmRemoteWatch, JsValue> {
     let capability = format!("watch_{}", request_kind.kind_name());
-    let peer_id = select_relay_peer_for_policy_state(state, &policy, Some(&capability))?;
+    let peer_id =
+        select_relay_peer_for_policy_state(state, &policy, Some(&capability), Some(&request_kind))?;
     start_remote_watch_state(state, peer_id, request_kind)
 }
 
@@ -4030,6 +4346,7 @@ fn select_relay_peer_for_policy_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
     policy: &RemoteInterestPolicy,
     capability: Option<&str>,
+    request: Option<&PullRequestKind>,
 ) -> std::result::Result<String, JsValue> {
     if let Some(peer_ids) = explicit_policy_peers(policy)? {
         if peer_ids.is_empty() {
@@ -4045,7 +4362,7 @@ fn select_relay_peer_for_policy_state(
             .into_iter()
             .find(|peer_id| {
                 borrowed.router.known_peers().iter().any(|peer| {
-                    peer.peer_id == *peer_id && peer_supports_capability(peer, capability)
+                    peer.peer_id == *peer_id && peer_supports_request(peer, capability, request)
                 })
             })
             .ok_or_else(|| {
@@ -4056,10 +4373,11 @@ fn select_relay_peer_for_policy_state(
             });
     }
 
-    let candidates = relay_peer_candidates_state(state);
+    let mut candidates = relay_peer_candidates_state(state);
+    prefer_vector_request_candidates(&mut candidates, request);
     if let Some(peer) = candidates
         .iter()
-        .find(|peer| peer_supports_capability(peer, capability))
+        .find(|peer| peer_supports_request(peer, capability, request))
     {
         return Ok(peer.peer_id.clone());
     }
@@ -4139,12 +4457,70 @@ fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>
     capability.is_none_or(|capability| peer.capabilities.iter().any(|item| item == capability))
 }
 
+fn peer_supports_request(
+    peer: &crate::PeerPresence,
+    capability: Option<&str>,
+    request: Option<&PullRequestKind>,
+) -> bool {
+    if !peer_supports_capability(peer, capability) {
+        return false;
+    }
+    vector_request_hint_score(peer, request) != Some(0)
+}
+
+fn prefer_vector_request_candidates(
+    candidates: &mut [crate::PeerPresence],
+    request: Option<&PullRequestKind>,
+) {
+    candidates.sort_by(|left, right| {
+        vector_request_hint_score(right, request)
+            .unwrap_or(1)
+            .cmp(&vector_request_hint_score(left, request).unwrap_or(1))
+    });
+}
+
+fn vector_request_hint_score(
+    peer: &crate::PeerPresence,
+    request: Option<&PullRequestKind>,
+) -> Option<u8> {
+    let Some(PullRequestKind::VectorSearch {
+        collection,
+        query,
+        spec,
+    }) = request
+    else {
+        return None;
+    };
+    let prefix = format!("vector_collection:{}:", crate::encode_component(collection));
+    let hints = peer
+        .capabilities
+        .iter()
+        .filter(|item| item.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    if hints.is_empty() {
+        return None;
+    }
+    let allow_stale = spec.stale_policy == crate::VectorStalePolicy::AllowStale;
+    let query_dim = query.len().to_string();
+    Some(
+        hints
+            .iter()
+            .any(|hint| {
+                let parts = hint.split(':').collect::<Vec<_>>();
+                parts.len() >= 6 && parts[2] == query_dim && (allow_stale || parts[4] == "ready")
+            })
+            .then_some(2)
+            .unwrap_or(0),
+    )
+}
+
 fn pull_capability_for_request(request: &PullRequestKind) -> Option<&'static str> {
     match request {
         PullRequestKind::Get { .. } => Some("pull_get"),
         PullRequestKind::Query { .. } => Some("pull_query"),
         PullRequestKind::Lex { .. } => Some("pull_lex"),
         PullRequestKind::Records { .. } => Some("pull_records"),
+        PullRequestKind::VectorSearch { .. } => Some("pull_vector_search"),
         PullRequestKind::Snapshot { .. } => Some("snapshot"),
         PullRequestKind::Node { .. } => Some("pull_node"),
         PullRequestKind::Map { .. } => Some("pull_map"),
@@ -4580,7 +4956,8 @@ fn start_mesh_remote_watch_with_policy_state(
     request_kind: PullRequestKind,
 ) -> std::result::Result<WasmRemoteWatch, JsValue> {
     let capability = format!("watch_{}", request_kind.kind_name());
-    let peer_id = select_mesh_peer_for_policy_state(state, &policy, Some(&capability))?;
+    let peer_id =
+        select_mesh_peer_for_policy_state(state, &policy, Some(&capability), Some(&request_kind))?;
     start_mesh_remote_watch_state(state, peer_id, request_kind)
 }
 
@@ -4588,6 +4965,7 @@ fn select_mesh_peer_for_policy_state(
     state: &Rc<RefCell<WebRtcMeshState>>,
     policy: &RemoteInterestPolicy,
     capability: Option<&str>,
+    request: Option<&PullRequestKind>,
 ) -> std::result::Result<String, JsValue> {
     if let Some(peer_ids) = explicit_policy_peers(policy)? {
         if peer_ids.is_empty() {
@@ -4606,7 +4984,7 @@ fn select_mesh_peer_for_policy_state(
                     .recommendations
                     .get(peer_id)
                     .is_some_and(|recommendation| {
-                        peer_supports_capability(&recommendation.peer, capability)
+                        peer_supports_request(&recommendation.peer, capability, request)
                     })
             })
             .ok_or_else(|| {
@@ -4617,10 +4995,11 @@ fn select_mesh_peer_for_policy_state(
             });
     }
 
-    let candidates = mesh_peer_candidates_state(state);
+    let mut candidates = mesh_peer_candidates_state(state);
+    prefer_vector_request_candidates(&mut candidates, request);
     if let Some(peer) = candidates
         .iter()
-        .find(|peer| peer_supports_capability(peer, capability))
+        .find(|peer| peer_supports_request(peer, capability, request))
     {
         return Ok(peer.peer_id.clone());
     }
@@ -5127,6 +5506,12 @@ fn apply_response_body_state(
             }
             None
         }
+        PullResponseBody::VectorSearch { result } => {
+            *accumulator = PullAccumulator::VectorSearch {
+                result: Some(result.clone()),
+            };
+            None
+        }
         PullResponseBody::Node { node } => {
             *accumulator = PullAccumulator::Node { node: node.clone() };
             None
@@ -5180,6 +5565,7 @@ impl PullAccumulator {
                 entries: Vec::new(),
                 next_cursor: None,
             },
+            PullRequestKind::VectorSearch { .. } => Self::VectorSearch { result: None },
             PullRequestKind::Node { .. } => Self::Node { node: None },
             PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -5205,6 +5591,13 @@ impl PullAccumulator {
                     entries,
                     next_cursor,
                 },
+            }),
+            Self::VectorSearch { result } => Ok(RemoteResult::VectorSearch {
+                result: result.ok_or_else(|| {
+                    crate::PrimadbError::Message(
+                        "vector search response completed without a result".to_owned(),
+                    )
+                })?,
             }),
             Self::Node { node } => Ok(RemoteResult::Node { node }),
             Self::Snapshot {
@@ -5447,21 +5840,24 @@ fn send_mesh_presence_state(
         let MeshSignalingTransport::Relay { socket, .. } = &borrowed.signaling else {
             return Ok(());
         };
+        let mut capabilities = vec![
+            "signal".to_owned(),
+            "webrtc".to_owned(),
+            "peer_exchange".to_owned(),
+            "watch_get".to_owned(),
+            "watch_map".to_owned(),
+            "watch_query".to_owned(),
+            "watch_lex".to_owned(),
+            "watch_records".to_owned(),
+            "watch_vector_search".to_owned(),
+            "watch_node".to_owned(),
+            "watch_snapshot".to_owned(),
+        ];
+        capabilities.extend(borrowed.db.vector_presence_capabilities());
         let mut route = borrowed.router.presence(
             borrowed.db.replica_id(),
             "webrtc-relay",
-            vec![
-                "signal".to_owned(),
-                "webrtc".to_owned(),
-                "peer_exchange".to_owned(),
-                "watch_get".to_owned(),
-                "watch_map".to_owned(),
-                "watch_query".to_owned(),
-                "watch_lex".to_owned(),
-                "watch_records".to_owned(),
-                "watch_node".to_owned(),
-                "watch_snapshot".to_owned(),
-            ],
+            capabilities,
             vec![format!("mesh:{}", borrowed.room)],
         );
         if let RoutePayload::Presence { peer } = &mut route.payload {
@@ -5925,6 +6321,14 @@ fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEve
                     .touched_record_keys
                     .iter()
                     .any(|key| scan.matches_key(key)));
+    }
+    if let PullRequestKind::VectorSearch { collection, .. } = &watch.request_kind {
+        return event.records_changed
+            && (event.touched_record_keys.is_empty()
+                || event.touched_record_keys.iter().any(|key| {
+                    crate::vector_collection_from_record_key(key).as_deref()
+                        == Some(collection.as_str())
+                }));
     }
     event.full_refresh
         || watch.interest_path.as_ref().map_or(true, |path| {

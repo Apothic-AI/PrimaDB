@@ -34,6 +34,7 @@ mod storage;
 mod sync;
 mod traversal;
 mod value;
+mod vector;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -69,7 +70,7 @@ pub use crypto::{
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, NodeFetchScheduler, Primadb,
     QueryBuilder, RecordWatchSubscription, Scope, Subscription, Transaction, TransactionChain,
-    TraversalSubscription, VacuumReport,
+    TraversalSubscription, VacuumReport, VectorWatchSubscription,
 };
 pub use durable::{
     DurableStorageBinding, DurableStorageConfig, SegmentDurability, SegmentFileStoreOptions,
@@ -138,3 +139,15 @@ pub use traversal::{
     TraversalSpec, TraversalStrategy,
 };
 pub use value::{FieldState, FieldValue, NodeId, NodeState, SetState};
+#[cfg(any(
+    target_arch = "wasm32",
+    feature = "native-websocket",
+    feature = "native-webrtc"
+))]
+pub(crate) use vector::vector_collection_from_record_key;
+pub use vector::{
+    VectorBackendKind, VectorCacheFiles, VectorCacheKeyRecord, VectorCacheManifest,
+    VectorChunkHeader, VectorChunkingConfig, VectorCollectionConfig, VectorEntry, VectorFilter,
+    VectorHnswConfig, VectorIndexStats, VectorItemMeta, VectorManagerState, VectorMatch,
+    VectorMetadataFilter, VectorMetric, VectorSearchResult, VectorSearchSpec, VectorStalePolicy,
+};

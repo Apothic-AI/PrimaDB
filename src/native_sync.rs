@@ -76,6 +76,9 @@ enum PullAccumulator {
         entries: Vec<RecordEntry>,
         next_cursor: Option<String>,
     },
+    VectorSearch {
+        result: Option<crate::VectorSearchResult>,
+    },
     Node {
         node: Option<crate::NodeState>,
     },
@@ -404,6 +407,24 @@ impl NativeWebSocketSync {
         )
     }
 
+    pub fn watch_vector_search(
+        &self,
+        peer_id: impl Into<String>,
+        collection: impl Into<String>,
+        query: Vec<f32>,
+        spec: crate::VectorSearchSpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::VectorSearch {
+                collection: collection.into(),
+                query,
+                spec,
+            },
+        )
+    }
+
     pub fn watch_node(
         &self,
         peer_id: impl Into<String>,
@@ -479,6 +500,24 @@ impl NativeWebSocketSync {
             &self.state,
             policy,
             crate::PullRequestKind::Records { scan },
+        )
+    }
+
+    pub fn watch_vector_search_with_policy(
+        &self,
+        collection: impl Into<String>,
+        query: Vec<f32>,
+        spec: crate::VectorSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::VectorSearch {
+                collection: collection.into(),
+                query,
+                spec,
+            },
         )
     }
 
@@ -580,6 +619,31 @@ impl NativeWebSocketSync {
             RemoteResult::Records { result } => Ok(result),
             other => Err(PrimadbError::Message(format!(
                 "expected records result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_vector_search(
+        &self,
+        peer_id: impl Into<String>,
+        collection: impl Into<String>,
+        query: Vec<f32>,
+        spec: crate::VectorSearchSpec,
+    ) -> Result<crate::VectorSearchResult> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::VectorSearch {
+                collection: collection.into(),
+                query,
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::VectorSearch { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected vector_search result, received {other:?}"
             ))),
         }
     }
@@ -700,6 +764,31 @@ impl NativeWebSocketSync {
         }
     }
 
+    pub async fn remote_vector_search_with_policy(
+        &self,
+        collection: impl Into<String>,
+        query: Vec<f32>,
+        spec: crate::VectorSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<crate::VectorSearchResult> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::VectorSearch {
+                collection: collection.into(),
+                query,
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::VectorSearch { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected vector_search result, received {other:?}"
+            ))),
+        }
+    }
+
     pub async fn remote_node_with_policy(
         &self,
         id: impl Into<String>,
@@ -811,7 +900,7 @@ async fn request_remote_result_with_policy(
     request_kind: crate::PullRequestKind,
 ) -> Result<RemoteResult> {
     let capability = pull_capability_for_request(&request_kind);
-    let peer_id = select_relay_peer_for_policy(state, &policy, capability)?;
+    let peer_id = select_relay_peer_for_policy(state, &policy, capability, Some(&request_kind))?;
     request_remote_result(state, peer_id, request_kind).await
 }
 
@@ -865,7 +954,8 @@ fn start_remote_watch_with_policy(
     request_kind: crate::PullRequestKind,
 ) -> Result<RemoteWatchSubscription> {
     let capability = Some(watch_capability_for_request(&request_kind));
-    let peer_id = select_relay_peer_for_policy(state, &policy, capability.as_deref())?;
+    let peer_id =
+        select_relay_peer_for_policy(state, &policy, capability.as_deref(), Some(&request_kind))?;
     start_remote_watch(state, peer_id, request_kind)
 }
 
@@ -920,6 +1010,7 @@ fn select_relay_peer_for_policy(
     state: &Arc<NativeWebSocketSyncState>,
     policy: &RemoteInterestPolicy,
     capability: Option<&str>,
+    request: Option<&crate::PullRequestKind>,
 ) -> Result<String> {
     if let Some(peer_ids) = explicit_policy_peers(policy)? {
         if peer_ids.is_empty() {
@@ -935,7 +1026,7 @@ fn select_relay_peer_for_policy(
             .into_iter()
             .find(|peer_id| {
                 known.iter().any(|peer| {
-                    peer.peer_id == *peer_id && peer_supports_capability(peer, capability)
+                    peer.peer_id == *peer_id && peer_supports_request(peer, capability, request)
                 })
             })
             .ok_or_else(|| {
@@ -946,10 +1037,11 @@ fn select_relay_peer_for_policy(
             });
     }
 
-    let candidates = relay_peer_candidates(state);
+    let mut candidates = relay_peer_candidates(state);
+    prefer_vector_request_candidates(&mut candidates, request);
     if let Some(peer) = candidates
         .iter()
-        .find(|peer| peer_supports_capability(peer, capability))
+        .find(|peer| peer_supports_request(peer, capability, request))
     {
         return Ok(peer.peer_id.clone());
     }
@@ -1025,12 +1117,70 @@ fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>
     capability.is_none_or(|capability| peer.capabilities.iter().any(|item| item == capability))
 }
 
+fn peer_supports_request(
+    peer: &crate::PeerPresence,
+    capability: Option<&str>,
+    request: Option<&crate::PullRequestKind>,
+) -> bool {
+    if !peer_supports_capability(peer, capability) {
+        return false;
+    }
+    vector_request_hint_score(peer, request) != Some(0)
+}
+
+fn prefer_vector_request_candidates(
+    candidates: &mut [crate::PeerPresence],
+    request: Option<&crate::PullRequestKind>,
+) {
+    candidates.sort_by(|left, right| {
+        vector_request_hint_score(right, request)
+            .unwrap_or(1)
+            .cmp(&vector_request_hint_score(left, request).unwrap_or(1))
+    });
+}
+
+fn vector_request_hint_score(
+    peer: &crate::PeerPresence,
+    request: Option<&crate::PullRequestKind>,
+) -> Option<u8> {
+    let Some(crate::PullRequestKind::VectorSearch {
+        collection,
+        query,
+        spec,
+    }) = request
+    else {
+        return None;
+    };
+    let prefix = format!("vector_collection:{}:", crate::encode_component(collection));
+    let hints = peer
+        .capabilities
+        .iter()
+        .filter(|item| item.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    if hints.is_empty() {
+        return None;
+    }
+    let allow_stale = spec.stale_policy == crate::VectorStalePolicy::AllowStale;
+    let query_dim = query.len().to_string();
+    Some(
+        hints
+            .iter()
+            .any(|hint| {
+                let parts = hint.split(':').collect::<Vec<_>>();
+                parts.len() >= 6 && parts[2] == query_dim && (allow_stale || parts[4] == "ready")
+            })
+            .then_some(2)
+            .unwrap_or(0),
+    )
+}
+
 fn pull_capability_for_request(request: &crate::PullRequestKind) -> Option<&'static str> {
     match request {
         crate::PullRequestKind::Get { .. } => Some("pull_get"),
         crate::PullRequestKind::Query { .. } => Some("pull_query"),
         crate::PullRequestKind::Lex { .. } => Some("pull_lex"),
         crate::PullRequestKind::Records { .. } => Some("pull_records"),
+        crate::PullRequestKind::VectorSearch { .. } => Some("pull_vector_search"),
         crate::PullRequestKind::Snapshot { .. } => Some("snapshot"),
         crate::PullRequestKind::Node { .. } => Some("pull_node"),
         crate::PullRequestKind::Map { .. } => Some("pull_map"),
@@ -1561,30 +1711,34 @@ async fn retry_inflight_state(state: &Arc<NativeWebSocketSyncState>) -> Result<u
 }
 
 fn build_relay_presence_route(state: &Arc<NativeWebSocketSyncState>, url: &str) -> RouteEnvelope {
+    let mut capabilities = vec![
+        "sync".to_owned(),
+        "ack".to_owned(),
+        "routing".to_owned(),
+        "snapshot".to_owned(),
+        "batch".to_owned(),
+        "pull_get".to_owned(),
+        "pull_map".to_owned(),
+        "pull_query".to_owned(),
+        "pull_lex".to_owned(),
+        "pull_records".to_owned(),
+        "pull_vector_search".to_owned(),
+        "pull_node".to_owned(),
+        "watch_get".to_owned(),
+        "watch_map".to_owned(),
+        "watch_query".to_owned(),
+        "watch_lex".to_owned(),
+        "watch_records".to_owned(),
+        "watch_vector_search".to_owned(),
+        "watch_node".to_owned(),
+        "watch_snapshot".to_owned(),
+        "peer_exchange".to_owned(),
+    ];
+    capabilities.extend(state.db.vector_presence_capabilities());
     let mut presence = state.router.presence(
         state.db.replica_id(),
         "websocket",
-        vec![
-            "sync".to_owned(),
-            "ack".to_owned(),
-            "routing".to_owned(),
-            "snapshot".to_owned(),
-            "batch".to_owned(),
-            "pull_get".to_owned(),
-            "pull_map".to_owned(),
-            "pull_query".to_owned(),
-            "pull_lex".to_owned(),
-            "pull_records".to_owned(),
-            "pull_node".to_owned(),
-            "watch_get".to_owned(),
-            "watch_map".to_owned(),
-            "watch_query".to_owned(),
-            "watch_lex".to_owned(),
-            "watch_records".to_owned(),
-            "watch_node".to_owned(),
-            "watch_snapshot".to_owned(),
-            "peer_exchange".to_owned(),
-        ],
+        capabilities,
         vec!["primadb-sync".to_owned()],
     );
     if let RoutePayload::Presence { peer } = &mut presence.payload {
@@ -1947,6 +2101,14 @@ fn incoming_watch_overlaps_event(watch: &IncomingWatch, event: &crate::ChangeEve
                     .iter()
                     .any(|key| scan.matches_key(key)));
     }
+    if let crate::PullRequestKind::VectorSearch { collection, .. } = &watch.request_kind {
+        return event.records_changed
+            && (event.touched_record_keys.is_empty()
+                || event.touched_record_keys.iter().any(|key| {
+                    crate::vector_collection_from_record_key(key).as_deref()
+                        == Some(collection.as_str())
+                }));
+    }
     event.full_refresh
         || watch.interest_path.as_ref().map_or(true, |path| {
             event
@@ -2068,6 +2230,12 @@ fn apply_response_body(
                     *current_cursor = next_cursor.clone();
                 }
             }
+            None
+        }
+        crate::PullResponseBody::VectorSearch { result } => {
+            *accumulator = PullAccumulator::VectorSearch {
+                result: Some(result.clone()),
+            };
             None
         }
         crate::PullResponseBody::Node { node } => {
@@ -2200,6 +2368,7 @@ impl PullAccumulator {
                 entries: Vec::new(),
                 next_cursor: None,
             },
+            crate::PullRequestKind::VectorSearch { .. } => Self::VectorSearch { result: None },
             crate::PullRequestKind::Node { .. } => Self::Node { node: None },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -2225,6 +2394,13 @@ impl PullAccumulator {
                     entries,
                     next_cursor,
                 },
+            }),
+            Self::VectorSearch { result } => Ok(RemoteResult::VectorSearch {
+                result: result.ok_or_else(|| {
+                    PrimadbError::Message(
+                        "vector search response completed without a result".to_owned(),
+                    )
+                })?,
             }),
             Self::Node { node } => Ok(RemoteResult::Node { node }),
             Self::Snapshot {

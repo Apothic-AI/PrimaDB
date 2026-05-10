@@ -1,4 +1,5 @@
 use crate::engine::decode_component;
+use crate::vector::{VectorCacheFiles, VectorCacheManifest};
 use crate::wasm::{WasmSegmentStorageEstimate, WasmSegmentWriteSummary};
 use crate::{DatabaseSnapshot, NodeState, StorageMetadata, StorageTransaction, encode_component};
 use serde::Serialize;
@@ -11,6 +12,87 @@ const META_FILE: &str = "meta.json";
 const NODES_DIR: &str = "nodes";
 const AUTH_DIR: &str = "auth";
 const SEGMENTS_DIR: &str = "segments";
+const VECTOR_CACHE_DIR: &str = "vector-cache";
+
+pub(crate) async fn write_vector_cache_opfs(
+    directory: &str,
+    namespace: &str,
+    collection: &str,
+    files: &VectorCacheFiles,
+) -> std::result::Result<WasmSegmentWriteSummary, JsValue> {
+    validate_opfs_path(directory, namespace)?;
+    let cache_dir = opfs_vector_cache_dir(directory, namespace, collection, true).await?;
+    let mut summary = WasmSegmentWriteSummary::default();
+
+    let manifest_bytes = serde_json::to_vec_pretty(&files.manifest).map_err(error_to_js)?;
+    write_file(&cache_dir, "vectors.f32", &files.vectors_f32).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(files.vectors_f32.len() as u64);
+
+    write_file(&cache_dir, "keys.bin", &files.keys_bin).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(files.keys_bin.len() as u64);
+
+    write_file(&cache_dir, "metadata.bin", &files.metadata_bin).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(files.metadata_bin.len() as u64);
+
+    if let Some(edgevec) = &files.backend_edgevec {
+        write_file(&cache_dir, "backend.edgevec", edgevec).await?;
+        summary.entries_written = summary.entries_written.saturating_add(1);
+        summary.estimated_bytes_written = summary
+            .estimated_bytes_written
+            .saturating_add(edgevec.len() as u64);
+    }
+
+    write_file(&cache_dir, "manifest.json", &manifest_bytes).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(manifest_bytes.len() as u64);
+
+    Ok(summary)
+}
+
+pub(crate) async fn load_vector_cache_opfs(
+    directory: &str,
+    namespace: &str,
+    collection: &str,
+) -> std::result::Result<Option<VectorCacheFiles>, JsValue> {
+    validate_opfs_path(directory, namespace)?;
+    let cache_dir = match opfs_vector_cache_dir(directory, namespace, collection, false).await {
+        Ok(dir) => dir,
+        Err(error) if is_not_found_error(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(manifest) = read_json_file::<VectorCacheManifest>(&cache_dir, "manifest.json").await?
+    else {
+        return Ok(None);
+    };
+    let Some(vectors_f32) = read_file(&cache_dir, "vectors.f32").await? else {
+        return Ok(None);
+    };
+    let Some(keys_bin) = read_file(&cache_dir, "keys.bin").await? else {
+        return Ok(None);
+    };
+    let Some(metadata_bin) = read_file(&cache_dir, "metadata.bin").await? else {
+        return Ok(None);
+    };
+    let backend_edgevec = read_file(&cache_dir, "backend.edgevec").await?;
+    Ok(Some(VectorCacheFiles {
+        manifest,
+        vectors_f32,
+        keys_bin,
+        metadata_bin,
+        backend_edgevec,
+    }))
+}
 
 pub(crate) async fn replace_segment_transaction_opfs(
     directory: &str,
@@ -198,6 +280,21 @@ async fn opfs_segment_dir(
 ) -> std::result::Result<web_sys::FileSystemDirectoryHandle, JsValue> {
     let parent = opfs_segments_parent_dir(directory, create).await?;
     get_child_directory(&parent, &encode_component(namespace), create).await
+}
+
+async fn opfs_vector_cache_dir(
+    directory: &str,
+    namespace: &str,
+    collection: &str,
+    create: bool,
+) -> std::result::Result<web_sys::FileSystemDirectoryHandle, JsValue> {
+    let mut current = opfs_root_dir().await?;
+    for component in directory_components(directory)? {
+        current = get_child_directory(&current, &component, create).await?;
+    }
+    current = get_child_directory(&current, VECTOR_CACHE_DIR, create).await?;
+    current = get_child_directory(&current, &encode_component(namespace), create).await?;
+    get_child_directory(&current, &encode_component(collection), create).await
 }
 
 async fn get_child_directory(
