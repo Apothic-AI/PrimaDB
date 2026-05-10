@@ -21,3 +21,5 @@ docs site content.
 - [ambient-remote-interest-progress.md](ambient-remote-interest-progress.md)
 - [path-reference-normalization-plan.md](path-reference-normalization-plan.md)
 - [path-reference-normalization-progress.md](path-reference-normalization-progress.md)
+- [vector-search-research-plan.md](vector-search-research-plan.md)
+- [vector-search-research-progress.md](vector-search-research-progress.md)
