@@ -62,7 +62,7 @@ That is simple and correct, but it has hard limits:
 - browser persistence is mostly whole-snapshot oriented
 - large datasets pay too much deserialize/replay cost before useful work begins
 
-The current RADisk-style adapter is therefore best understood as a durability layer, not as a mature storage engine.
+The older snapshot/log adapter is therefore best understood as a durability layer, not as a mature storage engine.
 
 ## Goals
 

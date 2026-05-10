@@ -47,7 +47,7 @@ let results = db
 Native storage is available through:
 
 - `use_file_persistence(...)`
-- `use_radisk_storage(...)`
+- `use_segment_storage(...)`
 - `open_durable_storage(...)`
 - `open_blob_storage(...)`
 

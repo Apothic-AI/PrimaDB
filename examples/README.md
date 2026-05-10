@@ -30,5 +30,5 @@
 - `native_parallel_query.rs`: Native Rayon verification example. Run with `cargo run --example native_parallel_query`.
 - `crypto_foundation.rs`: Feature-gated identity/signing/encryption demo. Run with `cargo run --features crypto --example crypto_foundation`.
 - `authenticated_sync.rs`: Feature-gated signed/encrypted sync policy demo. Run with `cargo run --features crypto --example authenticated_sync`.
-- `radisk_storage.rs`: Incremental segment-backed native storage demo exposed through the current `use_radisk_storage(...)` entrypoint. Run with `cargo run --example radisk_storage`.
+- `segment_storage.rs`: Incremental segment-backed native storage demo exposed through the `use_segment_storage(...)` entrypoint. Run with `cargo run --example segment_storage`.
 - `gun_compat.rs`: Gun-compatible API and data-marker demo. Run with `cargo run --example gun_compat`.

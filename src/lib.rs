@@ -126,7 +126,7 @@ pub use session_auth::{
 pub use snapshot::DatabaseSnapshot;
 pub use storage::{MemoryStorageAdapter, StorageAdapter, StorageReport};
 #[cfg(not(target_arch = "wasm32"))]
-pub use storage::{RadiskFileAdapter, SnapshotFileAdapter};
+pub use storage::{SnapshotFileAdapter, SnapshotLogFileAdapter};
 pub use sync::{
     PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemoteInterestPolicy,
     RemoteInterestTarget, RemotePath, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription,

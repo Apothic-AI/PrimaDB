@@ -1678,12 +1678,12 @@ impl Primadb {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn use_radisk_storage(
+    pub fn use_segment_storage(
         &self,
         directory: impl Into<std::path::PathBuf>,
-        compaction_threshold: usize,
+        journal_retention: usize,
     ) -> Result<bool> {
-        let store = crate::SegmentFileStore::new(directory, compaction_threshold)?;
+        let store = crate::SegmentFileStore::new(directory, journal_retention)?;
         self.attach_incremental_store(Arc::new(store))
     }
 
@@ -7634,15 +7634,15 @@ mod tests {
     }
 
     #[test]
-    fn radisk_storage_round_trips_state() -> Result<()> {
+    fn segment_storage_round_trips_state() -> Result<()> {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("primadb-radisk-{unique}"));
+        let path = std::env::temp_dir().join(format!("primadb-segment-{unique}"));
 
         let first = Primadb::with_replica_id("node-a");
-        assert!(!first.use_radisk_storage(path.clone(), 2)?);
+        assert!(!first.use_segment_storage(path.clone(), 2)?);
         first
             .root("docs")
             .field("hello")
@@ -7650,7 +7650,7 @@ mod tests {
         drop(first);
 
         let second = Primadb::with_replica_id("node-b");
-        assert!(second.use_radisk_storage(path.clone(), 2)?);
+        assert!(second.use_segment_storage(path.clone(), 2)?);
         let snapshot = second.root("docs").field("hello").once_json()?.unwrap();
         assert_eq!(snapshot["value"], "world");
 
@@ -7659,15 +7659,15 @@ mod tests {
     }
 
     #[test]
-    fn radisk_storage_round_trips_provisional_transactions() -> Result<()> {
+    fn segment_storage_round_trips_provisional_transactions() -> Result<()> {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("primadb-radisk-proposals-{unique}"));
+        let path = std::env::temp_dir().join(format!("primadb-segment-proposals-{unique}"));
 
-        let first = Primadb::with_replica_id("proposal-radisk-a");
-        assert!(!first.use_radisk_storage(path.clone(), 2)?);
+        let first = Primadb::with_replica_id("proposal-segment-a");
+        assert!(!first.use_segment_storage(path.clone(), 2)?);
         let scope = first.scope("accounts");
         scope.configure(ScopePolicy {
             consistency: ScopeConsistency::Coordinated,
@@ -7687,8 +7687,8 @@ mod tests {
         drop(scope);
         drop(first);
 
-        let second = Primadb::with_replica_id("proposal-radisk-b");
-        assert!(second.use_radisk_storage(path.clone(), 2)?);
+        let second = Primadb::with_replica_id("proposal-segment-b");
+        assert!(second.use_segment_storage(path.clone(), 2)?);
         let proposals = second.scope("accounts").proposals();
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0].scope, "accounts");
@@ -7706,7 +7706,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("primadb-segment-{unique}"));
 
         let writer = Primadb::with_replica_id("writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         for index in 0..24 {
             writer
                 .root("lists")
@@ -7722,7 +7722,7 @@ mod tests {
         drop(writer);
 
         let reader = Primadb::with_replica_id("reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         assert_eq!(reader.stats().nodes, 0);
 
         let open_tasks = reader
@@ -7765,7 +7765,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("primadb-segment-nested-{unique}"));
 
         let writer = Primadb::with_replica_id("writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         for index in 0..24 {
             writer
                 .root("lists")
@@ -7780,7 +7780,7 @@ mod tests {
         drop(writer);
 
         let reader = Primadb::with_replica_id("reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         assert_eq!(reader.stats().nodes, 0);
 
         let ranked = reader
@@ -7828,7 +7828,7 @@ mod tests {
         let second_ciphertext = format!("v2.{}", "b".repeat(64 * 1024));
 
         let writer = Primadb::with_replica_id("large-scalar-writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         let checkpoint = writer.root("starla").field("runtime").field("default");
         checkpoint.put(json!({
             "kind": "starla.encryptedRuntimeCheckpoint",
@@ -7852,7 +7852,7 @@ mod tests {
         drop(writer);
 
         let reader = Primadb::with_replica_id("large-scalar-reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         let restored = reader
             .root("starla")
             .field("runtime")
@@ -7880,7 +7880,7 @@ mod tests {
         let beta_ciphertext = format!("checkpoint-beta.{}", "y".repeat(64 * 1024));
 
         let writer = Primadb::with_replica_id("large-index-writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         writer.root("checkpoints").field("items").set(json!({
             "name": "alpha",
             "encryption": {
@@ -7896,7 +7896,7 @@ mod tests {
         drop(writer);
 
         let reader = Primadb::with_replica_id("large-index-reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         let exact = reader.root("checkpoints").field("items").query(QuerySpec {
             filters: vec![QueryFilter::Eq {
                 path: "encryption.ciphertext".to_owned(),
@@ -7941,15 +7941,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("primadb-segment-lock-{unique}"));
 
         let first = Primadb::with_replica_id("lock-a");
-        assert!(!first.use_radisk_storage(path.clone(), 8)?);
+        assert!(!first.use_segment_storage(path.clone(), 8)?);
 
         let second = Primadb::with_replica_id("lock-b");
-        let blocked = second.use_radisk_storage(path.clone(), 8);
+        let blocked = second.use_segment_storage(path.clone(), 8);
         assert!(blocked.is_err());
 
         drop(first);
         let third = Primadb::with_replica_id("lock-c");
-        assert!(third.use_radisk_storage(path.clone(), 8).is_ok());
+        assert!(third.use_segment_storage(path.clone(), 8).is_ok());
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())
@@ -7965,7 +7965,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("primadb-segment-recovery-{unique}"));
 
         let writer = Primadb::with_replica_id("recovery-writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         crate::engine::set_segment_fault_point_for_test(
             path.clone(),
             crate::engine::SegmentFaultPoint::AfterNodeWrites,
@@ -7978,7 +7978,7 @@ mod tests {
         drop(writer);
 
         let reader = Primadb::with_replica_id("recovery-reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         let report = reader.storage_recovery_report().unwrap_or_default();
         assert_eq!(report.applied_transactions, 1);
         let restored = reader.root("docs").field("crash").once_json()?.unwrap();
@@ -7998,7 +7998,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("primadb-segment-order-recovery-{unique}"));
 
         let writer = Primadb::with_replica_id("recovery-order-writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         writer.root("first").field("value").put("one")?;
         crate::engine::set_segment_fault_point_for_test(
             path.clone(),
@@ -8012,7 +8012,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.join("nodes"));
 
         let reader = Primadb::with_replica_id("recovery-order-reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         let report = reader.storage_recovery_report().unwrap_or_default();
         assert_eq!(report.applied_transactions, 3);
         assert_eq!(
@@ -8038,7 +8038,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("primadb-records-{unique}"));
 
         let writer = Primadb::with_replica_id("record-writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         let report = writer.apply_record_batch(RecordBatch {
             preconditions: vec![RecordPrecondition::Absent {
                 key: "agentfs/inode/1".to_owned(),
@@ -8073,7 +8073,7 @@ mod tests {
         std::fs::write(corrupt_path.join("entry.json"), b"not json")?;
 
         let reader = Primadb::with_replica_id("record-reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         assert_eq!(reader.stats().nodes, 0);
 
         let chunks = reader.scan_records(RecordScan {
@@ -8145,7 +8145,7 @@ mod tests {
         drop(reader);
 
         let reopened = Primadb::with_replica_id("record-reopened");
-        assert!(reopened.use_radisk_storage(path.clone(), 8)?);
+        assert!(reopened.use_segment_storage(path.clone(), 8)?);
         let chunks = reopened.scan_records(RecordScan {
             prefix: Some("agentfs/chunk/2/".to_owned()),
             ..RecordScan::default()
@@ -8172,12 +8172,12 @@ mod tests {
         let long_prefix = format!("agentfs/long/{}", "x".repeat(300));
 
         let writer = Primadb::with_replica_id("long-record-key-writer");
-        assert!(!writer.use_radisk_storage(path.clone(), 8)?);
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
         writer.put_record_json(&long_key, json!({"ok": true}))?;
         drop(writer);
 
         let reader = Primadb::with_replica_id("long-record-key-reader");
-        assert!(reader.use_radisk_storage(path.clone(), 8)?);
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
         let restored = reader.get_record(&long_key)?.expect("long key should load");
         assert_eq!(restored.value, RecordValue::Json(json!({"ok": true})));
         let page = reader.scan_records(RecordScan {
@@ -8288,7 +8288,7 @@ mod tests {
         let blob_root = std::env::temp_dir().join(format!("primadb-vacuum-blobs-{unique}"));
 
         let db = Primadb::with_replica_id("vacuum-a");
-        assert!(!db.use_radisk_storage(storage_root.clone(), 8)?);
+        assert!(!db.use_segment_storage(storage_root.clone(), 8)?);
         db.open_blob_storage(crate::BlobStorageConfig::Files {
             directory: blob_root.display().to_string(),
             durability: Default::default(),

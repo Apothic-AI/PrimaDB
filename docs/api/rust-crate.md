@@ -259,8 +259,8 @@ This page covers the public Rust crate surface. The site also serves the full bu
 ### `storage`
 
 - `MemoryStorageAdapter`
-- `RadiskFileAdapter`
 - `SnapshotFileAdapter`
+- `SnapshotLogFileAdapter`
 - `StorageAdapter`
 - `StorageReport`
 

@@ -70,7 +70,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Gun-compatible browser runtime in [js/primadb-gun.js](js/primadb-gun.js) with current-style `get`, `put`, `set`, `on`, `once`, `open`, `load`, `map`, `then`, `back`, `not`, and `user` flows.
 - Merge-safe snapshot import for peer catch-up without clobbering local state, plus root snapshot traversal that includes reachable linked/set-member nodes instead of only prefix-matched node IDs.
 - SEA-style browser crypto surface with pair generation, password-derived keys, sign/verify, encrypt/decrypt, HKDF-backed shared-secret derivation, and certificates.
-- Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and RADisk-style append-log file adapter.
+- Storage adapter ecosystem with an in-memory adapter, snapshot-file adapter, and snapshot-log file adapter.
 - Incremental segment-backed native storage with lazy node restore, canonical node/index files, ordered record key storage, manifest metadata, nested scalar indexes, bounded direct-index scans, journaled transactions, startup recovery, explicit fsync durability, single-writer file locking, and explicit vacuum/GC support.
 - Lexical/range traversal via `chain.lex()` / `chain.scan(...)`.
 - Gun compatibility surface with `Gun` / `GunChain`, Gun link markers, and Gun graph import/export helpers.
@@ -525,7 +525,7 @@ The Gun-compatible runtime layers a DAM-style browser relay client on top of tho
 - [examples/native_parallel_query.rs](examples/native_parallel_query.rs): Native Rayon verification example, runnable with `cargo run --example native_parallel_query`.
 - [examples/crypto_foundation.rs](examples/crypto_foundation.rs): Signing and encryption primitives, runnable with `cargo run --features crypto --example crypto_foundation`.
 - [examples/authenticated_sync.rs](examples/authenticated_sync.rs): Signed and encrypted sync policy demo, runnable with `cargo run --features crypto --example authenticated_sync`.
-- [examples/radisk_storage.rs](examples/radisk_storage.rs): Incremental segment-backed native storage demo through the current `use_radisk_storage(...)` entrypoint, runnable with `cargo run --example radisk_storage`.
+- [examples/segment_storage.rs](examples/segment_storage.rs): Incremental segment-backed native storage demo through the `use_segment_storage(...)` entrypoint, runnable with `cargo run --example segment_storage`.
 - [examples/gun_compat.rs](examples/gun_compat.rs): Gun-compatible API demo, runnable with `cargo run --example gun_compat`.
 
 ## Running Examples
@@ -868,7 +868,7 @@ Primadb supports:
 - OPFS segment persistence in WASM for large, high-churn browser-local graph state
 - shared durable storage configuration via `open_durable_storage(...)` / `openDurableStorage(...)`
 - storage adapters via `attach_storage_adapter(...)`
-- a RADisk-style file adapter with `use_radisk_storage(...)`
+- segment-backed native storage with `use_segment_storage(...)`
 
 ## Data Markers
 
@@ -921,5 +921,5 @@ The originally identified gaps are now covered by concrete subsystems in this re
 - data-level signed field auth and delegated certificates in the core
 - browser relay sync without `BroadcastChannel`
 - lexical/range traversal
-- RADisk-style storage adapters
+- segment-backed native storage adapters
 - browser and native example integrations

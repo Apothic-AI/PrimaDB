@@ -132,7 +132,7 @@ Plan:
 
 3. Make the lock part of durable storage opening, not an AgentFS wrapper.
    - `open_durable_storage(SegmentFiles { ... })` should acquire the lock.
-   - `use_radisk_storage` should acquire the same lock.
+   - `use_segment_storage` should acquire the same lock.
    - Direct construction of `SegmentFileStore` should still make the lock
      behavior explicit.
 
@@ -321,8 +321,7 @@ Verification:
 
 - Should `SegmentFiles` default to `Full` durability whenever opened through
   `open_durable_storage`, accepting slower writes for stronger guarantees?
-- Should `use_radisk_storage` be renamed as part of this work to avoid implying
-  it is Gun RADisk-compatible?
+- The misleading segment-storage shortcut was renamed to `use_segment_storage`.
 - Should lock mode default be fail-fast or wait-with-timeout?
 - Should record/range APIs be exposed as `db.records(...)`, `db.scope(...).records(...)`,
   or as methods directly on `Primadb`?

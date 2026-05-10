@@ -33,7 +33,7 @@ pub struct SnapshotFileAdapter {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
-pub struct RadiskFileAdapter {
+pub struct SnapshotLogFileAdapter {
     directory: std::path::PathBuf,
     replica_id: String,
     compaction_threshold: usize,
@@ -92,7 +92,7 @@ impl StorageAdapter for SnapshotFileAdapter {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl RadiskFileAdapter {
+impl SnapshotLogFileAdapter {
     pub fn new(
         directory: impl Into<std::path::PathBuf>,
         replica_id: impl Into<String>,
@@ -138,9 +138,9 @@ impl RadiskFileAdapter {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl StorageAdapter for RadiskFileAdapter {
+impl StorageAdapter for SnapshotLogFileAdapter {
     fn name(&self) -> &str {
-        "radisk_file"
+        "snapshot_log_file"
     }
 
     fn load_snapshot(&self) -> Result<Option<DatabaseSnapshot>> {
