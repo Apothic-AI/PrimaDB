@@ -25,7 +25,10 @@ Transport roles:
   same-browser demos.
 
 MoQ should be implemented as a relay underlay, not as a separate sync protocol. A MoQ-connected
-client can be part of the same PrimaDB network through a relay/full node, but it is not directly
+client can exchange route traffic through a generic MoQ relay/service such as Cloudflare MoQ without
+requiring that relay to be a PrimaDB full node. A PrimaDB-aware full node or gateway is still needed
+when route traffic must be bridged between MoQ clients and WebSocket/WebRTC peers, unless every peer
+participates in the same route-mode MoQ namespace directly. A MoQ-only client is not directly
 WebRTC-meshed unless it also supports WebRTC.
 
 ## Proposed Architecture
@@ -51,12 +54,14 @@ WebRTC-meshed unless it also supports WebRTC.
    - Keep the current package-local sync-envelope helper only as a legacy/simple example until the
      route-mode MoQ adapter replaces it.
 
-4. Turn the native full node into a multi-transport route relay.
+4. Turn the native full node into a multi-transport route relay/gateway.
    - One full node can listen on WebSocket and MoQ/WebTransport simultaneously.
    - It forwards route envelopes across all connected sessions.
    - If it has a local DB, it also participates as a normal peer/authority.
    - Session auth, hooks, redaction, pull/watch serving, and strict-scope authority behavior apply
      consistently regardless of ingress transport.
+   - This complements, but does not replace, generic MoQ relay services; generic MoQ relays can
+     fan out route envelopes, while PrimaDB-aware gateways understand and bridge the overlay.
 
 5. Generalize public network config.
    - Replace transport-specific relay URLs with a tagged relay endpoint config:
@@ -86,10 +91,12 @@ WebRTC-meshed unless it also supports WebRTC.
    - Prove one browser client and one native client can exchange `RouteEnvelope` through MoQ.
    - Decide dependency and feature flags after the interop spike, not before.
 
-4. Add native MoQ relay/full-node listener.
+4. Add native MoQ relay/full-node listener and Cloudflare-compatible client path.
    - Serve MoQ route sessions.
    - Bridge MoQ and WebSocket clients through one route coordinator.
    - Add session auth and hook coverage.
+   - Verify route-mode MoQ over a generic public MoQ relay/service, not only a self-hosted PrimaDB
+     full node.
 
 5. Add MoQ relay clients to browser, Node, Python, and Rust.
    - Expose the same high-level relay/remote-watch API surface as WebSocket.
@@ -113,7 +120,8 @@ WebRTC-meshed unless it also supports WebRTC.
 - WebRTC via WebSocket signaling: existing mesh behavior remains intact.
 - WebRTC via MoQ signaling: WebRTC-capable peers form direct data channels through MoQ relay
   signaling.
-- MoQ-only plus WebRTC peer: traffic works through relay, but no direct WebRTC link is expected.
+- MoQ-only plus WebRTC peer: traffic works through a PrimaDB-aware gateway or shared route-mode MoQ
+  relay namespace, but no direct WebRTC link is expected.
 - Multi-homed peer: same peer connected via multiple underlays does not loop or duplicate route
   delivery.
 - Browser, Node, Python, and Rust examples cover both single-transport and mixed-transport cases.
