@@ -96,6 +96,78 @@ export interface ConnectPrimadbMoqOptions extends PrimadbMoqSessionOptions {
   transport?: WebTransport;
 }
 
+export interface PrimadbExternalMesh {
+  peerId(): string;
+  signalingMode(): string;
+  relayUrl(): string | undefined;
+  signalingReadyState(): number | undefined;
+  peerCount(): number;
+  openPeerCount(): number;
+  acceptSignalingRoute(route: PrimadbRouteEnvelope): void;
+  announceSignalingPresence(): void;
+  close(): void;
+}
+
+export interface PrimadbMeshLike extends PrimadbLike {
+  connectMeshWithExternalSignaling(
+    config: PrimadbExternalMeshConfig,
+    sendRoute: (route: PrimadbRouteEnvelope) => unknown,
+  ): PrimadbExternalMesh;
+}
+
+export interface PrimadbMoqRelayEndpointConfig {
+  kind: "moq";
+  url: string;
+  path: string;
+  track?: string;
+  channel?: string;
+  subscribe?: string[];
+  draft?: "draft_07" | "draft_14" | "draft_latest";
+  retryIntervalMs?: number;
+  sessionAuth?: unknown;
+}
+
+export interface PrimadbExternalMeshConfig {
+  room: string;
+  signaling?: "relay" | "broadcast_channel";
+  relayEndpoint?: PrimadbMoqRelayEndpointConfig;
+  retryIntervalMs?: number;
+  iceServers?: unknown[];
+  sessionAuth?: unknown;
+  [key: string]: unknown;
+}
+
+export interface ConnectPrimadbMeshViaMoqOptions extends ConnectPrimadbMoqOptions {
+  room: string;
+  retryIntervalMs?: number;
+  iceServers?: unknown[];
+  sessionAuth?: unknown;
+  draft?: "draft_07" | "draft_14" | "draft_latest";
+  meshConfig?: Record<string, unknown>;
+}
+
+export interface ConnectPrimadbMeshViaMoqSessionOptions {
+  room: string;
+  url?: string | URL;
+  path?: string;
+  track?: string;
+  channel?: string;
+  subscribe?: string[];
+  retryIntervalMs?: number;
+  intervalMs?: number;
+  iceServers?: unknown[];
+  sessionAuth?: unknown;
+  draft?: "draft_07" | "draft_14" | "draft_latest";
+  meshConfig?: Record<string, unknown>;
+  closeMoqSession?: boolean;
+}
+
+export interface PrimadbMoqMesh {
+  mesh: PrimadbExternalMesh;
+  moq: PrimadbMoqSession;
+  close(): void;
+}
+
 export interface PrimadbMoqLoopbackOptions {
   publisherDb: PrimadbLike;
   subscriberDb: PrimadbLike;
@@ -220,6 +292,93 @@ export async function connectPrimadbMoq(
   }
   session.startAutoFlush();
   return session;
+}
+
+export async function connectMeshViaMoq(
+  db: PrimadbMeshLike,
+  options: ConnectPrimadbMeshViaMoqOptions,
+): Promise<PrimadbMoqMesh> {
+  const room = options.room;
+  const channel = options.channel ?? `mesh:${room}`;
+  const track = options.track ?? DEFAULT_ROUTE_TRACK;
+  const subscribe = options.subscribe ?? [options.path];
+  const moq = await connectPrimadbMoq(db, {
+    ...options,
+    channel,
+    track,
+    subscribe,
+    target: options.target ?? broadcastTarget(),
+  });
+
+  return connectMeshViaMoqSession(db, moq, {
+    ...options,
+    channel,
+    track,
+    subscribe,
+    closeMoqSession: true,
+  });
+}
+
+export function connectMeshViaMoqSession(
+  db: PrimadbMeshLike,
+  moq: PrimadbMoqSession,
+  options: ConnectPrimadbMeshViaMoqSessionOptions,
+): PrimadbMoqMesh {
+  const room = options.room;
+  const channel = options.channel ?? moq.channel;
+  const track = options.track ?? moq.track;
+  const subscribe = options.subscribe ?? [moq.path];
+  const relayEndpoint: PrimadbMoqRelayEndpointConfig = {
+    kind: "moq",
+    url: String(options.url ?? "moq://external"),
+    path: options.path ?? moq.path,
+    track,
+    channel,
+    subscribe,
+  };
+  const retryIntervalMs = options.retryIntervalMs ?? options.intervalMs;
+  if (options.draft) {
+    relayEndpoint.draft = options.draft;
+  }
+  if (retryIntervalMs !== undefined) {
+    relayEndpoint.retryIntervalMs = retryIntervalMs;
+  }
+  if (options.sessionAuth !== undefined) {
+    relayEndpoint.sessionAuth = options.sessionAuth;
+  }
+
+  const meshConfig: PrimadbExternalMeshConfig = {
+    ...(options.meshConfig ?? {}),
+    room,
+    signaling: "relay",
+    relayEndpoint,
+  };
+  if (retryIntervalMs !== undefined) {
+    meshConfig.retryIntervalMs = retryIntervalMs;
+  }
+  if (options.iceServers !== undefined) {
+    meshConfig.iceServers = options.iceServers;
+  }
+  if (options.sessionAuth !== undefined) {
+    meshConfig.sessionAuth = options.sessionAuth;
+  }
+
+  const mesh = db.connectMeshWithExternalSignaling(meshConfig, (route) => moq.sendRoute(route));
+  const unsubscribe = moq.onRoute((route) => mesh.acceptSignalingRoute(route));
+  mesh.announceSignalingPresence();
+  moq.announcePresence();
+
+  return {
+    mesh,
+    moq,
+    close() {
+      unsubscribe();
+      mesh.close();
+      if (options.closeMoqSession !== false) {
+        moq.close();
+      }
+    },
+  };
 }
 
 export class PrimadbMoqSession {

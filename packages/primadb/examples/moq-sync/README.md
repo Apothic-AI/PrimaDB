@@ -28,3 +28,13 @@ http://127.0.0.1:4181/moq-sync/
 cd /path/to/primadb/packages/primadb/examples
 pnpm run smoke:moq
 ```
+
+Optional live relay probe:
+
+```bash
+MOQ_RELAY=https://relay.example.com/anon pnpm run smoke:moq-live
+```
+
+If `MOQ_RELAY` is not set, the live probe reads `MOQ_DRAFT14_RELAY` and `MOQ_DRAFT07_RELAY` from
+the project `.env`. The probe reports browser/browser and browser/Node route exchange separately so
+draft/runtime failures are visible instead of hidden by the deterministic loopback.

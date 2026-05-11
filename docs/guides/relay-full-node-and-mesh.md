@@ -77,6 +77,25 @@ const mesh = await db.connectMesh({
 PrimaDB core and packages do not hard-code STUN servers. Examples may pass public STUN servers
 explicitly.
 
+MoQ can also be used as a signaling underlay when the browser package is loaded with the
+`primadb/moq` helper:
+
+```ts
+import { connectMeshViaMoq } from "primadb/moq";
+
+const mesh = await connectMeshViaMoq(db, {
+  url: "https://relay.example.com/anon",
+  path: `primadb/mesh/demo/${db.replicaId()}`,
+  subscribe: ["primadb/mesh/demo/known-peer"],
+  room: "demo",
+  iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }],
+});
+```
+
+This uses MoQ only for WebRTC signaling. Data still moves over WebRTC data channels after peers
+connect. A PrimaDB-aware gateway/full node is still required when MoQ route traffic must be bridged
+to WebSocket/WebRTC peers that are not participating in the same MoQ route namespace.
+
 ## Remote Reads And Watches
 
 Relay and mesh transports support peer-agnostic remote interests once peers are connected. Relay

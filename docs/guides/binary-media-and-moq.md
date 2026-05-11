@@ -87,18 +87,59 @@ Generic MoQ relays can fan out these frames to subscribers that know the same ro
 track. A PrimaDB-aware gateway/full node is still needed to bridge that MoQ route traffic to
 WebSocket/WebRTC sessions, enforce hooks/auth, and host durable state.
 
+Generic public relays may not support broadcast discovery/ANNOUNCE. When using a relay such as
+Cloudflare MoQ, prefer one publish path per peer and configure each peer with the remote paths it
+should subscribe to, or route through a PrimaDB-aware gateway that can bridge and advertise peers.
+
+## MoQ-Backed WebRTC Signaling
+
+Browser WebRTC mesh can use a MoQ route session for signaling while keeping WebRTC data channels as
+the direct data underlay:
+
+```ts
+import { connectMeshViaMoq } from "primadb/moq";
+
+const mesh = await connectMeshViaMoq(db, {
+  url: "https://relay.example.com/anon",
+  path: `primadb/mesh/demo/${db.replicaId()}`,
+  subscribe: ["primadb/mesh/demo/peer-b"],
+  room: "demo",
+  iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }],
+});
+```
+
+`connectMeshViaMoq(...)` creates a route-mode `PrimadbMoqSession`, constructs the WASM mesh with
+external signaling, forwards outgoing `RoutePayload::Signal` routes into MoQ, and injects incoming
+MoQ routes back into the mesh. MoQ-only peers are still relay-routed; they only form direct WebRTC
+links if they also run the WebRTC mesh layer.
+
 Use the package-local examples when evaluating them:
 
 ```bash
 cd packages/primadb/examples
 pnpm run smoke:moq
+pnpm run smoke:moq-live # optional; gated by MOQ_RELAY, MOQ_DRAFT14_RELAY, or MOQ_DRAFT07_RELAY
 
 cd ../primadb-node
 pnpm run smoke:moq
+pnpm run smoke:moq-live # optional; requires a Node WebTransport polyfill for WebTransport-only relays
 
 cd ../primadb-python
 uv run python examples/moq_sync/main.py
+
+cargo run --features native-moq --example native_moq_live_probe
+cargo run --features "native-websocket native-moq" --example native_gateway_moq_ws_live_probe
 ```
+
+Observed Cloudflare interop caveats:
+
+- Cloudflare's preview interop documentation currently identifies draft-07 subset support and no
+  ANNOUNCE/broadcast discovery support.
+- Node v22 in this workspace has built-in WebSocket but no built-in WebTransport; the Cloudflare MoQ
+  endpoints tested did not complete the WebSocket fallback.
+- The current Rust `moq-lite` API consumes remote broadcasts through ANNOUNCE-style discovery, so
+  native Cloudflare consumption does not receive frames until Rust direct `consume(path)` support is
+  available or a compatible relay/gateway supplies announcements.
 
 See also:
 

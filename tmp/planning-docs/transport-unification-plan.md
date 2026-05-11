@@ -158,6 +158,18 @@ public hostnames only.
 Goal: prove the route-mode MoQ profile works against public Cloudflare MoQ endpoints and not only
 in local/deterministic harnesses.
 
+Status: live probes have been added and executed. The available Cloudflare endpoints did not pass
+route exchange in this environment. The current support policy is:
+
+- Treat route-mode MoQ as proven for deterministic/local `@moq/lite` loopback and self-hosted or
+  gateway-backed relays.
+- Do not advertise Cloudflare MoQ as passing until a current endpoint and draft combination passes
+  browser route exchange.
+- Do not advertise native Cloudflare consumption until Rust has direct `consume(path)` support or a
+  compatible relay provides ANNOUNCE/broadcast discovery.
+- Prefer draft-07 only for Cloudflare experiments because Cloudflare preview documentation indicates
+  draft-07 subset support; keep draft-14 as experimental until observed passing results justify it.
+
 1. Add opt-in live smoke scripts.
    - Gate every live test behind explicit environment variables.
    - Use `MOQ_DRAFT14_RELAY` first, with a fallback matrix for `MOQ_DRAFT07_RELAY`.
@@ -187,15 +199,19 @@ in local/deterministic harnesses.
      MoQ.
 
 5. Decide draft support policy from evidence.
-   - Prefer draft-14 if both JS and Rust stacks pass.
-   - If draft-07 fails or requires incompatible framing, keep it as best-effort/documented rather
-     than hiding compatibility risk.
+   - Prefer draft-07 for current Cloudflare experiments because Cloudflare preview docs identify
+     draft-07 subset support.
+   - Keep draft-14 as best-effort/experimental until the browser and Rust stacks pass against a
+     concrete endpoint.
    - Record observed Cloudflare endpoint behavior in the progress doc.
 
 ### Gap 2: Browser `connectMesh(...)` MoQ Signaling
 
 Goal: give browser WebRTC mesh the same MoQ signaling capability now available to native WebRTC
 mesh.
+
+Status: implemented for browser WASM plus TypeScript wrapper. End-to-end live WebRTC over
+Cloudflare MoQ remains blocked on a passing public MoQ route exchange endpoint.
 
 1. Add an external signaling adapter to the WASM mesh runtime.
    - Introduce a browser-only mesh signaling variant that does not own WebSocket or

@@ -10,7 +10,7 @@ use crate::{
     LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler,
     Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
     PullResponseBody, QuerySpec, RecordBatch, RecordEntry, RecordScan, RecordScanResult,
-    RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig,
+    RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig, RelayEndpointConfig,
     RemoteInterestPolicy, RemoteInterestTarget, RemotePath, RemoteResult, RemoteWatchMessage,
     RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
     RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
@@ -364,6 +364,11 @@ enum MeshSignalingTransport {
     Relay {
         socket: web_sys::WebSocket,
         relay_url: String,
+    },
+    External {
+        send_route: js_sys::Function,
+        relay_url: Option<String>,
+        mode: String,
     },
 }
 
@@ -1681,6 +1686,17 @@ impl WasmPrimadb {
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         self.connect_mesh_config(config)
     }
+
+    #[wasm_bindgen(js_name = connectMeshWithExternalSignaling)]
+    pub fn connect_mesh_with_external_signaling(
+        &self,
+        config: JsValue,
+        send_route: js_sys::Function,
+    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        let config: MeshConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.connect_mesh_config_external(config, send_route)
+    }
 }
 
 impl WasmPrimadb {
@@ -1850,6 +1866,22 @@ impl WasmPrimadb {
         &self,
         config: MeshConfig,
     ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        self.connect_mesh_config_internal(config, None)
+    }
+
+    fn connect_mesh_config_external(
+        &self,
+        config: MeshConfig,
+        send_route: js_sys::Function,
+    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
+        self.connect_mesh_config_internal(config, Some(send_route))
+    }
+
+    fn connect_mesh_config_internal(
+        &self,
+        config: MeshConfig,
+        external_send_route: Option<js_sys::Function>,
+    ) -> std::result::Result<WasmWebRtcMesh, JsValue> {
         let room = config.room.clone();
         let session_auth = config.session_auth.clone();
         let rtc_configuration = build_web_rtc_configuration(&config.effective_ice_servers())?;
@@ -1858,20 +1890,26 @@ impl WasmPrimadb {
             self.inner.replica_id(),
             js_sys::Date::now() as u64
         );
-        let signaling = match config.signaling {
-            MeshSignalingMode::BroadcastChannel => MeshSignalingTransport::BroadcastChannel(
-                web_sys::BroadcastChannel::new(&format!("primadb-mesh-{room}"))?,
-            ),
-            MeshSignalingMode::Relay => {
-                let url = config
-                    .relay_url
-                    .clone()
-                    .ok_or_else(|| JsValue::from_str("relay mesh signaling requires a relayUrl"))?;
-                let socket = web_sys::WebSocket::new(&url)?;
-                socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
-                MeshSignalingTransport::Relay {
-                    socket,
-                    relay_url: url,
+        let signaling = if let Some(send_route) = external_send_route {
+            let (mode, relay_url) = mesh_external_signaling_metadata(&config);
+            MeshSignalingTransport::External {
+                send_route,
+                relay_url,
+                mode,
+            }
+        } else {
+            match config.signaling {
+                MeshSignalingMode::BroadcastChannel => MeshSignalingTransport::BroadcastChannel(
+                    web_sys::BroadcastChannel::new(&format!("primadb-mesh-{room}"))?,
+                ),
+                MeshSignalingMode::Relay => {
+                    let url = mesh_websocket_relay_url(&config)?;
+                    let socket = web_sys::WebSocket::new(&url)?;
+                    socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
+                    MeshSignalingTransport::Relay {
+                        socket,
+                        relay_url: url,
+                    }
                 }
             }
         };
@@ -1925,6 +1963,11 @@ impl WasmPrimadb {
                 bind_mesh_relay_socket_callbacks(&state, &socket);
                 None
             }
+            MeshSignalingTransport::External { .. } => {
+                let _ = send_mesh_presence_state(&state);
+                announce_mesh_join_state(&state)?;
+                None
+            }
         };
 
         let change_subscription = self.inner.subscribe_changes();
@@ -1948,6 +1991,7 @@ impl WasmPrimadb {
         let retry_state = state.clone();
         let retry_callback = Closure::wrap(Box::new(move || {
             let _ = ensure_mesh_relay_socket_connected_state(&retry_state);
+            let _ = refresh_external_mesh_presence_state(&retry_state);
             let _ = announce_mesh_join_state(&retry_state);
             let _ = retry_mesh_inflight_state(&retry_state);
             let _ = flush_mesh_pending_state(&retry_state);
@@ -3269,6 +3313,7 @@ impl WasmWebRtcMesh {
         match &self.state.borrow().signaling {
             MeshSignalingTransport::BroadcastChannel(_) => "broadcast_channel".to_owned(),
             MeshSignalingTransport::Relay { .. } => "relay".to_owned(),
+            MeshSignalingTransport::External { mode, .. } => mode.clone(),
         }
     }
 
@@ -3277,6 +3322,7 @@ impl WasmWebRtcMesh {
         match &self.state.borrow().signaling {
             MeshSignalingTransport::BroadcastChannel(_) => None,
             MeshSignalingTransport::Relay { relay_url, .. } => Some(relay_url.clone()),
+            MeshSignalingTransport::External { relay_url, .. } => relay_url.clone(),
         }
     }
 
@@ -3285,7 +3331,20 @@ impl WasmWebRtcMesh {
         match &self.state.borrow().signaling {
             MeshSignalingTransport::BroadcastChannel(_) => None,
             MeshSignalingTransport::Relay { socket, .. } => Some(socket.ready_state()),
+            MeshSignalingTransport::External { .. } => None,
         }
+    }
+
+    #[wasm_bindgen(js_name = acceptSignalingRoute)]
+    pub fn accept_signaling_route(&self, route: JsValue) -> std::result::Result<(), JsValue> {
+        let route: RouteEnvelope = serde_wasm_bindgen::from_value(route)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        handle_mesh_signaling_route(&self.state, route)
+    }
+
+    #[wasm_bindgen(js_name = announceSignalingPresence)]
+    pub fn announce_signaling_presence(&self) -> std::result::Result<(), JsValue> {
+        send_mesh_presence_state(&self.state)
     }
 
     #[wasm_bindgen(js_name = peerCount)]
@@ -3582,6 +3641,7 @@ impl WasmWebRtcMesh {
                 socket.set_onerror(None);
                 let _ = socket.close();
             }
+            MeshSignalingTransport::External { .. } => {}
         }
         {
             let mut state = self.state.borrow_mut();
@@ -5690,24 +5750,17 @@ fn post_mesh_signal_state(
                 .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
                 .map_err(|error| JsValue::from_str(&error.to_string()))?,
         ),
-        MeshSignalingTransport::Relay { socket, .. } => {
-            let (router, room, max_bytes) = {
+        MeshSignalingTransport::Relay { .. } | MeshSignalingTransport::External { .. } => {
+            let (router, room) = {
                 let borrowed = state.borrow();
-                (
-                    borrowed.router.clone(),
-                    borrowed.room.clone(),
-                    borrowed.db.limits().max_route_payload_bytes,
-                )
+                (borrowed.router.clone(), borrowed.room.clone())
             };
-            if socket.ready_state() != web_sys::WebSocket::OPEN {
-                return Err(JsValue::from_str("mesh relay websocket is not connected"));
-            }
             let route = router.wrap_signal(
                 room,
                 serde_json::to_value(signal).map_err(to_js_error)?,
                 mesh_signal_target(signal),
             );
-            send_websocket_route(&socket, max_bytes, &route)
+            send_mesh_signal_route_state(state, &route)
         }
     }
 }
@@ -5741,7 +5794,7 @@ fn mesh_signal_target(signal: &MeshSignal) -> RouteTarget {
     }
 }
 
-fn initialize_mesh_relay_callbacks(state: &Rc<RefCell<WebRtcMeshState>>, relay_url: String) {
+fn initialize_mesh_relay_callbacks(state: &Rc<RefCell<WebRtcMeshState>>, _relay_url: String) {
     let onmessage_state = state.clone();
     let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
         if let Some(payload) = event.data().as_string() {
@@ -5751,7 +5804,7 @@ fn initialize_mesh_relay_callbacks(state: &Rc<RefCell<WebRtcMeshState>>, relay_u
 
     let onopen_state = state.clone();
     let onopen = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-        let _ = send_mesh_presence_state(&onopen_state, &relay_url);
+        let _ = send_mesh_presence_state(&onopen_state);
         let _ = announce_mesh_join_state(&onopen_state);
         let _ = retry_mesh_inflight_state(&onopen_state);
         let _ = flush_mesh_pending_state(&onopen_state);
@@ -5831,14 +5884,40 @@ fn ensure_mesh_relay_socket_connected_state(
     Ok(())
 }
 
+fn refresh_external_mesh_presence_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+) -> std::result::Result<(), JsValue> {
+    if !matches!(
+        &state.borrow().signaling,
+        MeshSignalingTransport::External { .. }
+    ) {
+        return Ok(());
+    }
+    send_mesh_presence_state(state)
+}
+
 fn send_mesh_presence_state(
     state: &Rc<RefCell<WebRtcMeshState>>,
-    relay_url: &str,
 ) -> std::result::Result<(), JsValue> {
-    let (socket, route, max_bytes) = {
+    let route = {
         let borrowed = state.borrow();
-        let MeshSignalingTransport::Relay { socket, .. } = &borrowed.signaling else {
-            return Ok(());
+        let (transport, signaling_mode, relay_url) = match &borrowed.signaling {
+            MeshSignalingTransport::BroadcastChannel(_) => return Ok(()),
+            MeshSignalingTransport::Relay { relay_url, .. } => (
+                "webrtc-relay".to_owned(),
+                "relay".to_owned(),
+                Some(relay_url.clone()),
+            ),
+            MeshSignalingTransport::External {
+                relay_url, mode, ..
+            } => {
+                let transport = if mode == "moq" {
+                    "webrtc-moq".to_owned()
+                } else {
+                    "webrtc-external".to_owned()
+                };
+                (transport, mode.clone(), relay_url.clone())
+            }
         };
         let mut capabilities = vec![
             "signal".to_owned(),
@@ -5856,29 +5935,22 @@ fn send_mesh_presence_state(
         capabilities.extend(borrowed.db.vector_presence_capabilities());
         let mut route = borrowed.router.presence(
             borrowed.db.replica_id(),
-            "webrtc-relay",
+            transport,
             capabilities,
             vec![format!("mesh:{}", borrowed.room)],
         );
         if let RoutePayload::Presence { peer } = &mut route.payload {
-            peer.metadata
-                .insert("relay_url".to_owned(), relay_url.to_owned());
+            if let Some(relay_url) = relay_url {
+                peer.metadata.insert("relay_url".to_owned(), relay_url);
+            }
             peer.metadata
                 .insert("mesh_room".to_owned(), borrowed.room.clone());
-            peer.metadata
-                .insert("signaling".to_owned(), "relay".to_owned());
+            peer.metadata.insert("signaling".to_owned(), signaling_mode);
             peer.identity = borrowed.db.session_presence_identity(&borrowed.session_id);
         }
-        (
-            socket.clone(),
-            route,
-            borrowed.db.limits().max_route_payload_bytes,
-        )
+        route
     };
-    if socket.ready_state() != web_sys::WebSocket::OPEN {
-        return Err(JsValue::from_str("mesh relay websocket is not connected"));
-    }
-    send_websocket_route(&socket, max_bytes, &route)
+    send_mesh_signal_route_state(state, &route)
 }
 
 fn handle_mesh_signaling_websocket_message(
@@ -5887,6 +5959,13 @@ fn handle_mesh_signaling_websocket_message(
 ) -> std::result::Result<(), JsValue> {
     let route: RouteEnvelope =
         serde_json::from_str(payload).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    handle_mesh_signaling_route(state, route)
+}
+
+fn handle_mesh_signaling_route(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    route: RouteEnvelope,
+) -> std::result::Result<(), JsValue> {
     let decision = {
         let borrowed = state.borrow();
         borrowed.router.accept(route.clone())
@@ -5992,17 +6071,21 @@ fn send_mesh_signal_route_state(
     state: &Rc<RefCell<WebRtcMeshState>>,
     route: &RouteEnvelope,
 ) -> std::result::Result<(), JsValue> {
-    let (socket, max_bytes) = {
-        let borrowed = state.borrow();
-        let MeshSignalingTransport::Relay { socket, .. } = &borrowed.signaling else {
-            return Ok(());
-        };
-        (socket.clone(), borrowed.db.limits().max_route_payload_bytes)
-    };
-    if socket.ready_state() != web_sys::WebSocket::OPEN {
-        return Err(JsValue::from_str("mesh relay websocket is not connected"));
+    let signaling = state.borrow().signaling.clone();
+    match signaling {
+        MeshSignalingTransport::BroadcastChannel(_) => Ok(()),
+        MeshSignalingTransport::Relay { socket, .. } => {
+            let max_bytes = state.borrow().db.limits().max_route_payload_bytes;
+            if socket.ready_state() != web_sys::WebSocket::OPEN {
+                return Err(JsValue::from_str("mesh relay websocket is not connected"));
+            }
+            send_websocket_route(&socket, max_bytes, route)
+        }
+        MeshSignalingTransport::External { send_route, .. } => {
+            let route = to_js(route)?;
+            send_route.call1(&JsValue::NULL, &route).map(|_| ())
+        }
     }
-    send_websocket_route(&socket, max_bytes, route)
 }
 
 fn verified_mesh_identity_for_peer_state(
@@ -7719,6 +7802,31 @@ fn parse_mesh_config(
         config.retry_interval_ms = retry_interval_ms.max(1) as u64;
     }
     Ok(config)
+}
+
+fn mesh_websocket_relay_url(config: &MeshConfig) -> std::result::Result<String, JsValue> {
+    if let Some(url) = config.relay_url.clone() {
+        return Ok(url);
+    }
+    match config.relay_endpoint.as_ref() {
+        Some(RelayEndpointConfig::WebSocket(endpoint)) => Ok(endpoint.url.clone()),
+        Some(RelayEndpointConfig::Moq(_)) => Err(JsValue::from_str(
+            "MoQ mesh signaling requires connectMeshWithExternalSignaling",
+        )),
+        None => Err(JsValue::from_str(
+            "relay mesh signaling requires a relayUrl",
+        )),
+    }
+}
+
+fn mesh_external_signaling_metadata(config: &MeshConfig) -> (String, Option<String>) {
+    match config.relay_endpoint.as_ref() {
+        Some(RelayEndpointConfig::Moq(endpoint)) => ("moq".to_owned(), Some(endpoint.url.clone())),
+        Some(RelayEndpointConfig::WebSocket(endpoint)) => {
+            ("websocket".to_owned(), Some(endpoint.url.clone()))
+        }
+        None => ("external".to_owned(), config.relay_url.clone()),
+    }
 }
 
 fn build_web_rtc_configuration(

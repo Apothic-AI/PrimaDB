@@ -40,6 +40,7 @@
     "prepare": "node ./scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "node ./scripts/smoke.mjs",
+    "smoke:moq-mesh-signaling": "node ./scripts/smoke-moq-mesh-signaling.mjs",
     "pack:check": "pnpm pack --dry-run"
   },
   "dependencies": {

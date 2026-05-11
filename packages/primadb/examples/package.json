@@ -18,6 +18,7 @@
     "smoke:stream": "node ./binary-stream-room/test-smoke.mjs",
     "smoke:chat": "node ./text-voice-chat/test-smoke.mjs",
     "smoke:moq": "node ./moq-sync/test-smoke.mjs",
+    "smoke:moq-live": "node ./moq-sync/test-live-route.mjs",
     "smoke": "pnpm run smoke:default && pnpm run smoke:indexeddb && pnpm run smoke:opfs && pnpm run smoke:threaded && pnpm run smoke:stream && pnpm run smoke:chat && pnpm run smoke:moq"
   },
   "dependencies": {

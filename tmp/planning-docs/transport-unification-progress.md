@@ -35,10 +35,49 @@
   `python -m py_compile packages/primadb-python/python/primadb/moq.py`,
   `cargo test --features native-moq --lib`, and
   `cargo check --features "crypto native-websocket native-webrtc native-moq scripting"`.
+- Added browser WASM external mesh signaling support:
+  `connectMeshWithExternalSignaling(...)`, `WebRtcMesh.acceptSignalingRoute(...)`, and
+  `WebRtcMesh.announceSignalingPresence()`.
+- Added `connectMeshViaMoq(...)` and `connectMeshViaMoqSession(...)` to `packages/primadb/moq.ts`.
+  The wrapper creates/uses a route-mode `PrimadbMoqSession`, forwards outgoing WASM mesh signaling
+  routes into MoQ, and injects incoming MoQ routes into the WASM mesh.
+- Added deterministic MoQ-backed mesh signaling smoke coverage in
+  `packages/primadb/scripts/smoke-moq-mesh-signaling.mjs`.
+- Added opt-in live MoQ route probes:
+  - browser/browser and browser/Node: `packages/primadb/examples/moq-sync/test-live-route.mjs`
+  - Node/Node: `packages/primadb-node/scripts/smoke-moq-live.mjs`
+  - native/native: `examples/native_moq_live_probe.rs`
+  - WebSocket peer plus MoQ peer through native gateway:
+    `examples/native_gateway_moq_ws_live_probe.rs`
+- Updated MoQ and mesh docs/examples to cover route-mode MoQ, MoQ-backed WebRTC signaling, live
+  smoke commands, and current Cloudflare caveats.
+- Verified:
+  - `cargo check --features "native-websocket native-moq" --examples`
+  - `pnpm --dir packages/primadb run typecheck`
+  - `pnpm --dir packages/primadb run build`
+  - `pnpm --dir packages/primadb run smoke:moq-mesh-signaling`
+  - `node --check` for the new JS smoke scripts
 
 ## Remaining
 
-- Live Cloudflare MoQ interop validation is still pending; local deterministic tests and compile
-  checks validate the route frame shape and integration points, but not public relay behavior.
-- Browser `connectMesh(...)` still needs a direct MoQ signaling adapter; native WebRTC signaling now
-  supports MoQ via `relayEndpoint`.
+- Live Cloudflare interop probes are implemented and were run against the available environment, but
+  the configured public endpoints did not pass:
+  - Browser/browser via `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: timed out waiting
+    for route exchange.
+  - Browser/browser via `MOQ_DRAFT07_RELAY=draft-07.cloudflare.mediaoverquic.com`: browser
+    WebTransport reported connection lost.
+  - Browser/browser via `https://draft-07.cloudflare.mediaoverquic.com/anon`: browser WebTransport
+    reported connection lost.
+  - Browser/browser via `https://interop-relay.cloudflare.mediaoverquic.com:443/anon`: browser
+    WebTransport reported connection lost.
+  - Node/Node via both configured endpoints: timed out during MoQ connect. Node v22 has WebSocket
+    but no built-in WebTransport; Cloudflare did not complete WebSocket fallback.
+  - Native/native via both configured endpoints: connected but received no frames. Current Rust
+    `moq-lite` consumption waits for ANNOUNCE/broadcast discovery, while Cloudflare preview docs say
+    ANNOUNCE is not supported.
+- Direct native Cloudflare consumption remains a real implementation gap unless PrimaDB adds a Rust
+  direct `consume(path)` path, vendors/patches `moq-lite`, or targets a compatible MoQ relay/gateway
+  that provides announcements.
+- Browser WebRTC MoQ signaling has deterministic route injection coverage, but browser tab-to-tab
+  live WebRTC over Cloudflare MoQ/STUN/TURN still needs a passing public MoQ relay endpoint before it
+  can be validated end to end.

@@ -35,6 +35,7 @@
     "smoke:relay": "pnpm run build && node ./scripts/smoke-relay.mjs",
     "smoke:mesh": "pnpm run build && node ./scripts/smoke-mesh.mjs",
     "smoke:moq": "pnpm run build && node ./examples/moq-sync/index.mjs",
+    "smoke:moq-live": "pnpm run build && node ./scripts/smoke-moq-live.mjs",
     "smoke": "pnpm run smoke:core && pnpm run smoke:hooks && pnpm run smoke:relay-server && pnpm run smoke:relay && pnpm run smoke:mesh && pnpm run smoke:moq",
     "pack:check": "pnpm pack --dry-run"
   },

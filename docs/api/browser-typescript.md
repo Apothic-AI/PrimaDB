@@ -111,6 +111,9 @@ Kind: interface
 export interface PrimadbMoqSessionOptions {
     path: string;
     track?: string;
+    channel?: string;
+    peerId?: string;
+    target?: PrimadbRouteTarget;
     intervalMs?: number;
     publish?: boolean;
     subscribe?: string[];
@@ -130,6 +133,42 @@ export interface ConnectPrimadbMoqOptions extends PrimadbMoqSessionOptions {
     webtransport?: WebTransportOptions;
     transport?: WebTransport;
 }
+```
+
+#### `PrimadbMeshLike`
+
+Kind: interface
+
+```ts
+export interface PrimadbMeshLike extends PrimadbLike {
+  connectMeshWithExternalSignaling(
+    config: PrimadbExternalMeshConfig,
+    sendRoute: (route: PrimadbRouteEnvelope) => unknown,
+  ): PrimadbExternalMesh;
+}
+```
+
+#### `connectMeshViaMoq`
+
+Kind: function
+
+```ts
+export declare function connectMeshViaMoq(
+  db: PrimadbMeshLike,
+  options: ConnectPrimadbMeshViaMoqOptions,
+): Promise<PrimadbMoqMesh>;
+```
+
+#### `connectMeshViaMoqSession`
+
+Kind: function
+
+```ts
+export declare function connectMeshViaMoqSession(
+  db: PrimadbMeshLike,
+  moq: PrimadbMoqSession,
+  options: ConnectPrimadbMeshViaMoqSessionOptions,
+): PrimadbMoqMesh;
 ```
 
 #### `PrimadbMoqLoopbackOptions`

@@ -1,5 +1,5 @@
 import { createPrimadb } from "primadb";
-import { createPrimadbMoqLoopback, moqRuntimeSupport } from "primadb/moq";
+import { connectPrimadbMoq, createPrimadbMoqLoopback, moqRuntimeSupport } from "primadb/moq";
 
 const publisherEl = document.querySelector("#publisher");
 const subscriberEl = document.querySelector("#subscriber");
@@ -92,5 +92,8 @@ Object.assign(globalThis, {
     publisherEntries,
     subscriberEntries,
     sent,
+  },
+  primadbMoqApi: {
+    connectPrimadbMoq,
   },
 });
