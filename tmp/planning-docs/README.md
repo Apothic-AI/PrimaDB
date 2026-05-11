@@ -23,3 +23,5 @@ docs site content.
 - [path-reference-normalization-progress.md](path-reference-normalization-progress.md)
 - [vector-search-research-plan.md](vector-search-research-plan.md)
 - [vector-search-research-progress.md](vector-search-research-progress.md)
+- [native-moq-webtransport-investigation-plan.md](native-moq-webtransport-investigation-plan.md)
+- [native-moq-webtransport-investigation-progress.md](native-moq-webtransport-investigation-progress.md)
