@@ -150,3 +150,79 @@ public hostnames only.
 - Multi-transport peers need stable peer identity and route dedupe to avoid loops.
 - The existing native/browser routing code is duplicated enough that the coordinator extraction
   should happen before adding a third transport.
+
+## Residual Gap Completion Plan
+
+### Gap 1: Live Cloudflare MoQ Interop
+
+Goal: prove the route-mode MoQ profile works against public Cloudflare MoQ endpoints and not only
+in local/deterministic harnesses.
+
+1. Add opt-in live smoke scripts.
+   - Gate every live test behind explicit environment variables.
+   - Use `MOQ_DRAFT14_RELAY` first, with a fallback matrix for `MOQ_DRAFT07_RELAY`.
+   - Generate unique route paths per run, for example
+     `primadb/live/moq/<timestamp>-<random>`.
+   - Do not log secrets or commit `.env`.
+
+2. Validate same-stack route exchange.
+   - Browser/browser through `@moq/lite`.
+   - Node/Node through `primadb-node/moq`.
+   - Native/native through `NativeMoqRouteClient`.
+   - For each, assert presence exchange, `RoutePayload::Sync`, duplicate suppression, and close
+     behavior.
+
+3. Validate cross-stack route exchange.
+   - Browser to Node.
+   - Browser to native.
+   - Node to native.
+   - Verify that all stacks agree on `primadb.route.v1`, route target encoding, path/track names,
+     and `sync_frame` payload JSON.
+
+4. Validate gateway bridge behavior.
+   - Start a native relay server with a MoQ uplink.
+   - Connect one peer over WebSocket and one peer over MoQ.
+   - Assert presence, sync, pull, watch, and strict-scope transaction behavior across the gateway.
+   - Add multi-homed loop/dedupe checks by connecting one logical peer through both WebSocket and
+     MoQ.
+
+5. Decide draft support policy from evidence.
+   - Prefer draft-14 if both JS and Rust stacks pass.
+   - If draft-07 fails or requires incompatible framing, keep it as best-effort/documented rather
+     than hiding compatibility risk.
+   - Record observed Cloudflare endpoint behavior in the progress doc.
+
+### Gap 2: Browser `connectMesh(...)` MoQ Signaling
+
+Goal: give browser WebRTC mesh the same MoQ signaling capability now available to native WebRTC
+mesh.
+
+1. Add an external signaling adapter to the WASM mesh runtime.
+   - Introduce a browser-only mesh signaling variant that does not own WebSocket or
+     BroadcastChannel.
+   - Expose methods on `WebRtcMesh` for injected incoming route/signaling messages.
+   - Route outgoing `RoutePayload::Signal` through a JS callback supplied at construction time.
+   - Keep the existing WebRTC data-channel routing unchanged.
+
+2. Build a TypeScript MoQ signaling wrapper.
+   - Add `connectMeshViaMoq(db, options)` in `packages/primadb/moq.ts` or a dedicated mesh module.
+   - Internally create a route-mode `PrimadbMoqSession`.
+   - Construct the WASM mesh with external signaling.
+   - Forward MoQ `onRoute(...)` events into the WASM mesh.
+   - Forward WASM mesh outgoing signaling routes into the MoQ session.
+
+3. Align browser config types.
+   - Add `RelayEndpointConfig`/`MoqRelayClientConfig` to browser package types.
+   - Let `connectMesh(...)` accept a MoQ relay endpoint at the JS package layer.
+   - Preserve existing WebSocket and BroadcastChannel paths.
+
+4. Verify WebRTC behavior.
+   - Local deterministic test: use the in-process MoQ transport pair to signal two browser peers.
+   - Browser smoke test: two pages/tabs form WebRTC data channels via MoQ signaling.
+   - Live Cloudflare test: route-mode MoQ signaling plus `CLOUDFLARE_STUN`/`CLOUDFLARE_TURN`.
+   - Assert MoQ-only peers remain relay-routed and are not expected to form WebRTC links.
+
+5. Document browser support.
+   - Update browser examples and docs to show WebSocket signaling, BroadcastChannel signaling, and
+     MoQ signaling as equivalent signaling underlays.
+   - Clearly call out secure-context/WebTransport requirements and WebSocket fallback behavior.
