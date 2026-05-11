@@ -32,6 +32,7 @@ mod session_auth;
 mod snapshot;
 mod storage;
 mod sync;
+mod transport;
 mod traversal;
 mod value;
 mod vector;
@@ -133,6 +134,10 @@ pub use sync::{
     RemoteInterestTarget, RemotePath, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription,
     SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response,
     error_watch_event, stable_content_hash,
+};
+pub use transport::{
+    InMemoryRouteHub, InMemoryRouteSession, RouteRelayCore, RouteRelayForward, RouteSessionInfo,
+    RouteTransportKind,
 };
 pub use traversal::{
     TraversalDirection, TraversalEdge, TraversalEdgeKind, TraversalEntry, TraversalResult,
