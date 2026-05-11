@@ -13,3 +13,13 @@
 ## Completed Follow-Up
 
 - Delivered the architectural summary and used it to guide the record-watch implementation plan.
+
+## Current Refresh
+
+- Re-read the top-level crate manifest, README, docs index, verification matrix, and representative concept docs for data model, replication, storage, and vector search.
+- Re-checked the public export surface in `src/lib.rs` and sampled core implementation paths in `src/db.rs`, `src/engine.rs`, `src/vector.rs`, record APIs, sync/router modules, and Node/Python/browser package wrappers.
+- Confirmed the crate is a standalone Rust workspace at `libs/rust/primadb` and a `git-subrepo` subrepo tracking `Apothic-AI/PrimaDB.git` branch `master`.
+- Ran `cargo metadata --no-deps --format-version 1`: passed.
+- Ran `cargo test --lib --quiet`: 74 tests passed.
+- Ran `cargo check --features "crypto native-websocket native-webrtc scripting" --quiet`: passed with the existing internal dead-code warning for storage transaction/helper methods in `src/db.rs`.
+- Checked `/usr/bin/git status --porcelain=v1`: clean.
