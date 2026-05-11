@@ -97,6 +97,26 @@ class RelayClientConfig(TypedDict, total=False):
     retryIntervalMs: int
     sessionAuth: SessionAuthConfig
 
+MoqDraft = Literal["draft07", "draft14", "draft_latest"]
+
+class MoqRelayClientConfig(TypedDict, total=False):
+    url: str
+    path: str
+    track: str
+    channel: str
+    subscribe: list[str]
+    draft: MoqDraft
+    retryIntervalMs: int
+    sessionAuth: SessionAuthConfig
+
+class WebSocketRelayEndpointConfig(RelayClientConfig, total=False):
+    kind: Literal["web_socket"]
+
+class MoqRelayEndpointConfig(MoqRelayClientConfig, total=False):
+    kind: Literal["moq"]
+
+RelayEndpointConfig = WebSocketRelayEndpointConfig | MoqRelayEndpointConfig
+
 class IceServerConfig(TypedDict, total=False):
     urls: str | list[str]
     username: Optional[str]
@@ -106,6 +126,7 @@ class MeshConfig(TypedDict, total=False):
     room: str
     signaling: str
     relayUrl: Optional[str]
+    relayEndpoint: Optional[RelayEndpointConfig]
     retryIntervalMs: int
     iceServers: list[IceServerConfig]
     sessionAuth: SessionAuthConfig
@@ -447,8 +468,29 @@ class PrimadbMoqSession:
     db: Any
     path: str
     track: str
-    def __init__(self, db: Any, *, path: str, track: str = ...) -> None: ...
+    channel: str
+    peer_id: str
+    def __init__(
+        self,
+        db: Any,
+        *,
+        path: str,
+        track: str = ...,
+        channel: str = ...,
+        peer_id: Optional[str] = ...,
+    ) -> None: ...
     def subscribe_from(self, publisher: PrimadbMoqSession) -> None: ...
+    def on_route(self, handler: Any) -> Any: ...
+    def known_peers(self) -> list[dict[str, Any]]: ...
+    def recommended_peers(self) -> list[dict[str, Any]]: ...
+    def create_route(
+        self,
+        payload: dict[str, Any],
+        target: Optional[dict[str, Any]] = ...,
+        reply_to: Optional[str] = ...,
+    ) -> dict[str, Any]: ...
+    def send_route(self, route: dict[str, Any]) -> int: ...
+    def announce_presence(self) -> int: ...
     def flush_pending(self) -> int: ...
     def receive_frame(self, frame: PrimadbMoqFrame) -> int: ...
     def close(self) -> None: ...
@@ -466,6 +508,7 @@ def create_primadb_moq_loopback(
     subscriber_db: Any,
     path: str,
     track: str = ...,
+    channel: str = ...,
 ) -> PrimadbMoqLoopback: ...
 
 class Chain:

@@ -98,6 +98,23 @@ export interface RelayClientConfig {
   sessionAuth?: SessionAuthConfig;
 }
 
+export type MoqDraft = "draft07" | "draft14" | "draft_latest";
+
+export interface MoqRelayClientConfig {
+  url: string;
+  path: string;
+  track?: string;
+  channel?: string;
+  subscribe?: string[];
+  draft?: MoqDraft;
+  retryIntervalMs?: number;
+  sessionAuth?: SessionAuthConfig;
+}
+
+export type RelayEndpointConfig =
+  | { kind: "web_socket"; url: string; retryIntervalMs?: number; sessionAuth?: SessionAuthConfig }
+  | ({ kind: "moq" } & MoqRelayClientConfig);
+
 export interface RelayServerConfig {
   bind: string;
 }
@@ -114,6 +131,7 @@ export interface MeshConfig {
   room: string;
   signaling?: MeshSignalingMode;
   relayUrl?: string | null;
+  relayEndpoint?: RelayEndpointConfig | null;
   retryIntervalMs?: number;
   iceServers?: IceServerConfig[];
   sessionAuth?: SessionAuthConfig;

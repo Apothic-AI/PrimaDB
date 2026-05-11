@@ -1,7 +1,8 @@
 # MoQ Sync
 
-This browser package example publishes PrimaDB sync envelopes over a MoQ track using the
-`primadb/moq` helper.
+This browser package example publishes PrimaDB `RouteEnvelope` traffic over a MoQ track using the
+`primadb/moq` helper. Sync frames are carried as route payloads, matching the WebSocket/WebRTC
+overlay protocol instead of using a separate MoQ-only sync format.
 
 It uses an in-process WebTransport pair so it runs without a public MoQ relay. The same helper can
 also connect to a real MoQ relay with `connectPrimadbMoq(...)`; `@moq/lite` handles WebTransport

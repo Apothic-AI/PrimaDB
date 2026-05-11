@@ -18,7 +18,20 @@
 - Refactored the native WebSocket relay server to use `RouteRelayCore` instead of private
   duplicated route-forwarding, presence, peer-index, bootstrap, and dedupe state.
 - Verified `cargo test transport --lib` and `cargo test --features native-websocket --lib`.
+- Added tagged relay endpoint config plus `MoqRelayClientConfig`/`MoqDraft` for route-mode MoQ
+  relay endpoints.
+- Updated browser, Node, and Python MoQ helpers to emit `primadb.route.v1` frames carrying
+  `RouteEnvelope` sync/presence/peer-exchange payloads over the configured MoQ path/track.
+- Added optional native Rust `native-moq` support with `NativeMoqRouteClient` for low-level
+  `RouteEnvelope` exchange over moq-native/moq-lite and `NativeMoqSync` for DB sync over that route
+  underlay.
+- Documented the old MoQ sync helper behavior as superseded by route-mode MoQ helper frames.
+- Verified `pnpm run typecheck` for `packages/primadb`, `node --check packages/primadb-node/moq.js`,
+  `python -m py_compile packages/primadb-python/python/primadb/moq.py`,
+  `cargo test --features native-moq --lib`, and
+  `cargo check --features "crypto native-websocket native-webrtc native-moq scripting"`.
 
 ## In Progress
 
-- Route-mode MoQ profile and native/browser/Node route underlay adapters.
+- Multi-transport gateway/listener work and direct MoQ-backed WebRTC signaling remain the next
+  integration layer on top of the route-mode MoQ underlay.

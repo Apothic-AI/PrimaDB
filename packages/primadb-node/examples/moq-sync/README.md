@@ -1,8 +1,9 @@
 # MoQ Sync
 
-This example uses the `primadb-node/moq` helper to publish PrimaDB sync envelopes over a MoQ
-track. It runs over an in-process WebTransport pair so the example is deterministic and does not
-require a public MoQ relay.
+This example uses the `primadb-node/moq` helper to publish PrimaDB `RouteEnvelope` traffic over a
+MoQ track. Sync frames are carried as route payloads, so the helper participates in the same overlay
+shape as WebSocket/WebRTC. It runs over an in-process WebTransport pair so the example is
+deterministic and does not require a public MoQ relay.
 
 ## Run
 

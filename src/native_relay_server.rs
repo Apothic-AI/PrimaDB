@@ -249,7 +249,7 @@ async fn forward_route(
     state: Arc<Mutex<RelayState>>,
     metrics: Arc<RelayMetrics>,
     client_id: u64,
-    mut route: RouteEnvelope,
+    route: RouteEnvelope,
 ) -> Result<()> {
     let forward = {
         let mut state = state.lock().await;

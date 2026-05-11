@@ -1,12 +1,15 @@
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
+#[cfg(feature = "native-moq")]
+use crate::native_moq::NativeMoqRouteClient;
 use crate::{
-    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, NodeFetchScheduler,
-    Operation, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
-    RelayClientConfig, RemoteInterestPolicy, RemoteInterestTarget, RemotePath, RemoteResult,
-    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
-    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
-    WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
+    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, MoqRelayClientConfig,
+    NodeFetchScheduler, Operation, PeerRecommendation, Primadb, PrimadbError, RecordEntry,
+    RecordScanResult, RelayClientConfig, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
+    RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem,
+    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
+    VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response,
+    error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
@@ -25,6 +28,12 @@ struct OutboundSync {
     encoding: String,
     payload: JsonValue,
     target: RouteTarget,
+}
+
+#[derive(Debug, Clone)]
+enum NativeRouteOutbound {
+    Route(RouteEnvelope),
+    Close,
 }
 
 #[derive(Debug)]
@@ -110,13 +119,25 @@ struct NativeWebSocketSyncState {
     pending_auth_challenges: Mutex<BTreeMap<String, crate::AuthChallenge>>,
     pending_auth_peers: Mutex<BTreeMap<String, crate::PeerPresence>>,
     verified_identities: Mutex<BTreeMap<String, VerifiedIdentity>>,
-    outbound: UnboundedSender<Message>,
+    outbound: UnboundedSender<NativeRouteOutbound>,
 }
 
 pub struct NativeWebSocketSync {
     state: Arc<NativeWebSocketSyncState>,
     change_subscription: Option<ChangeSubscription>,
     connection_task: Option<JoinHandle<()>>,
+    change_task: Option<JoinHandle<()>>,
+    retry_task: Option<JoinHandle<()>>,
+    node_fetch_registration: Option<u64>,
+}
+
+#[cfg(feature = "native-moq")]
+pub struct NativeMoqSync {
+    state: Arc<NativeWebSocketSyncState>,
+    route_client: Arc<NativeMoqRouteClient>,
+    inbound_task: Option<JoinHandle<()>>,
+    outbound_task: Option<JoinHandle<()>>,
+    change_subscription: Option<ChangeSubscription>,
     change_task: Option<JoinHandle<()>>,
     retry_task: Option<JoinHandle<()>>,
     node_fetch_registration: Option<u64>,
@@ -153,7 +174,7 @@ impl NativeWebSocketSync {
         session_auth: crate::SessionAuthConfig,
     ) -> Result<Self> {
         let url = url.as_ref().to_owned();
-        let (outbound, mut outbound_rx) = unbounded_channel::<Message>();
+        let (outbound, mut outbound_rx) = unbounded_channel::<NativeRouteOutbound>();
 
         let router = Router::new(RouterConfig {
             peer_id: format!("native:{}", db.replica_id()),
@@ -187,7 +208,8 @@ impl NativeWebSocketSync {
         let connection_state = state.clone();
         let connection_url = url.clone();
         let connection_task = tokio::spawn(async move {
-            let presence = build_relay_presence_route(&connection_state, &connection_url);
+            let presence =
+                build_relay_presence_route(&connection_state, &connection_url, "websocket");
             let presence_payload = serde_json::to_string(&presence).ok();
 
             loop {
@@ -234,10 +256,17 @@ impl NativeWebSocketSync {
                     tokio::select! {
                         maybe_message = outbound_rx.recv() => {
                             match maybe_message {
-                                Some(message) => {
-                                    if writer.send(message).await.is_err() {
+                                Some(NativeRouteOutbound::Route(route)) => {
+                                    let Ok(payload) = serde_json::to_string(&route) else {
+                                        continue;
+                                    };
+                                    if writer.send(Message::Text(payload.into())).await.is_err() {
                                         break;
                                     }
+                                }
+                                Some(NativeRouteOutbound::Close) => {
+                                    let _ = writer.send(Message::Close(None)).await;
+                                    break;
                                 }
                                 None => break,
                             }
@@ -870,7 +899,7 @@ impl NativeWebSocketSync {
         }
         self.state.closed.store(true, Ordering::SeqCst);
         self.state.connected.store(false, Ordering::SeqCst);
-        let _ = self.state.outbound.send(Message::Close(None));
+        let _ = self.state.outbound.send(NativeRouteOutbound::Close);
         self.change_subscription.take();
         if let Some(task) = self.connection_task.take() {
             task.abort();
@@ -889,6 +918,302 @@ impl NativeWebSocketSync {
 }
 
 impl Drop for NativeWebSocketSync {
+    fn drop(&mut self) {
+        self.teardown();
+    }
+}
+
+#[cfg(feature = "native-moq")]
+impl NativeMoqSync {
+    pub async fn connect_with_config(db: Primadb, config: MoqRelayClientConfig) -> Result<Self> {
+        let retry_interval = Duration::from_millis(config.retry_interval_ms.max(1));
+        let route_client = Arc::new(NativeMoqRouteClient::connect(config.clone()).await?);
+        let (outbound, mut outbound_rx) = unbounded_channel::<NativeRouteOutbound>();
+
+        let router = Router::new(RouterConfig {
+            peer_id: format!("native:{}", db.replica_id()),
+            default_channel: config.channel.clone(),
+            default_ttl: 6,
+            max_seen_routes: db.limits().max_seen_routes,
+        });
+
+        let state = Arc::new(NativeWebSocketSyncState {
+            db: db.clone(),
+            router,
+            session_id: crate::session_auth::random_session_id(&format!(
+                "moq:native:{}",
+                db.replica_id()
+            )),
+            session_auth: config.session_auth.clone(),
+            closed: AtomicBool::new(false),
+            connected: AtomicBool::new(false),
+            next_message_seq: AtomicU64::new(0),
+            inflight: Mutex::new(BTreeMap::new()),
+            pending_requests: Mutex::new(BTreeMap::new()),
+            outgoing_watches: Mutex::new(BTreeMap::new()),
+            incoming_watches: Mutex::new(BTreeMap::new()),
+            recommendations: Mutex::new(BTreeMap::new()),
+            pending_auth_challenges: Mutex::new(BTreeMap::new()),
+            pending_auth_peers: Mutex::new(BTreeMap::new()),
+            verified_identities: Mutex::new(BTreeMap::new()),
+            outbound,
+        });
+
+        let mut presence = build_relay_presence_route(&state, &config.url, "moq");
+        if let RoutePayload::Presence { peer } = &mut presence.payload {
+            peer.metadata
+                .insert("moq_path".to_owned(), config.path.clone());
+            peer.metadata
+                .insert("moq_track".to_owned(), config.track.clone());
+        }
+        let _ = route_client.send_route(presence);
+
+        let outbound_client = route_client.clone();
+        let outbound_state = state.clone();
+        let outbound_task = tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                match message {
+                    NativeRouteOutbound::Route(route) => {
+                        let _ = outbound_client.send_route(route);
+                    }
+                    NativeRouteOutbound::Close => break,
+                }
+                if outbound_state.closed.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        });
+
+        let inbound_client = route_client.clone();
+        let inbound_state = state.clone();
+        let inbound_task = tokio::spawn(async move {
+            loop {
+                if inbound_state.closed.load(Ordering::SeqCst) {
+                    break;
+                }
+                match inbound_client.recv_route().await {
+                    Ok(route) => {
+                        let _ = handle_route_envelope(&inbound_state, route).await;
+                    }
+                    Err(_) => {
+                        if inbound_state.closed.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+
+        let change_subscription = db.subscribe_changes();
+        let change_receiver = change_subscription.receiver();
+        let change_state = state.clone();
+        let change_task = tokio::spawn(async move {
+            while let Ok(mut event) = change_receiver.recv().await {
+                while let Ok(next) = change_receiver.try_recv() {
+                    event.merge(next);
+                }
+                if event.pending_ops > 0 {
+                    let _ = flush_pending_state(&change_state).await;
+                }
+                if event.data_changed {
+                    let _ = emit_incoming_watch_updates(&change_state, &event).await;
+                }
+            }
+        });
+
+        let retry_state = state.clone();
+        let retry_client = route_client.clone();
+        let retry_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(retry_interval);
+            loop {
+                interval.tick().await;
+                if retry_state.closed.load(Ordering::SeqCst) {
+                    break;
+                }
+                retry_state
+                    .connected
+                    .store(retry_client.is_connected(), Ordering::SeqCst);
+                if !retry_state.connected.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let _ = retry_inflight_state(&retry_state).await;
+                let _ = flush_pending_state(&retry_state).await;
+            }
+        });
+
+        let node_fetch_registration =
+            db.register_node_fetch_scheduler(Arc::new(NativeWebSocketNodeFetchScheduler {
+                state: Arc::downgrade(&state),
+            }));
+
+        Ok(Self {
+            state,
+            route_client,
+            inbound_task: Some(inbound_task),
+            outbound_task: Some(outbound_task),
+            change_subscription: Some(change_subscription),
+            change_task: Some(change_task),
+            retry_task: Some(retry_task),
+            node_fetch_registration: Some(node_fetch_registration),
+        })
+    }
+
+    pub async fn connect(db: Primadb, config: MoqRelayClientConfig) -> Result<Self> {
+        Self::connect_with_config(db, config).await
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.route_client.is_connected()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.state.db.pending_operations().len()
+    }
+
+    pub fn inflight_count(&self) -> usize {
+        self.state.inflight.lock().unwrap().len()
+    }
+
+    pub fn known_peer_count(&self) -> usize {
+        self.state.router.known_peers().len()
+    }
+
+    pub fn recommended_peers(&self) -> Vec<PeerRecommendation> {
+        self.state
+            .recommendations
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn watch_get(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Get { path },
+        )
+    }
+
+    pub fn watch_get_with_policy(
+        &self,
+        path: RemotePath,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(&self.state, policy, crate::PullRequestKind::Get { path })
+    }
+
+    pub async fn remote_get(
+        &self,
+        peer_id: impl Into<String>,
+        path: RemotePath,
+    ) -> Result<Option<JsonValue>> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Get { path },
+        )
+        .await?
+        {
+            RemoteResult::Get { value } => Ok(value),
+            other => Err(PrimadbError::Message(format!(
+                "expected get result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_get_with_policy(
+        &self,
+        path: RemotePath,
+        policy: RemoteInterestPolicy,
+    ) -> Result<Option<JsonValue>> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Get { path },
+        )
+        .await?
+        {
+            RemoteResult::Get { value } => Ok(value),
+            other => Err(PrimadbError::Message(format!(
+                "expected get result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_transaction(
+        &self,
+        peer_id: impl Into<String>,
+        scope: impl Into<String>,
+        steps: Vec<crate::TransactionStep>,
+        options: crate::TransactionOptions,
+    ) -> Result<crate::TransactionReport> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Transaction {
+                scope: scope.into(),
+                steps,
+                options,
+            },
+        )
+        .await?
+        {
+            RemoteResult::Transaction { report } => Ok(report),
+            other => Err(PrimadbError::Message(format!(
+                "expected transaction result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn flush_pending(&self) -> Result<usize> {
+        flush_pending_state(&self.state).await
+    }
+
+    pub async fn retry_inflight(&self) -> Result<usize> {
+        retry_inflight_state(&self.state).await
+    }
+
+    pub fn close(&mut self) {
+        self.teardown();
+    }
+
+    fn teardown(&mut self) {
+        if let Some(id) = self.node_fetch_registration.take() {
+            self.state.db.unregister_node_fetch_scheduler(id);
+        }
+        self.state.closed.store(true, Ordering::SeqCst);
+        self.state.connected.store(false, Ordering::SeqCst);
+        let _ = self.state.outbound.send(NativeRouteOutbound::Close);
+        self.route_client.shutdown();
+        self.change_subscription.take();
+        if let Some(task) = self.inbound_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.outbound_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.change_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.retry_task.take() {
+            task.abort();
+        }
+        requeue_inflight_state(&self.state);
+        fail_pending_requests(&self.state, "connection closed");
+        fail_outgoing_watches(&self.state, "connection closed");
+        clear_incoming_watches(&self.state);
+    }
+}
+
+#[cfg(feature = "native-moq")]
+impl Drop for NativeMoqSync {
     fn drop(&mut self) {
         self.teardown();
     }
@@ -1710,7 +2035,11 @@ async fn retry_inflight_state(state: &Arc<NativeWebSocketSyncState>) -> Result<u
     Ok(outbound.len())
 }
 
-fn build_relay_presence_route(state: &Arc<NativeWebSocketSyncState>, url: &str) -> RouteEnvelope {
+fn build_relay_presence_route(
+    state: &Arc<NativeWebSocketSyncState>,
+    url: &str,
+    transport: &str,
+) -> RouteEnvelope {
     let mut capabilities = vec![
         "sync".to_owned(),
         "ack".to_owned(),
@@ -1737,7 +2066,7 @@ fn build_relay_presence_route(state: &Arc<NativeWebSocketSyncState>, url: &str) 
     capabilities.extend(state.db.vector_presence_capabilities());
     let mut presence = state.router.presence(
         state.db.replica_id(),
-        "websocket",
+        transport,
         capabilities,
         vec!["primadb-sync".to_owned()],
     );
@@ -1773,7 +2102,7 @@ fn send_route(state: &Arc<NativeWebSocketSyncState>, route: &RouteEnvelope) -> R
     }
     state
         .outbound
-        .send(Message::Text(payload.into()))
+        .send(NativeRouteOutbound::Route(route.clone()))
         .map_err(|error| PrimadbError::Message(error.to_string()))
 }
 

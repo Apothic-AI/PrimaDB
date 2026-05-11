@@ -13,6 +13,38 @@ function asPath(path) {
   return Moq.Path.from(path);
 }
 
+const DEFAULT_ROUTE_TRACK = "routes";
+const DEFAULT_CHANNEL = "primadb-sync";
+
+function nowMillis() {
+  return Date.now();
+}
+
+function broadcastTarget() {
+  return { kind: "broadcast" };
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+}
+
+function contentHash(value) {
+  const text = stableJson(value);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `fnv1a32:${hash.toString(16).padStart(8, "0")}`;
+}
+
 function drainPendingEnvelopeJson(db) {
   if (typeof db.drainPendingEnvelopeJson === "function") {
     return db.drainPendingEnvelopeJson();
@@ -22,9 +54,6 @@ function drainPendingEnvelopeJson(db) {
 
 function applyMoqPayload(db, message) {
   if (typeof message.envelopeJson === "string") {
-    if (typeof db.applyOperationsJson === "function") {
-      return db.applyOperationsJson(message.envelopeJson);
-    }
     return db.applyEnvelope(JSON.parse(message.envelopeJson));
   }
   return db.applyEnvelope(message.envelope);
@@ -67,17 +96,26 @@ export class PrimadbMoqSession {
   #published;
   #publishTracks = new Set();
   #subscribedTracks = new Set();
+  #routeHandlers = new Set();
+  #seenRoutes = new Set();
+  #knownPeers = new Map();
+  #recommendations = new Map();
   #interval;
   #closed = false;
   #closeConnection;
+  #target;
+  #nextRouteSeq = 0;
 
   constructor(db, connection, options) {
     this.db = db;
     this.connection = connection;
     this.path = options.path;
-    this.track = options.track ?? "ops";
+    this.track = options.track ?? DEFAULT_ROUTE_TRACK;
+    this.channel = options.channel ?? DEFAULT_CHANNEL;
+    this.peerId = options.peerId ?? `moq:${db.replicaId()}`;
     this.intervalMs = Math.max(25, options.intervalMs ?? 250);
     this.#closeConnection = options.closeConnection ?? false;
+    this.#target = options.target ?? broadcastTarget();
   }
 
   publish() {
@@ -108,6 +146,77 @@ export class PrimadbMoqSession {
     }, this.intervalMs);
   }
 
+  onRoute(handler) {
+    this.#routeHandlers.add(handler);
+    return () => {
+      this.#routeHandlers.delete(handler);
+    };
+  }
+
+  knownPeers() {
+    return [...this.#knownPeers.values()];
+  }
+
+  recommendedPeers() {
+    return [...this.#recommendations.values()];
+  }
+
+  createRoute(payload, target = this.#target, replyTo = null) {
+    this.#nextRouteSeq += 1;
+    return {
+      route_id: `${this.peerId}/route/${this.#nextRouteSeq.toString(16)}`,
+      from: this.peerId,
+      channel: this.channel,
+      target,
+      ttl: 6,
+      hops: 0,
+      issued_at_millis: nowMillis(),
+      reply_to: replyTo,
+      content_hash: contentHash(payload),
+      seen_by: [this.peerId],
+      payload,
+    };
+  }
+
+  sendRoute(route) {
+    if (this.#closed || this.#publishTracks.size === 0) {
+      return 0;
+    }
+
+    const payload = {
+      type: "primadb.route.v1",
+      from: this.peerId,
+      sentAt: nowMillis(),
+      route,
+    };
+
+    let sent = 0;
+    for (const track of this.#publishTracks) {
+      track.writeJson(payload);
+      sent += 1;
+    }
+    return sent;
+  }
+
+  announcePresence() {
+    return this.sendRoute(
+      this.createRoute({
+        kind: "presence",
+        peer: {
+          peer_id: this.peerId,
+          replica_id: this.db.replicaId(),
+          transport: "moq",
+          capabilities: ["sync", "ack", "routing", "batch", "peer_exchange"],
+          topics: [this.channel],
+          metadata: {
+            moq_path: this.path,
+            moq_track: this.track,
+          },
+        },
+      }),
+    );
+  }
+
   async flushPending() {
     if (this.#closed || this.#publishTracks.size === 0) {
       return 0;
@@ -121,19 +230,20 @@ export class PrimadbMoqSession {
       return 0;
     }
 
-    const payload = {
-      type: "primadb.sync.v1",
-      from: this.db.replicaId(),
-      sentAt: Date.now(),
-      envelopeJson,
-    };
-
-    let sent = 0;
-    for (const track of this.#publishTracks) {
-      track.writeJson(payload);
-      sent += 1;
-    }
-    return sent;
+    const envelope = JSON.parse(envelopeJson);
+    const messageId = `${this.peerId}/sync/${(this.#nextRouteSeq + 1).toString(16)}`;
+    return this.sendRoute(
+      this.createRoute({
+        kind: "sync",
+        encoding: "sync_frame",
+        payload: {
+          type: "sync",
+          from: envelope.from ?? this.db.replicaId(),
+          message_id: messageId,
+          ops: envelope.ops ?? [],
+        },
+      }),
+    );
   }
 
   close() {
@@ -168,6 +278,7 @@ export class PrimadbMoqSession {
       void request.track.closed.finally(() => {
         this.#publishTracks.delete(request.track);
       });
+      this.announcePresence();
       void this.flushPending().catch(() => {});
     }
   }
@@ -179,16 +290,91 @@ export class PrimadbMoqSession {
         if (!message) {
           break;
         }
-        if (!isPrimadbMoqSyncPayload(message)) {
-          continue;
+        if (isPrimadbMoqRoutePayload(message)) {
+          this.#acceptRoute(message.route);
+        } else if (isPrimadbRouteEnvelope(message)) {
+          this.#acceptRoute(message);
+        } else if (isPrimadbMoqSyncPayload(message)) {
+          if (message.from === this.db.replicaId()) {
+            continue;
+          }
+          applyMoqPayload(this.db, message);
         }
-        if (message.from === this.db.replicaId()) {
-          continue;
-        }
-        applyMoqPayload(this.db, message);
       }
     } finally {
       this.#subscribedTracks.delete(track);
+    }
+  }
+
+  #acceptRoute(route) {
+    if (
+      route.from === this.peerId ||
+      route.seen_by?.includes(this.peerId) ||
+      this.#seenRoutes.has(route.route_id) ||
+      !routeTargetsPeer(route, this.peerId, this.channel)
+    ) {
+      return;
+    }
+    this.#seenRoutes.add(route.route_id);
+    if (this.#seenRoutes.size > 4096) {
+      const [oldest] = this.#seenRoutes;
+      this.#seenRoutes.delete(oldest);
+    }
+
+    for (const handler of this.#routeHandlers) {
+      handler(route);
+    }
+    this.#acceptRoutePayload(route.from, route.route_id, route.payload);
+  }
+
+  #acceptRoutePayload(from, routeId, payload) {
+    if (payload.kind === "batch" && Array.isArray(payload.items)) {
+      for (const item of payload.items) {
+        this.#acceptRoutePayload(from, routeId, item);
+      }
+      return;
+    }
+    if (payload.kind === "presence" && isPeerPresence(payload.peer)) {
+      if (payload.peer.metadata?.state === "offline") {
+        this.#knownPeers.delete(payload.peer.peer_id);
+      } else {
+        this.#knownPeers.set(payload.peer.peer_id, payload.peer);
+      }
+      return;
+    }
+    if (payload.kind === "peer_exchange") {
+      for (const recommendation of payload.peers ?? []) {
+        if (isPeerPresence(recommendation.peer)) {
+          this.#recommendations.set(recommendation.peer.peer_id, recommendation);
+        }
+      }
+      return;
+    }
+    if (payload.kind !== "sync") {
+      return;
+    }
+
+    if (payload.encoding !== "sync_frame" || !isSyncFrame(payload.payload)) {
+      return;
+    }
+    if (payload.payload.type === "sync") {
+      const applied = this.db.applyEnvelope({ from: payload.payload.from, ops: payload.payload.ops });
+      this.sendRoute(
+        this.createRoute(
+          {
+            kind: "sync",
+            encoding: "sync_frame",
+            payload: {
+              type: "ack",
+              from: this.db.replicaId(),
+              message_id: payload.payload.message_id,
+              applied,
+            },
+          },
+          { kind: "peer", value: from },
+          routeId,
+        ),
+      );
     }
   }
 }
@@ -204,12 +390,14 @@ export async function createPrimadbMoqLoopback(options) {
   const publisher = new PrimadbMoqSession(options.publisherDb, publisherConnection, {
     path: options.path,
     track: options.track,
+    channel: options.channel,
     intervalMs: options.intervalMs,
     closeConnection: true,
   });
   const subscriber = new PrimadbMoqSession(options.subscriberDb, subscriberConnection, {
     path: options.path,
     track: options.track,
+    channel: options.channel,
     intervalMs: options.intervalMs,
     closeConnection: true,
   });
@@ -217,6 +405,7 @@ export async function createPrimadbMoqLoopback(options) {
   publisher.publish();
   subscriber.subscribe(options.path);
   publisher.startAutoFlush();
+  publisher.announcePresence();
 
   return {
     publisher,
@@ -236,6 +425,64 @@ function isPrimadbMoqSyncPayload(value) {
       value.type === "primadb.sync.v1" &&
       typeof value.from === "string" &&
       ("envelopeJson" in value || "envelope" in value),
+  );
+}
+
+function routeTargetsPeer(route, peerId, channel) {
+  switch (route.target?.kind) {
+    case "broadcast":
+      return route.channel === channel;
+    case "topic":
+      return route.target.value === channel || route.channel === route.target.value;
+    case "peer":
+      return route.target.value === peerId;
+    default:
+      return false;
+  }
+}
+
+function isPrimadbRouteEnvelope(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof value.route_id === "string" &&
+      typeof value.from === "string" &&
+      typeof value.channel === "string" &&
+      typeof value.payload === "object",
+  );
+}
+
+function isPrimadbMoqRoutePayload(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      value.type === "primadb.route.v1" &&
+      typeof value.from === "string" &&
+      isPrimadbRouteEnvelope(value.route),
+  );
+}
+
+function isPeerPresence(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof value.peer_id === "string" &&
+      typeof value.replica_id === "string" &&
+      typeof value.transport === "string",
+  );
+}
+
+function isSyncFrame(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      ((value.type === "sync" &&
+        typeof value.from === "string" &&
+        typeof value.message_id === "string" &&
+        Array.isArray(value.ops)) ||
+        (value.type === "ack" &&
+          typeof value.from === "string" &&
+          typeof value.message_id === "string")),
   );
 }
 

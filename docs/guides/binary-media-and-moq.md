@@ -72,14 +72,20 @@ These demos are intentionally examples, not a claim that graph replication is th
 all realtime media. For serious media transport, use them to evaluate latency, chunk size, backpressure,
 and peer topology.
 
-## MoQ Helpers
+## MoQ Route Helpers
 
-The MoQ helpers model path/track/sequence frames on top of PrimaDB package surfaces. They are
-experimental and package-local:
+The MoQ helpers model path/track/sequence frames on top of PrimaDB package surfaces. They now carry
+PrimaDB `RouteEnvelope` objects (`primadb.route.v1`) rather than a standalone MoQ-only sync
+protocol:
 
 - browser: `primadb/moq`
 - Node: `primadb-node/moq`
 - Python: `primadb.moq`
+- Rust/native: optional `native-moq` feature with `NativeMoqRouteClient` and `NativeMoqSync`
+
+Generic MoQ relays can fan out these frames to subscribers that know the same route-mode path and
+track. A PrimaDB-aware gateway/full node is still needed to bridge that MoQ route traffic to
+WebSocket/WebRTC sessions, enforce hooks/auth, and host durable state.
 
 Use the package-local examples when evaluating them:
 

@@ -58,6 +58,8 @@ use crate::{
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
 use crate::{MeshConfig, NativeWebRtcMesh};
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
+use crate::{MoqRelayClientConfig, NativeMoqSync};
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 use crate::{NativeWebSocketSync, RelayClientConfig};
 use async_channel::{Receiver, Sender};
@@ -2112,6 +2114,11 @@ impl Primadb {
     #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
     pub async fn connect_relay(&self, config: RelayClientConfig) -> Result<NativeWebSocketSync> {
         NativeWebSocketSync::connect_with_config(self.clone(), config).await
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
+    pub async fn connect_moq(&self, config: MoqRelayClientConfig) -> Result<NativeMoqSync> {
+        NativeMoqSync::connect_with_config(self.clone(), config).await
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "native-webrtc"))]
