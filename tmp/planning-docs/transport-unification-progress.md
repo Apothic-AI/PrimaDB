@@ -23,13 +23,15 @@
 - Updated browser, Node, and Python MoQ helpers to emit `primadb.route.v1` frames carrying
   `RouteEnvelope` sync/presence/peer-exchange payloads over the configured MoQ path/track.
 - Added optional native Rust `native-moq` support with `NativeMoqRouteClient` for low-level
-  `RouteEnvelope` exchange over moq-native/moq-lite and `NativeMoqSync` for DB sync over that route
-  underlay.
+  `RouteEnvelope` exchange over Cloudflare `moq-rs` IETF backends and `NativeMoqSync` for DB sync
+  over that route underlay.
 - Added a native IETF MoQ backend using Cloudflare `moq-rs` (`moq-transport` and
   `moq-native-ietf`) for `MoqDraft::Draft14`/`DraftLatest`. It uses direct namespace/track
   subscriptions instead of `moq-lite` broadcast discovery and encodes one `RouteEnvelope` per MoQ
-  object. The old `moq-lite` backend remains as the `Draft07`/legacy path while draft-07 branch
-  compatibility is evaluated separately.
+  object.
+- Replaced the broken native `MoqDraft::Draft07` legacy `moq-lite` path with a renamed dependency
+  on Cloudflare `moq-rs`'s `draft-ietf-moq-transport-07` branch. Native draft-07 and draft-14 now
+  share the same route-mode object shape while using draft-specific transport crates.
 - Added `MoqRelayClientConfig.tlsDisableVerify` plus `PRIMADB_MOQ_TLS_DISABLE_VERIFY` support for
   local native IETF MoQ smoke testing with self-signed certificates.
 - Added `scripts/smoke-native-moq-ietf-local.sh`, which starts a local Cloudflare `moq-rs`
@@ -82,36 +84,47 @@
 - Added retrying MoQ subscription loops to the JS route-mode helpers so generic relays such as
   Cloudflare can recover from subscribe-before-announce races instead of leaving a one-shot failed
   subscription.
+- Updated browser, Node, and Python route-mode MoQ helpers to carry the original drained sync
+  envelope JSON inside `sync_frame` route payloads and to prefer `applyOperationsJson`/
+  `apply_operations_json` when present. This avoids JS numeric coercion breaking native `u64`
+  deserialization.
+- Added accepted peer-id aliases to route-mode MoQ sessions. `connectMeshViaMoq(...)` registers the
+  WASM mesh peer id so targeted WebRTC offer/answer/ICE `RoutePayload::Signal` routes are accepted
+  even though the MoQ session peer id is `moq:<replica>`.
 - Verified `packages/primadb-node/scripts/smoke-moq-live.mjs` with Node v26.1.0:
   Cloudflare draft-14 Node/Node route exchange passed through the new provider-backed WebTransport
   path; Cloudflare draft-07 still returned `E_SESSION_CLOSED`.
+- Verified `packages/primadb/examples/moq-sync/test-live-route.mjs` with Node latest:
+  Cloudflare draft-14 browser/browser route exchange, browser/Node route exchange, and browser
+  WebRTC-over-MoQ signaling passed. The browser WebRTC probe generated short-lived Cloudflare TURN
+  credentials when the configured token variables were present and opened one data channel in each
+  direction.
+- Verified native Cloudflare MoQ after adding the draft-07 backend:
+  - `cargo run --features native-moq --example native_moq_live_probe` passed for draft-14 and
+    draft-07.
+  - `cargo run --features "native-websocket native-moq" --example
+    native_gateway_moq_ws_live_probe` passed for draft-14 and draft-07.
+- Verified after the remaining fixes:
+  - `cargo check --features "native-websocket native-moq" --examples`
+  - `cargo test --features native-moq --lib native_moq -- --nocapture`
+  - `cargo test --features native-moq --lib draft07 -- --nocapture`
+  - `pnpm --dir packages/primadb run typecheck`
+  - `pnpm --dir packages/primadb/examples run build`
+  - `pnpm --dir packages/primadb/examples run smoke:moq-live`
+  - `node packages/primadb-node/examples/moq-sync/index.mjs`
+  - `node packages/primadb-node/scripts/smoke-moq-live.mjs`
+  - `pnpm --dir packages/primadb run smoke:moq-mesh-signaling`
 
 ## Remaining
 
-- Live Cloudflare browser interop probes are implemented and were run against the available
-  environment, but the configured public endpoints did not pass for the browser stack:
-  - Browser/browser via `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: timed out waiting
-    for route exchange.
-  - Browser/browser via `MOQ_DRAFT07_RELAY=draft-07.cloudflare.mediaoverquic.com`: browser
-    WebTransport reported connection lost.
-  - Browser/browser via `https://draft-07.cloudflare.mediaoverquic.com/anon`: browser WebTransport
-    reported connection lost.
-  - Browser/browser via `https://interop-relay.cloudflare.mediaoverquic.com:443/anon`: browser
-    WebTransport reported connection lost.
-- Browser/Node cross-stack Cloudflare route exchange still needs to be rerun now that the Node side
-  has a provider-backed WebTransport path.
-- Node/Node via Cloudflare draft-14 now passes. Node/Node via Cloudflare draft-07 still fails with
-  `E_SESSION_CLOSED`.
-- Native Cloudflare draft-14 now passes:
-  - Native/native via `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: bidirectional
-    route exchange passed.
-  - WebSocket peer plus MoQ peer through the native gateway via
-    `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: bidirectional route exchange passed.
-- Native Cloudflare draft-07 still does not pass through PrimaDB's integrated path. The current
-  `MoqDraft::Draft07` backend is the legacy `moq-lite` implementation; true draft-07 validation
-  requires either a separate build against Cloudflare `moq-rs`'s `draft-ietf-moq-transport-07`
-  branch or a second integrated draft-07 backend because that branch has a different role/session
-  API.
-- Browser WebRTC MoQ signaling has deterministic route injection coverage, but browser tab-to-tab
-  live WebRTC over Cloudflare MoQ/STUN/TURN still needs a passing JS/browser MoQ route exchange
-  before it can be validated end to end.
+- JS draft-07 remains unsupported by the current browser/Node stack. Evidence:
+  - `@moq/lite` exposes a draft-07 version constant, but its connect path negotiates draft-14/15/16/17
+    and does not send a draft-07 setup to Cloudflare's draft-07 endpoint.
+  - Browser/browser draft-07 reports `WebTransportError: Connection lost`.
+  - Browser/Node and Node/Node draft-07 report `E_SESSION_CLOSED` or an equivalent early stream
+    close.
+  - Native Rust draft-07 passes because it uses the separate Cloudflare `moq-rs` draft-07 branch
+    backend.
+- Python MoQ remains a deterministic route-mode loopback helper. No Python Cloudflare live client
+  has been added because the current Python MoQ bindings still do not expose a stable generic byte
+  track API for this use case.

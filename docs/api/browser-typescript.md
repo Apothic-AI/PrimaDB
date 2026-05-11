@@ -226,15 +226,26 @@ Kind: class
 
 ```ts
 export declare class PrimadbMoqSession {
+    #private;
     readonly db: PrimadbLike;
     readonly connection: MoqConnection;
     readonly path: string;
     readonly track: string;
+    readonly channel: string;
+    readonly peerId: string;
     readonly intervalMs: number;
+    readonly retryIntervalMs: number;
     constructor(db: PrimadbLike, connection: MoqConnection, options: PrimadbMoqSessionOptions);
     publish(): MoqBroadcast;
-    subscribe(path?: string): MoqTrack;
+    subscribe(path?: string): string;
     startAutoFlush(): void;
+    onRoute(handler: PrimadbRouteHandler): () => void;
+    addAcceptedPeerId(peerId: string): () => void;
+    knownPeers(): PrimadbPeerPresence[];
+    recommendedPeers(): PrimadbPeerRecommendation[];
+    createRoute(payload: PrimadbRoutePayload, target?: PrimadbRouteTarget, replyTo?: string | null): PrimadbRouteEnvelope;
+    sendRoute(route: PrimadbRouteEnvelope): number;
+    announcePresence(): number;
     flushPending(): Promise<number>;
     close(): void;
 }

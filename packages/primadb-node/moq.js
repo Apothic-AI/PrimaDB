@@ -58,9 +58,32 @@ function drainPendingEnvelopeJson(db) {
 
 function applyMoqPayload(db, message) {
   if (typeof message.envelopeJson === "string") {
+    if (typeof db.applyOperationsJson === "function") {
+      return db.applyOperationsJson(message.envelopeJson);
+    }
     return db.applyEnvelope(JSON.parse(message.envelopeJson));
   }
   return db.applyEnvelope(message.envelope);
+}
+
+function applySyncFramePayload(db, frame) {
+  if (typeof frame.envelopeJson === "string") {
+    if (typeof db.applyOperationsJson === "function") {
+      return db.applyOperationsJson(frame.envelopeJson);
+    }
+    return db.applyEnvelope(JSON.parse(frame.envelopeJson));
+  }
+  if (typeof db.applyOperationsJson === "function") {
+    return db.applyOperationsJson(
+      JSON.stringify({
+        type: "sync",
+        from: frame.from,
+        message_id: frame.message_id,
+        ops: frame.ops ?? [],
+      }),
+    );
+  }
+  return db.applyEnvelope({ from: frame.from, ops: frame.ops ?? [] });
 }
 
 export function moqRuntimeSupport() {
@@ -173,6 +196,7 @@ export class PrimadbMoqSession {
   #seenRoutes = new Set();
   #knownPeers = new Map();
   #recommendations = new Map();
+  #acceptedPeerIds = new Set();
   #interval;
   #closed = false;
   #closeConnection;
@@ -190,6 +214,7 @@ export class PrimadbMoqSession {
     this.retryIntervalMs = Math.max(100, options.retryIntervalMs ?? 1000);
     this.#closeConnection = options.closeConnection ?? false;
     this.#target = options.target ?? broadcastTarget();
+    this.#acceptedPeerIds.add(this.peerId);
   }
 
   publish() {
@@ -225,6 +250,15 @@ export class PrimadbMoqSession {
     this.#routeHandlers.add(handler);
     return () => {
       this.#routeHandlers.delete(handler);
+    };
+  }
+
+  addAcceptedPeerId(peerId) {
+    this.#acceptedPeerIds.add(peerId);
+    return () => {
+      if (peerId !== this.peerId) {
+        this.#acceptedPeerIds.delete(peerId);
+      }
     };
   }
 
@@ -315,6 +349,7 @@ export class PrimadbMoqSession {
           type: "sync",
           from: envelope.from ?? this.db.replicaId(),
           message_id: messageId,
+          envelopeJson,
           ops: envelope.ops ?? [],
         },
       }),
@@ -346,7 +381,16 @@ export class PrimadbMoqSession {
         const remote = this.connection.consume(asPath(path));
         track = remote.subscribe(this.track, 0);
         this.#subscribedTracks.add(track);
-        await this.#readTrack(track);
+        const read = this.#readTrack(track);
+        read.catch(() => {});
+        await Promise.race([
+          read,
+          track.closed.then((error) => {
+            if (error) {
+              throw error;
+            }
+          }),
+        ]);
       } catch (error) {
         if (!this.#closed) {
           console.warn(
@@ -415,7 +459,7 @@ export class PrimadbMoqSession {
       route.from === this.peerId ||
       route.seen_by?.includes(this.peerId) ||
       this.#seenRoutes.has(route.route_id) ||
-      !routeTargetsPeer(route, this.peerId, this.channel)
+      !routeTargetsPeer(route, this.#acceptedPeerIds, this.channel)
     ) {
       return;
     }
@@ -462,7 +506,7 @@ export class PrimadbMoqSession {
       return;
     }
     if (payload.payload.type === "sync") {
-      const applied = this.db.applyEnvelope({ from: payload.payload.from, ops: payload.payload.ops });
+      const applied = applySyncFramePayload(this.db, payload.payload);
       this.sendRoute(
         this.createRoute(
           {
@@ -532,14 +576,14 @@ function isPrimadbMoqSyncPayload(value) {
   );
 }
 
-function routeTargetsPeer(route, peerId, channel) {
+function routeTargetsPeer(route, peerIds, channel) {
   switch (route.target?.kind) {
     case "broadcast":
       return route.channel === channel;
     case "topic":
       return route.target.value === channel || route.channel === route.target.value;
     case "peer":
-      return route.target.value === peerId;
+      return peerIds.has(route.target.value);
     default:
       return false;
   }
@@ -583,7 +627,7 @@ function isSyncFrame(value) {
       ((value.type === "sync" &&
         typeof value.from === "string" &&
         typeof value.message_id === "string" &&
-        Array.isArray(value.ops)) ||
+        (Array.isArray(value.ops) || typeof value.envelopeJson === "string")) ||
         (value.type === "ack" &&
           typeof value.from === "string" &&
           typeof value.message_id === "string")),

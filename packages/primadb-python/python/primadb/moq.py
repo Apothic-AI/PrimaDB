@@ -23,8 +23,33 @@ def _drain_pending_envelope_json(db: Any) -> str:
 def _apply_moq_payload(db: Any, message: dict[str, Any]) -> int:
     envelope_json = message.get("envelopeJson")
     if isinstance(envelope_json, str):
+        if hasattr(db, "apply_operations_json"):
+            return int(db.apply_operations_json(envelope_json))
         return int(db.apply_envelope(json.loads(envelope_json)))
     return int(db.apply_envelope(message["envelope"]))
+
+
+def _apply_sync_frame_payload(db: Any, frame: dict[str, Any]) -> int:
+    envelope_json = frame.get("envelopeJson")
+    if isinstance(envelope_json, str):
+        if hasattr(db, "apply_operations_json"):
+            return int(db.apply_operations_json(envelope_json))
+        return int(db.apply_envelope(json.loads(envelope_json)))
+    if hasattr(db, "apply_operations_json"):
+        return int(
+            db.apply_operations_json(
+                json.dumps(
+                    {
+                        "type": "sync",
+                        "from": frame.get("from"),
+                        "message_id": frame.get("message_id"),
+                        "ops": frame.get("ops", []),
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        )
+    return int(db.apply_envelope({"from": frame.get("from"), "ops": frame.get("ops", [])}))
 
 
 def _stable_json(value: Any) -> str:
@@ -53,7 +78,7 @@ def _is_route_envelope(value: Any) -> bool:
     )
 
 
-def _route_targets_peer(route: dict[str, Any], peer_id: str, channel: str) -> bool:
+def _route_targets_peer(route: dict[str, Any], peer_ids: set[str], channel: str) -> bool:
     target = route.get("target")
     if not isinstance(target, dict):
         return False
@@ -63,7 +88,7 @@ def _route_targets_peer(route: dict[str, Any], peer_id: str, channel: str) -> bo
     if kind == "topic":
         return target.get("value") == channel or route.get("channel") == target.get("value")
     if kind == "peer":
-        return target.get("value") == peer_id
+        return target.get("value") in peer_ids
     return False
 
 
@@ -107,6 +132,7 @@ class PrimadbMoqSession:
         self._seen_routes: set[str] = set()
         self._known_peers: dict[str, dict[str, Any]] = {}
         self._recommendations: dict[str, dict[str, Any]] = {}
+        self._accepted_peer_ids: set[str] = {self.peer_id}
         self._closed = False
 
     def subscribe_from(self, publisher: "PrimadbMoqSession") -> None:
@@ -122,6 +148,15 @@ class PrimadbMoqSession:
                 self._route_handlers.remove(handler)
 
         return unsubscribe
+
+    def add_accepted_peer_id(self, peer_id: str) -> Callable[[], None]:
+        self._accepted_peer_ids.add(peer_id)
+
+        def unregister() -> None:
+            if peer_id != self.peer_id:
+                self._accepted_peer_ids.discard(peer_id)
+
+        return unregister
 
     def known_peers(self) -> list[dict[str, Any]]:
         return list(self._known_peers.values())
@@ -209,6 +244,7 @@ class PrimadbMoqSession:
                         "type": "sync",
                         "from": envelope.get("from", self.db.replica_id()),
                         "message_id": f"{self.peer_id}/sync/{self._route_sequence + 1:x}",
+                        "envelopeJson": envelope_json,
                         "ops": envelope.get("ops", []),
                     },
                 }
@@ -238,7 +274,7 @@ class PrimadbMoqSession:
             route.get("from") == self.peer_id
             or self.peer_id in route.get("seen_by", [])
             or route["route_id"] in self._seen_routes
-            or not _route_targets_peer(route, self.peer_id, self.channel)
+            or not _route_targets_peer(route, self._accepted_peer_ids, self.channel)
         ):
             return 0
         self._seen_routes.add(route["route_id"])
@@ -275,7 +311,7 @@ class PrimadbMoqSession:
             return 0
         if frame.get("type") != "sync":
             return 0
-        applied = int(self.db.apply_envelope({"from": frame.get("from"), "ops": frame.get("ops", [])}))
+        applied = _apply_sync_frame_payload(self.db, frame)
         self.send_route(
             self.create_route(
                 {

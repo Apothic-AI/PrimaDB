@@ -263,9 +263,35 @@ function drainPendingEnvelopeJson(db: PrimadbLike): string {
 
 function applyMoqPayload(db: PrimadbLike, message: PrimadbMoqSyncPayload): number {
   if (typeof message.envelopeJson === "string") {
+    if (typeof db.applyOperationsJson === "function") {
+      return db.applyOperationsJson(message.envelopeJson);
+    }
     return db.applyEnvelope(JSON.parse(message.envelopeJson));
   }
   return db.applyEnvelope(message.envelope);
+}
+
+function applySyncFramePayload(
+  db: PrimadbLike,
+  frame: { from: string; message_id: string; ops?: unknown[]; envelopeJson?: string },
+): number {
+  if (typeof frame.envelopeJson === "string") {
+    if (typeof db.applyOperationsJson === "function") {
+      return db.applyOperationsJson(frame.envelopeJson);
+    }
+    return db.applyEnvelope(JSON.parse(frame.envelopeJson));
+  }
+  if (typeof db.applyOperationsJson === "function") {
+    return db.applyOperationsJson(
+      JSON.stringify({
+        type: "sync",
+        from: frame.from,
+        message_id: frame.message_id,
+        ops: frame.ops ?? [],
+      }),
+    );
+  }
+  return db.applyEnvelope({ from: frame.from, ops: frame.ops ?? [] });
 }
 
 export function moqRuntimeSupport(): {
@@ -381,6 +407,7 @@ export function connectMeshViaMoqSession(
   }
 
   const mesh = db.connectMeshWithExternalSignaling(meshConfig, (route) => moq.sendRoute(route));
+  const unregisterMeshPeerId = moq.addAcceptedPeerId(mesh.peerId());
   const unsubscribe = moq.onRoute((route) => mesh.acceptSignalingRoute(route));
   mesh.announceSignalingPresence();
   moq.announcePresence();
@@ -389,6 +416,7 @@ export function connectMeshViaMoqSession(
     mesh,
     moq,
     close() {
+      unregisterMeshPeerId();
       unsubscribe();
       mesh.close();
       if (options.closeMoqSession !== false) {
@@ -416,6 +444,7 @@ export class PrimadbMoqSession {
   #seenRoutes = new Set<string>();
   #knownPeers = new Map<string, PrimadbPeerPresence>();
   #recommendations = new Map<string, PrimadbPeerRecommendation>();
+  #acceptedPeerIds = new Set<string>();
   #interval: ReturnType<typeof setInterval> | undefined;
   #closed = false;
   #closeConnection: boolean;
@@ -433,6 +462,7 @@ export class PrimadbMoqSession {
     this.retryIntervalMs = Math.max(100, options.retryIntervalMs ?? 1000);
     this.#closeConnection = options.closeConnection ?? false;
     this.#target = options.target ?? broadcastTarget();
+    this.#acceptedPeerIds.add(this.peerId);
   }
 
   publish(): MoqBroadcast {
@@ -469,6 +499,15 @@ export class PrimadbMoqSession {
     this.#routeHandlers.add(handler);
     return () => {
       this.#routeHandlers.delete(handler);
+    };
+  }
+
+  addAcceptedPeerId(peerId: string): () => void {
+    this.#acceptedPeerIds.add(peerId);
+    return () => {
+      if (peerId !== this.peerId) {
+        this.#acceptedPeerIds.delete(peerId);
+      }
     };
   }
 
@@ -565,6 +604,7 @@ export class PrimadbMoqSession {
           type: "sync",
           from: envelope.from ?? this.db.replicaId(),
           message_id: messageId,
+          envelopeJson,
           ops: envelope.ops ?? [],
         },
       }),
@@ -596,7 +636,16 @@ export class PrimadbMoqSession {
         const remote = this.connection.consume(asPath(path));
         track = remote.subscribe(this.track, 0);
         this.#subscribedTracks.add(track);
-        await this.#readTrack(track);
+        const read = this.#readTrack(track);
+        read.catch(() => {});
+        await Promise.race([
+          read,
+          track.closed.then((error) => {
+            if (error) {
+              throw error;
+            }
+          }),
+        ]);
       } catch (error) {
         if (!this.#closed) {
           console.warn(
@@ -665,7 +714,7 @@ export class PrimadbMoqSession {
       route.from === this.peerId ||
       route.seen_by?.includes(this.peerId) ||
       this.#seenRoutes.has(route.route_id) ||
-      !routeTargetsPeer(route, this.peerId, this.channel)
+      !routeTargetsPeer(route, this.#acceptedPeerIds, this.channel)
     ) {
       return;
     }
@@ -716,7 +765,7 @@ export class PrimadbMoqSession {
       return;
     }
     if (sync.payload.type === "sync") {
-      const applied = this.db.applyEnvelope({ from: sync.payload.from, ops: sync.payload.ops });
+      const applied = applySyncFramePayload(this.db, sync.payload);
       this.sendRoute(
         this.createRoute(
           {
@@ -778,14 +827,18 @@ export async function createPrimadbMoqLoopback(
   };
 }
 
-function routeTargetsPeer(route: PrimadbRouteEnvelope, peerId: string, channel: string): boolean {
+function routeTargetsPeer(
+  route: PrimadbRouteEnvelope,
+  peerIds: ReadonlySet<string>,
+  channel: string,
+): boolean {
   switch (route.target.kind) {
     case "broadcast":
       return route.channel === channel;
     case "topic":
       return route.target.value === channel || route.channel === route.target.value;
     case "peer":
-      return route.target.value === peerId;
+      return peerIds.has(route.target.value);
     default:
       return false;
   }
@@ -833,7 +886,7 @@ function isPeerPresence(value: unknown): value is PrimadbPeerPresence {
 }
 
 function isSyncFrame(value: unknown): value is
-  | { type: "sync"; from: string; message_id: string; ops: unknown[] }
+  | { type: "sync"; from: string; message_id: string; ops?: unknown[]; envelopeJson?: string }
   | { type: "ack"; from: string; message_id: string; applied: number } {
   return Boolean(
     value &&
@@ -841,7 +894,8 @@ function isSyncFrame(value: unknown): value is
       (((value as { type?: unknown }).type === "sync" &&
         typeof (value as { from?: unknown }).from === "string" &&
         typeof (value as { message_id?: unknown }).message_id === "string" &&
-        Array.isArray((value as { ops?: unknown }).ops)) ||
+        (Array.isArray((value as { ops?: unknown }).ops) ||
+          typeof (value as { envelopeJson?: unknown }).envelopeJson === "string")) ||
         ((value as { type?: unknown }).type === "ack" &&
           typeof (value as { from?: unknown }).from === "string" &&
           typeof (value as { message_id?: unknown }).message_id === "string")),

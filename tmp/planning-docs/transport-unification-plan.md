@@ -158,23 +158,24 @@ public hostnames only.
 Goal: prove the route-mode MoQ profile works against public Cloudflare MoQ endpoints and not only
 in local/deterministic harnesses.
 
-Status: live probes have been added and executed. Native Rust draft-14 now passes against both a
-local Cloudflare `moq-rs` relay and the configured Cloudflare draft-14 endpoint. Node/Node
-Cloudflare draft-14 also passes through `primadb-node` using `@webtransport-bun/webtransport` plus
-retrying subscriptions. Browser Cloudflare interop, browser/Node cross-stack validation, and draft-07
-remain separate compatibility gaps. The current support policy is:
+Status: live probes have been added and executed. Native Rust draft-14 passes against both a local
+Cloudflare `moq-rs` relay and the configured Cloudflare draft-14 endpoint. Native Rust draft-07 now
+passes through a separate renamed dependency on Cloudflare `moq-rs`'s
+`draft-ietf-moq-transport-07` branch. Node/Node Cloudflare draft-14 passes through
+`primadb-node` using `@webtransport-bun/webtransport` plus retrying subscriptions. Browser/browser,
+browser/Node, and browser WebRTC-over-MoQ signaling pass against Cloudflare draft-14. JS draft-07
+remains unsupported by the current `@moq/lite` connection path. The current support policy is:
 
 - Treat route-mode MoQ as proven for deterministic/local `@moq/lite` loopback and self-hosted or
   gateway-backed relays.
-- Treat native Rust draft-14 Cloudflare route exchange as passing for direct native peers and for a
-  native gateway bridging WebSocket and MoQ.
+- Treat native Rust draft-14 and draft-07 Cloudflare route exchange as passing for direct native
+  peers and for a native gateway bridging WebSocket and MoQ.
 - Treat Node/Node Cloudflare draft-14 route exchange as passing through the Node-only
   `@webtransport-bun/webtransport` provider.
-- Do not advertise browser or browser/Node Cloudflare MoQ as passing until the browser stack passes a
-  current endpoint and draft combination.
-- Keep draft-07 as a compatibility target, but implement it as a separate `moq-rs` draft-07 backend
-  or external probe because Cloudflare's draft-07 branch has a different role/session API from
-  `moq-transport` draft-14.
+- Treat browser/browser, browser/Node, and browser WebRTC-over-MoQ signaling as passing for
+  Cloudflare draft-14.
+- Do not advertise JS/browser/Node draft-07 support until either `@moq/lite` gains a draft-07
+  connect path or PrimaDB adds a separate JS draft-07 transport adapter.
 
 1. Add opt-in live smoke scripts.
    - Gate every live test behind explicit environment variables.
@@ -184,16 +185,17 @@ remain separate compatibility gaps. The current support policy is:
    - Do not log secrets or commit `.env`.
 
 2. Validate same-stack route exchange.
-   - Browser/browser through `@moq/lite`.
+   - Browser/browser through `@moq/lite`. Cloudflare draft-14 passes; draft-07 remains unsupported
+     by the JS connection path.
    - Node/Node through `primadb-node/moq`. Cloudflare draft-14 now passes through the
-     provider-backed WebTransport path.
-   - Native/native through `NativeMoqRouteClient`. Native draft-14 passes locally and through
-     Cloudflare draft-14.
+     provider-backed WebTransport path; draft-07 remains unsupported by the JS connection path.
+   - Native/native through `NativeMoqRouteClient`. Native draft-14 and draft-07 pass through
+     Cloudflare using draft-specific `moq-rs` backends.
    - For each, assert presence exchange, `RoutePayload::Sync`, duplicate suppression, and close
      behavior.
 
 3. Validate cross-stack route exchange.
-   - Browser to Node.
+   - Browser to Node. Cloudflare draft-14 passes.
    - Browser to native.
    - Node to native.
    - Verify that all stacks agree on `primadb.route.v1`, route target encoding, path/track names,
@@ -205,12 +207,15 @@ remain separate compatibility gaps. The current support policy is:
    - Assert presence, sync, pull, watch, and strict-scope transaction behavior across the gateway.
    - Add multi-homed loop/dedupe checks by connecting one logical peer through both WebSocket and
      MoQ.
-   - Current signal-route gateway smoke passes through Cloudflare draft-14.
+   - Current signal-route gateway smoke passes through Cloudflare draft-14 and draft-07 on the
+     native MoQ path.
 
 5. Decide draft support policy from evidence.
-   - Prefer draft-14 for native Rust now that Cloudflare draft-14 passes with `moq-rs`.
-   - Keep draft-07 as a separate compatibility target requiring Cloudflare `moq-rs`'s
-     `draft-ietf-moq-transport-07` branch or equivalent wire support.
+   - Use draft-14/latest as the default across SDKs.
+   - Support native Rust draft-07 through the separate Cloudflare `moq-rs`
+     `draft-ietf-moq-transport-07` branch backend.
+   - Treat JS draft-07 as unsupported until the JS MoQ stack can negotiate the Cloudflare draft-07
+     endpoint.
    - Record observed Cloudflare endpoint behavior in the progress doc.
 
 ### Gap 2: Browser `connectMesh(...)` MoQ Signaling
@@ -218,8 +223,9 @@ remain separate compatibility gaps. The current support policy is:
 Goal: give browser WebRTC mesh the same MoQ signaling capability now available to native WebRTC
 mesh.
 
-Status: implemented for browser WASM plus TypeScript wrapper. End-to-end live WebRTC over
-Cloudflare MoQ remains blocked on a passing public MoQ route exchange endpoint.
+Status: implemented for browser WASM plus TypeScript wrapper. Deterministic route injection passes,
+and live browser WebRTC over Cloudflare draft-14 MoQ signaling passes with Cloudflare STUN/TURN
+configuration from `.env`.
 
 1. Add an external signaling adapter to the WASM mesh runtime.
    - Introduce a browser-only mesh signaling variant that does not own WebSocket or

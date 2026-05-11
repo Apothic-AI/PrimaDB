@@ -36,5 +36,7 @@ MOQ_RELAY=https://relay.example.com/anon pnpm run smoke:moq-live
 ```
 
 If `MOQ_RELAY` is not set, the live probe reads `MOQ_DRAFT14_RELAY` and `MOQ_DRAFT07_RELAY` from
-the project `.env`. The probe reports browser/browser and browser/Node route exchange separately so
-draft/runtime failures are visible instead of hidden by the deterministic loopback.
+the project `.env`. The probe reports browser/browser, browser/Node, and browser WebRTC-over-MoQ
+signaling separately so draft/runtime failures are visible instead of hidden by the deterministic
+loopback. Cloudflare draft-14 is expected to pass for the browser JS stack; draft-07 currently does
+not negotiate through `@moq/lite`.

@@ -18,6 +18,8 @@ mod native_mesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
 mod native_moq;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
+mod native_moq_draft07;
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
 mod native_moq_ietf;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]
 mod native_relay_server;
@@ -103,6 +105,8 @@ pub use hooks::{
 pub use native_mesh::NativeWebRtcMesh;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
 pub use native_moq::{NativeMoqRouteClient, NativeMoqRouteClientBackend};
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
+pub use native_moq_draft07::NativeDraft07MoqRouteClient;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-moq"))]
 pub use native_moq_ietf::NativeIetfMoqRouteClient;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-websocket"))]

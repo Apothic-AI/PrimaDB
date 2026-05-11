@@ -85,6 +85,41 @@ async function waitFor(predicate, timeoutMs = 20_000) {
   return null;
 }
 
+async function cloudflareIceServers(label) {
+  const servers = [];
+  if (process.env.CLOUDFLARE_STUN) {
+    servers.push({ urls: `stun:${process.env.CLOUDFLARE_STUN}:3478` });
+  }
+  const tokenId = process.env.CLOUDFLARE_TURN_TOKEN_ID;
+  const apiToken = process.env.CLOUDFLARE_TURN_API_TOKEN;
+  if (tokenId && apiToken) {
+    const response = await fetch(
+      `https://rtc.live.cloudflare.com/v1/turn/keys/${tokenId}/credentials/generate`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          ttl: 600,
+          customIdentifier: `primadb-moq-mesh-${label}`,
+        }),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`Cloudflare TURN credential request failed with HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    if (payload?.iceServers) {
+      servers.push(payload.iceServers);
+    }
+  } else if (process.env.CLOUDFLARE_TURN) {
+    servers.push({ urls: `turn:${process.env.CLOUDFLARE_TURN}:3478?transport=udp` });
+  }
+  return servers;
+}
+
 function withTimeout(promise, timeoutMs, description) {
   return Promise.race([
     promise,
@@ -152,6 +187,84 @@ function createDb(name) {
       return 0;
     },
   };
+}
+
+async function runBrowserMeshViaMoq(page, url, draft) {
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const room = `primadb-live-moq-mesh-${token}`;
+  const channel = `mesh:${room}`;
+  const pathA = `primadb/live/mesh/${token}/a`;
+  const pathB = `primadb/live/mesh/${token}/b`;
+  const iceServers = await cloudflareIceServers(token);
+
+  await withTimeout(
+    page.evaluate(
+      async ({ url, room, channel, pathA, pathB, iceServers }) => {
+        const { connectMeshViaMoq, createPrimadb } = globalThis.primadbMoqApi;
+        const dbA = await createPrimadb(`browser-mesh-a-${room}`);
+        const dbB = await createPrimadb(`browser-mesh-b-${room}`);
+        const a = await connectMeshViaMoq(dbA, {
+          url,
+          path: pathA,
+          channel,
+          subscribe: [pathB],
+          room,
+          intervalMs: 60_000,
+          retryIntervalMs: 500,
+          iceServers,
+        });
+        const b = await connectMeshViaMoq(dbB, {
+          url,
+          path: pathB,
+          channel,
+          subscribe: [pathA],
+          room,
+          intervalMs: 60_000,
+          retryIntervalMs: 500,
+          iceServers,
+        });
+        globalThis.primadbLiveMoqMesh = { a, b, room, channel, iceServers };
+      },
+      { url, room, channel, pathA, pathB, iceServers },
+    ),
+    25_000,
+    `browser WebRTC mesh MoQ signaling connect via ${draft}`,
+  );
+
+  const result = await waitFor(
+    async () =>
+      page.evaluate(() => {
+        const state = globalThis.primadbLiveMoqMesh;
+        state.a.mesh.announceSignalingPresence();
+        state.b.mesh.announceSignalingPresence();
+        const aOpen = state.a.mesh.openPeerCount();
+        const bOpen = state.b.mesh.openPeerCount();
+        return aOpen > 0 && bOpen > 0
+          ? {
+              room: state.room,
+              channel: state.channel,
+              aPeerId: state.a.mesh.peerId(),
+              bPeerId: state.b.mesh.peerId(),
+              aPeerCount: state.a.mesh.peerCount(),
+              bPeerCount: state.b.mesh.peerCount(),
+              aOpenPeerCount: aOpen,
+              bOpenPeerCount: bOpen,
+              iceServerCount: state.iceServers.length,
+            }
+          : null;
+      }),
+    30_000,
+  );
+
+  await page.evaluate(() => {
+    globalThis.primadbLiveMoqMesh?.a.close();
+    globalThis.primadbLiveMoqMesh?.b.close();
+    delete globalThis.primadbLiveMoqMesh;
+  });
+  if (!result) {
+    throw new Error(`Timed out waiting for browser WebRTC mesh via MoQ signaling (${draft})`);
+  }
+  return result;
 }
 
 async function runBrowserPair(page, url, draft) {
@@ -335,21 +448,53 @@ async function main() {
   const results = [];
   try {
     const page = await browser.newPage();
+    if (process.env.PRIMADB_MOQ_LIVE_BROWSER_LOGS === "1") {
+      page.on("console", (message) => {
+        console.log(`[browser:${message.type()}] ${message.text()}`);
+      });
+      page.on("pageerror", (error) => {
+        console.log(`[browser:pageerror] ${error.stack ?? error.message}`);
+      });
+    }
     await page.goto(ROOT_URL, { waitUntil: "networkidle" });
-    await page.waitForFunction(() => globalThis.primadbMoqApi?.connectPrimadbMoq, {
+    await page.waitForFunction(
+      () => globalThis.primadbMoqApi?.connectPrimadbMoq && globalThis.primadbMoqApi?.connectMeshViaMoq,
+      {
       timeout: 30_000,
-    });
+      },
+    );
     for (const candidate of candidates) {
       const url = normalizeRelayUrl(candidate.relay);
       const result = { draft: candidate.draft, url };
       try {
         result.browserBrowser = await runBrowserPair(page, url, candidate.draft);
-        result.browserNode = await runBrowserNodePair(page, url, candidate.draft);
-        result.ok = true;
       } catch (error) {
-        result.ok = false;
-        result.error = error instanceof Error ? error.message : String(error);
+        result.browserBrowser = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
       }
+      try {
+        result.browserNode = await runBrowserNodePair(page, url, candidate.draft);
+      } catch (error) {
+        result.browserNode = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      try {
+        result.browserMesh = await runBrowserMeshViaMoq(page, url, candidate.draft);
+      } catch (error) {
+        result.browserMesh = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      result.ok = Boolean(
+        result.browserBrowser?.channel &&
+          result.browserNode?.channel &&
+          result.browserMesh?.channel,
+      );
       results.push(result);
     }
   } finally {

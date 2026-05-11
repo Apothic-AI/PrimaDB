@@ -1458,10 +1458,24 @@ export declare class PrimadbMoqSession {
     readonly connection: unknown;
     readonly path: string;
     readonly track: string;
+    readonly channel: string;
+    readonly peerId: string;
     readonly intervalMs: number;
+    readonly retryIntervalMs: number;
     publish(): unknown;
     subscribe(path?: string): unknown;
     startAutoFlush(): void;
+    onRoute(handler: PrimadbRouteHandler): () => void;
+    addAcceptedPeerId(peerId: string): () => void;
+    knownPeers(): PrimadbPeerPresence[];
+    recommendedPeers(): PrimadbPeerRecommendation[];
+    createRoute(
+        payload: PrimadbRoutePayload,
+        target?: PrimadbRouteTarget,
+        replyTo?: string | null,
+    ): PrimadbRouteEnvelope;
+    sendRoute(route: PrimadbRouteEnvelope): number;
+    announcePresence(): number;
     flushPending(): Promise<number>;
     close(): void;
 }

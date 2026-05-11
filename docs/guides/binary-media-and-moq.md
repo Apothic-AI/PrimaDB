@@ -134,17 +134,18 @@ scripts/smoke-native-moq-ietf-local.sh # starts a local Cloudflare moq-rs relay 
 
 Observed Cloudflare interop caveats:
 
-- Native Rust now uses Cloudflare `moq-rs` (`moq-transport`/`moq-native-ietf`) for draft-14/latest
-  route-mode sessions. It publishes one `RouteEnvelope` per MoQ object on a direct namespace/track
-  and retries subscriber setup so subscribe-before-announce races do not strand one direction.
-- The legacy Rust `moq-lite` adapter is retained only for `MoqDraft::Draft07` while draft-07 branch
-  compatibility is evaluated separately.
-- Cloudflare draft-14 native/native and native gateway probes pass in this environment. The
-  configured draft-07 endpoint still does not pass with the legacy adapter.
+- Native Rust uses Cloudflare `moq-rs` (`moq-transport`/`moq-native-ietf`) for draft-14/latest
+  route-mode sessions and a renamed Cloudflare `moq-rs` draft-07 branch backend for
+  `MoqDraft::Draft07`. Both native/native and native gateway probes pass against the configured
+  Cloudflare draft-14 and draft-07 endpoints in this environment.
+- Browser and Node use `@moq/lite` for the JS stack. Browser/browser, browser/Node, and browser
+  WebRTC-over-MoQ signaling pass against Cloudflare draft-14. The current JS stack still does not
+  negotiate the Cloudflare draft-07 endpoint, so browser/Node draft-07 probes report connection
+  loss or `E_SESSION_CLOSED`.
 - Node v26.1.0 in this workspace has built-in WebSocket but still no built-in WebTransport.
   `primadb-node/moq` now uses `@webtransport-bun/webtransport` as its Node-only provider when no
   explicit transport is supplied. Node/Node route exchange passes through Cloudflare draft-14 with
-  this provider; draft-07 still reports `E_SESSION_CLOSED`.
+  this provider; draft-07 still reports `E_SESSION_CLOSED` because it shares the JS MoQ stack.
 
 See also:
 

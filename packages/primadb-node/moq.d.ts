@@ -126,6 +126,7 @@ export declare class PrimadbMoqSession {
   subscribe(path?: string): unknown;
   startAutoFlush(): void;
   onRoute(handler: PrimadbRouteHandler): () => void;
+  addAcceptedPeerId(peerId: string): () => void;
   knownPeers(): PrimadbPeerPresence[];
   recommendedPeers(): PrimadbPeerRecommendation[];
   createRoute(
