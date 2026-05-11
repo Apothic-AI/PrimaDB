@@ -20,6 +20,7 @@ Optional live relay probe:
 MOQ_RELAY=https://relay.example.com/anon node ./scripts/smoke-moq-live.mjs
 ```
 
-Node v22 does not provide built-in WebTransport. Public relays that only accept WebTransport/HTTP3
-will require a Node WebTransport polyfill; otherwise the probe should report a connection timeout
-rather than silently passing on the deterministic loopback.
+Node v26.1.0 still does not provide built-in WebTransport. `primadb-node/moq` uses
+`@webtransport-bun/webtransport` as its Node-only WebTransport provider when no explicit transport
+is supplied. The live probe validates the real WebTransport path against public relays; Cloudflare
+draft-14 is expected to pass, while draft-07 remains a separate compatibility target.

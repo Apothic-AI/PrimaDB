@@ -83,6 +83,7 @@ export interface PrimadbMoqSessionOptions {
   peerId?: string;
   target?: PrimadbRouteTarget;
   intervalMs?: number;
+  retryIntervalMs?: number;
   publish?: boolean;
   subscribe?: string[];
   closeConnection?: boolean;
@@ -211,8 +212,20 @@ function nowMillis(): number {
   return Date.now();
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function broadcastTarget(): PrimadbRouteTarget {
   return { kind: "broadcast" };
+}
+
+function closeConnectionSoon(connection: MoqConnection): void {
+  setTimeout(() => {
+    try {
+      connection.close();
+    } catch {}
+  }, 250);
 }
 
 function stableJson(value: unknown): string {
@@ -284,7 +297,10 @@ export async function connectPrimadbMoq(
           },
   });
 
-  const session = new PrimadbMoqSession(db, connection, options);
+  const session = new PrimadbMoqSession(db, connection, {
+    ...options,
+    closeConnection: options.closeConnection ?? true,
+  });
   if (options.publish !== false) {
     session.publish();
   }
@@ -390,10 +406,12 @@ export class PrimadbMoqSession {
   readonly channel: string;
   readonly peerId: string;
   readonly intervalMs: number;
+  readonly retryIntervalMs: number;
 
   #published?: MoqBroadcast;
   #publishTracks = new Set<MoqTrack>();
   #subscribedTracks = new Set<MoqTrack>();
+  #subscribedPaths = new Set<string>();
   #routeHandlers = new Set<PrimadbRouteHandler>();
   #seenRoutes = new Set<string>();
   #knownPeers = new Map<string, PrimadbPeerPresence>();
@@ -412,6 +430,7 @@ export class PrimadbMoqSession {
     this.channel = options.channel ?? DEFAULT_CHANNEL;
     this.peerId = options.peerId ?? `moq:${db.replicaId()}`;
     this.intervalMs = Math.max(25, options.intervalMs ?? 250);
+    this.retryIntervalMs = Math.max(100, options.retryIntervalMs ?? 1000);
     this.#closeConnection = options.closeConnection ?? false;
     this.#target = options.target ?? broadcastTarget();
   }
@@ -428,12 +447,13 @@ export class PrimadbMoqSession {
     return broadcast;
   }
 
-  subscribe(path: string = this.path): MoqTrack {
-    const remote = this.connection.consume(asPath(path));
-    const track = remote.subscribe(this.track, 0);
-    this.#subscribedTracks.add(track);
-    void this.#readTrack(track);
-    return track;
+  subscribe(path: string = this.path): string {
+    if (this.#subscribedPaths.has(path)) {
+      return path;
+    }
+    this.#subscribedPaths.add(path);
+    void this.#subscribePath(path);
+    return path;
   }
 
   startAutoFlush(): void {
@@ -565,7 +585,36 @@ export class PrimadbMoqSession {
     }
     this.#published?.close();
     if (this.#closeConnection) {
-      this.connection.close();
+      closeConnectionSoon(this.connection);
+    }
+  }
+
+  async #subscribePath(path: string): Promise<void> {
+    while (!this.#closed && this.#subscribedPaths.has(path)) {
+      let track: MoqTrack | undefined;
+      try {
+        const remote = this.connection.consume(asPath(path));
+        track = remote.subscribe(this.track, 0);
+        this.#subscribedTracks.add(track);
+        await this.#readTrack(track);
+      } catch (error) {
+        if (!this.#closed) {
+          console.warn(
+            `PrimaDB MoQ subscribe failed for path=${path} track=${this.track}; retrying`,
+            error,
+          );
+        }
+      } finally {
+        if (track) {
+          this.#subscribedTracks.delete(track);
+          try {
+            track.close();
+          } catch {}
+        }
+      }
+      if (!this.#closed && this.#subscribedPaths.has(path)) {
+        await wait(this.retryIntervalMs);
+      }
     }
   }
 

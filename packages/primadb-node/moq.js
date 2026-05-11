@@ -20,6 +20,10 @@ function nowMillis() {
   return Date.now();
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function broadcastTarget() {
   return { kind: "broadcast" };
 }
@@ -62,6 +66,7 @@ function applyMoqPayload(db, message) {
 export function moqRuntimeSupport() {
   return {
     webTransport: typeof globalThis.WebTransport === "function",
+    nodeWebTransportProvider: true,
     webSocket: typeof globalThis.WebSocket === "function",
     websocketFallback: typeof globalThis.WebSocket === "function",
   };
@@ -69,19 +74,34 @@ export function moqRuntimeSupport() {
 
 export async function connectPrimadbMoq(db, options) {
   const url = new URL(String(options.url));
-  const connection = await Moq.Connection.connect(url, {
-    transport: options.transport,
-    webtransport: options.webtransport,
-    websocket:
-      options.websocket === false
-        ? { enabled: false }
-        : {
-            enabled: true,
-            url: options.websocketUrl ? new URL(String(options.websocketUrl)) : undefined,
-          },
-  });
+  const ownsTransport = !options.transport;
+  const transport = options.transport ?? (await createDefaultNodeWebTransport(url, options));
+  let connection;
+  try {
+    connection = await Moq.Connection.connect(url, {
+      transport,
+      webtransport: options.webtransport,
+      websocket:
+        options.websocket === false
+          ? { enabled: false }
+          : {
+              enabled: true,
+              url: options.websocketUrl ? new URL(String(options.websocketUrl)) : undefined,
+            },
+    });
+  } catch (error) {
+    if (ownsTransport) {
+      try {
+        transport?.close();
+      } catch {}
+    }
+    throw error;
+  }
 
-  const session = new PrimadbMoqSession(db, connection, options);
+  const session = new PrimadbMoqSession(db, connection, {
+    ...options,
+    closeConnection: options.closeConnection ?? true,
+  });
   if (options.publish !== false) {
     session.publish();
   }
@@ -92,10 +112,63 @@ export async function connectPrimadbMoq(db, options) {
   return session;
 }
 
+async function createDefaultNodeWebTransport(url, options) {
+  if (
+    options.nodeWebTransport === false ||
+    options.webtransport === false ||
+    typeof globalThis.WebTransport === "function" ||
+    !/^https?:$/.test(url.protocol)
+  ) {
+    return undefined;
+  }
+
+  const { WebTransport } = await import("@webtransport-bun/webtransport");
+  const transport = new WebTransport(String(url), normalizeNodeWebTransportOptions(options));
+  transport.closed.catch(() => {});
+  await transport.ready;
+  return transport;
+}
+
+function normalizeNodeWebTransportOptions(options) {
+  const source =
+    isRecord(options.nodeWebTransportOptions)
+      ? options.nodeWebTransportOptions
+      : isRecord(options.webtransport)
+        ? options.webtransport
+        : {};
+  const normalized = { ...source };
+  if (options.tlsDisableVerify === true || envFlag("PRIMADB_MOQ_TLS_DISABLE_VERIFY")) {
+    normalized.tls = {
+      ...(isRecord(normalized.tls) ? normalized.tls : {}),
+      insecureSkipVerify: true,
+    };
+  }
+  return normalized;
+}
+
+function envFlag(name) {
+  const value = globalThis.process?.env?.[name];
+  return value === "1" || value === "true" || value === "yes";
+}
+
+function isRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function closeConnectionSoon(connection) {
+  const timer = setTimeout(() => {
+    try {
+      connection.close();
+    } catch {}
+  }, 250);
+  timer.unref?.();
+}
+
 export class PrimadbMoqSession {
   #published;
   #publishTracks = new Set();
   #subscribedTracks = new Set();
+  #subscribedPaths = new Set();
   #routeHandlers = new Set();
   #seenRoutes = new Set();
   #knownPeers = new Map();
@@ -114,6 +187,7 @@ export class PrimadbMoqSession {
     this.channel = options.channel ?? DEFAULT_CHANNEL;
     this.peerId = options.peerId ?? `moq:${db.replicaId()}`;
     this.intervalMs = Math.max(25, options.intervalMs ?? 250);
+    this.retryIntervalMs = Math.max(100, options.retryIntervalMs ?? 1000);
     this.#closeConnection = options.closeConnection ?? false;
     this.#target = options.target ?? broadcastTarget();
   }
@@ -130,11 +204,12 @@ export class PrimadbMoqSession {
   }
 
   subscribe(path = this.path) {
-    const remote = this.connection.consume(asPath(path));
-    const track = remote.subscribe(this.track, 0);
-    this.#subscribedTracks.add(track);
-    void this.#readTrack(track);
-    return track;
+    if (this.#subscribedPaths.has(path)) {
+      return path;
+    }
+    this.#subscribedPaths.add(path);
+    void this.#subscribePath(path);
+    return path;
   }
 
   startAutoFlush() {
@@ -260,7 +335,36 @@ export class PrimadbMoqSession {
     }
     this.#published?.close();
     if (this.#closeConnection) {
-      this.connection.close();
+      closeConnectionSoon(this.connection);
+    }
+  }
+
+  async #subscribePath(path) {
+    while (!this.#closed && this.#subscribedPaths.has(path)) {
+      let track;
+      try {
+        const remote = this.connection.consume(asPath(path));
+        track = remote.subscribe(this.track, 0);
+        this.#subscribedTracks.add(track);
+        await this.#readTrack(track);
+      } catch (error) {
+        if (!this.#closed) {
+          console.warn(
+            `PrimaDB MoQ subscribe failed for path=${path} track=${this.track}; retrying`,
+            error,
+          );
+        }
+      } finally {
+        if (track) {
+          this.#subscribedTracks.delete(track);
+          try {
+            track.close();
+          } catch {}
+        }
+      }
+      if (!this.#closed && this.#subscribedPaths.has(path)) {
+        await wait(this.retryIntervalMs);
+      }
     }
   }
 

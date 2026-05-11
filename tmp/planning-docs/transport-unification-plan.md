@@ -159,15 +159,19 @@ Goal: prove the route-mode MoQ profile works against public Cloudflare MoQ endpo
 in local/deterministic harnesses.
 
 Status: live probes have been added and executed. Native Rust draft-14 now passes against both a
-local Cloudflare `moq-rs` relay and the configured Cloudflare draft-14 endpoint. Browser/Node and
-draft-07 remain separate compatibility gaps. The current support policy is:
+local Cloudflare `moq-rs` relay and the configured Cloudflare draft-14 endpoint. Node/Node
+Cloudflare draft-14 also passes through `primadb-node` using `@webtransport-bun/webtransport` plus
+retrying subscriptions. Browser Cloudflare interop, browser/Node cross-stack validation, and draft-07
+remain separate compatibility gaps. The current support policy is:
 
 - Treat route-mode MoQ as proven for deterministic/local `@moq/lite` loopback and self-hosted or
   gateway-backed relays.
 - Treat native Rust draft-14 Cloudflare route exchange as passing for direct native peers and for a
   native gateway bridging WebSocket and MoQ.
-- Do not advertise browser/Node Cloudflare MoQ as passing until the JS runtime stack passes a current
-  endpoint and draft combination.
+- Treat Node/Node Cloudflare draft-14 route exchange as passing through the Node-only
+  `@webtransport-bun/webtransport` provider.
+- Do not advertise browser or browser/Node Cloudflare MoQ as passing until the browser stack passes a
+  current endpoint and draft combination.
 - Keep draft-07 as a compatibility target, but implement it as a separate `moq-rs` draft-07 backend
   or external probe because Cloudflare's draft-07 branch has a different role/session API from
   `moq-transport` draft-14.
@@ -181,7 +185,8 @@ draft-07 remain separate compatibility gaps. The current support policy is:
 
 2. Validate same-stack route exchange.
    - Browser/browser through `@moq/lite`.
-   - Node/Node through `primadb-node/moq`.
+   - Node/Node through `primadb-node/moq`. Cloudflare draft-14 now passes through the
+     provider-backed WebTransport path.
    - Native/native through `NativeMoqRouteClient`. Native draft-14 passes locally and through
      Cloudflare draft-14.
    - For each, assert presence exchange, `RoutePayload::Sync`, duplicate suppression, and close

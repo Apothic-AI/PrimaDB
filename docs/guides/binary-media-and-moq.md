@@ -141,8 +141,10 @@ Observed Cloudflare interop caveats:
   compatibility is evaluated separately.
 - Cloudflare draft-14 native/native and native gateway probes pass in this environment. The
   configured draft-07 endpoint still does not pass with the legacy adapter.
-- Node v26.1.0 in this workspace has built-in WebSocket but still no built-in WebTransport; Node
-  remains dependent on a WebTransport-capable MoQ runtime/polyfill for WebTransport-only relays.
+- Node v26.1.0 in this workspace has built-in WebSocket but still no built-in WebTransport.
+  `primadb-node/moq` now uses `@webtransport-bun/webtransport` as its Node-only provider when no
+  explicit transport is supplied. Node/Node route exchange passes through Cloudflare draft-14 with
+  this provider; draft-07 still reports `E_SESSION_CLOSED`.
 
 See also:
 

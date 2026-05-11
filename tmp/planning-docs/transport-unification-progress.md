@@ -75,11 +75,21 @@
   `mise latest node` both report `26.1.0` as latest; `mise exec node@26.1.0 -- node -p "typeof
   WebTransport"` still reports `undefined`, so Node's WebTransport issue is not solved by the
   latest Node release alone.
+- Added `@webtransport-bun/webtransport` to `primadb-node` as the Node-only WebTransport provider.
+  `connectPrimadbMoq(...)` now lazily creates a provider-backed WebTransport session when Node has
+  no built-in `globalThis.WebTransport`, normalizes URL objects to strings for the provider, honors
+  `PRIMADB_MOQ_TLS_DISABLE_VERIFY`, and still lets callers inject or disable transports explicitly.
+- Added retrying MoQ subscription loops to the JS route-mode helpers so generic relays such as
+  Cloudflare can recover from subscribe-before-announce races instead of leaving a one-shot failed
+  subscription.
+- Verified `packages/primadb-node/scripts/smoke-moq-live.mjs` with Node v26.1.0:
+  Cloudflare draft-14 Node/Node route exchange passed through the new provider-backed WebTransport
+  path; Cloudflare draft-07 still returned `E_SESSION_CLOSED`.
 
 ## Remaining
 
-- Live Cloudflare browser/Node interop probes are implemented and were run against the available
-  environment, but the configured public endpoints did not pass for those JS stacks:
+- Live Cloudflare browser interop probes are implemented and were run against the available
+  environment, but the configured public endpoints did not pass for the browser stack:
   - Browser/browser via `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: timed out waiting
     for route exchange.
   - Browser/browser via `MOQ_DRAFT07_RELAY=draft-07.cloudflare.mediaoverquic.com`: browser
@@ -88,8 +98,10 @@
     reported connection lost.
   - Browser/browser via `https://interop-relay.cloudflare.mediaoverquic.com:443/anon`: browser
     WebTransport reported connection lost.
-  - Node/Node via both configured endpoints: timed out during MoQ connect. Node v26.1.0 has
-    WebSocket but no built-in WebTransport; Cloudflare did not complete WebSocket fallback.
+- Browser/Node cross-stack Cloudflare route exchange still needs to be rerun now that the Node side
+  has a provider-backed WebTransport path.
+- Node/Node via Cloudflare draft-14 now passes. Node/Node via Cloudflare draft-07 still fails with
+  `E_SESSION_CLOSED`.
 - Native Cloudflare draft-14 now passes:
   - Native/native via `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: bidirectional
     route exchange passed.

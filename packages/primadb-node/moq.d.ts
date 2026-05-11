@@ -73,6 +73,7 @@ export interface PrimadbMoqSessionOptions {
   peerId?: string;
   target?: PrimadbRouteTarget;
   intervalMs?: number;
+  retryIntervalMs?: number;
   publish?: boolean;
   subscribe?: string[];
   closeConnection?: boolean;
@@ -84,6 +85,9 @@ export interface ConnectPrimadbMoqOptions extends PrimadbMoqSessionOptions {
   websocket?: boolean;
   webtransport?: unknown;
   transport?: unknown;
+  nodeWebTransport?: boolean;
+  nodeWebTransportOptions?: unknown;
+  tlsDisableVerify?: boolean;
 }
 
 export interface PrimadbMoqLoopbackOptions {
@@ -99,6 +103,7 @@ export interface PrimadbMoqLoopbackOptions {
 
 export declare function moqRuntimeSupport(): {
   webTransport: boolean;
+  nodeWebTransportProvider: boolean;
   webSocket: boolean;
   websocketFallback: boolean;
 };
@@ -116,6 +121,7 @@ export declare class PrimadbMoqSession {
   readonly channel: string;
   readonly peerId: string;
   readonly intervalMs: number;
+  readonly retryIntervalMs: number;
   publish(): unknown;
   subscribe(path?: string): unknown;
   startAutoFlush(): void;

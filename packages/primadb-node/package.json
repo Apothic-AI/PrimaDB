@@ -41,6 +41,7 @@
   },
   "dependencies": {
     "@moq/lite": "^0.2.2",
+    "@webtransport-bun/webtransport": "^0.3.0",
     "detect-libc": "^2.1.2"
   }
 }
