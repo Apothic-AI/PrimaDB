@@ -2,7 +2,7 @@
 use futures_util::{SinkExt, StreamExt};
 #[cfg(all(feature = "native-websocket", feature = "native-moq"))]
 use primadb::{
-    MoqRelayClientConfig, NativeRelayServer, RelayServerConfig, Result, RouteEnvelope,
+    MoqDraft, MoqRelayClientConfig, NativeRelayServer, RelayServerConfig, Result, RouteEnvelope,
     RoutePayload, RouteTarget, Router, RouterConfig,
 };
 #[cfg(all(feature = "native-websocket", feature = "native-moq"))]
@@ -93,6 +93,15 @@ fn is_signal_from(route: &RouteEnvelope, label: &str) -> bool {
 }
 
 #[cfg(all(feature = "native-websocket", feature = "native-moq"))]
+fn moq_draft_from_label(label: &str) -> MoqDraft {
+    match label {
+        "draft_07" => MoqDraft::Draft07,
+        "draft_14" => MoqDraft::Draft14,
+        _ => MoqDraft::DraftLatest,
+    }
+}
+
+#[cfg(all(feature = "native-websocket", feature = "native-moq"))]
 async fn probe_candidate(draft: &str, url: &str) -> Result<serde_json::Value> {
     let token = format!("{}-{}", now_millis(), std::process::id());
     let channel = format!("primadb-live-gateway-{token}");
@@ -103,6 +112,7 @@ async fn probe_candidate(draft: &str, url: &str) -> Result<serde_json::Value> {
     gateway_moq.channel = channel.clone();
     gateway_moq.subscribe = vec![moq_peer_path.clone()];
     gateway_moq.retry_interval_ms = 500;
+    gateway_moq.draft = moq_draft_from_label(draft);
     let server = NativeRelayServer::bind_with_config(RelayServerConfig {
         bind: "127.0.0.1:0".to_owned(),
         moq: Some(gateway_moq),
@@ -113,6 +123,7 @@ async fn probe_candidate(draft: &str, url: &str) -> Result<serde_json::Value> {
     moq_config.channel = channel.clone();
     moq_config.subscribe = vec![gateway_path.clone()];
     moq_config.retry_interval_ms = 500;
+    moq_config.draft = moq_draft_from_label(draft);
     let mut moq_peer = primadb::NativeMoqRouteClient::connect(moq_config).await?;
 
     let (socket, _) = connect_async(server.url())

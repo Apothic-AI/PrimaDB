@@ -25,6 +25,15 @@
 - Added optional native Rust `native-moq` support with `NativeMoqRouteClient` for low-level
   `RouteEnvelope` exchange over moq-native/moq-lite and `NativeMoqSync` for DB sync over that route
   underlay.
+- Added a native IETF MoQ backend using Cloudflare `moq-rs` (`moq-transport` and
+  `moq-native-ietf`) for `MoqDraft::Draft14`/`DraftLatest`. It uses direct namespace/track
+  subscriptions instead of `moq-lite` broadcast discovery and encodes one `RouteEnvelope` per MoQ
+  object. The old `moq-lite` backend remains as the `Draft07`/legacy path while draft-07 branch
+  compatibility is evaluated separately.
+- Added `MoqRelayClientConfig.tlsDisableVerify` plus `PRIMADB_MOQ_TLS_DISABLE_VERIFY` support for
+  local native IETF MoQ smoke testing with self-signed certificates.
+- Added `scripts/smoke-native-moq-ietf-local.sh`, which starts a local Cloudflare `moq-rs`
+  `moq-relay-ietf` instance and runs the native/native route probe against it.
 - Added an optional MoQ uplink on the native WebSocket relay server so a gateway can forward
   WebSocket sessions and a route-mode MoQ session through the same `RouteRelayCore`.
 - Added native WebRTC mesh signaling over route-mode MoQ when `MeshConfig.relayEndpoint` is a MoQ
@@ -53,15 +62,21 @@
   smoke commands, and current Cloudflare caveats.
 - Verified:
   - `cargo check --features "native-websocket native-moq" --examples`
+  - `scripts/smoke-native-moq-ietf-local.sh`
+  - `cargo run --features native-moq --example native_moq_live_probe`
+  - `cargo run --features "native-websocket native-moq" --example native_gateway_moq_ws_live_probe`
   - `pnpm --dir packages/primadb run typecheck`
   - `pnpm --dir packages/primadb run build`
   - `pnpm --dir packages/primadb run smoke:moq-mesh-signaling`
   - `node --check` for the new JS smoke scripts
+- Updated monorepo `mise.toml` to Node `26.1.0` and root package metadata to require Node `>=26`.
+  `mise exec node@26.1.0 -- node -p "typeof WebTransport"` still reports `undefined`, so Node's
+  WebTransport issue is not solved by the latest Node release alone.
 
 ## Remaining
 
-- Live Cloudflare interop probes are implemented and were run against the available environment, but
-  the configured public endpoints did not pass:
+- Live Cloudflare browser/Node interop probes are implemented and were run against the available
+  environment, but the configured public endpoints did not pass for those JS stacks:
   - Browser/browser via `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: timed out waiting
     for route exchange.
   - Browser/browser via `MOQ_DRAFT07_RELAY=draft-07.cloudflare.mediaoverquic.com`: browser
@@ -70,14 +85,18 @@
     reported connection lost.
   - Browser/browser via `https://interop-relay.cloudflare.mediaoverquic.com:443/anon`: browser
     WebTransport reported connection lost.
-  - Node/Node via both configured endpoints: timed out during MoQ connect. Node v22 has WebSocket
-    but no built-in WebTransport; Cloudflare did not complete WebSocket fallback.
-  - Native/native via both configured endpoints: connected but received no frames. Current Rust
-    `moq-lite` consumption waits for ANNOUNCE/broadcast discovery, while Cloudflare preview docs say
-    ANNOUNCE is not supported.
-- Direct native Cloudflare consumption remains a real implementation gap unless PrimaDB adds a Rust
-  direct `consume(path)` path, vendors/patches `moq-lite`, or targets a compatible MoQ relay/gateway
-  that provides announcements.
+  - Node/Node via both configured endpoints: timed out during MoQ connect. Node v26.1.0 has
+    WebSocket but no built-in WebTransport; Cloudflare did not complete WebSocket fallback.
+- Native Cloudflare draft-14 now passes:
+  - Native/native via `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: bidirectional
+    route exchange passed.
+  - WebSocket peer plus MoQ peer through the native gateway via
+    `MOQ_DRAFT14_RELAY=draft-14.cloudflare.mediaoverquic.com`: bidirectional route exchange passed.
+- Native Cloudflare draft-07 still does not pass through PrimaDB's integrated path. The current
+  `MoqDraft::Draft07` backend is the legacy `moq-lite` implementation; true draft-07 validation
+  requires either a separate build against Cloudflare `moq-rs`'s `draft-ietf-moq-transport-07`
+  branch or a second integrated draft-07 backend because that branch has a different role/session
+  API.
 - Browser WebRTC MoQ signaling has deterministic route injection coverage, but browser tab-to-tab
-  live WebRTC over Cloudflare MoQ/STUN/TURN still needs a passing public MoQ relay endpoint before it
-  can be validated end to end.
+  live WebRTC over Cloudflare MoQ/STUN/TURN still needs a passing JS/browser MoQ route exchange
+  before it can be validated end to end.

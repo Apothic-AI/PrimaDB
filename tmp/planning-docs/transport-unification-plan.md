@@ -158,17 +158,19 @@ public hostnames only.
 Goal: prove the route-mode MoQ profile works against public Cloudflare MoQ endpoints and not only
 in local/deterministic harnesses.
 
-Status: live probes have been added and executed. The available Cloudflare endpoints did not pass
-route exchange in this environment. The current support policy is:
+Status: live probes have been added and executed. Native Rust draft-14 now passes against both a
+local Cloudflare `moq-rs` relay and the configured Cloudflare draft-14 endpoint. Browser/Node and
+draft-07 remain separate compatibility gaps. The current support policy is:
 
 - Treat route-mode MoQ as proven for deterministic/local `@moq/lite` loopback and self-hosted or
   gateway-backed relays.
-- Do not advertise Cloudflare MoQ as passing until a current endpoint and draft combination passes
-  browser route exchange.
-- Do not advertise native Cloudflare consumption until Rust has direct `consume(path)` support or a
-  compatible relay provides ANNOUNCE/broadcast discovery.
-- Prefer draft-07 only for Cloudflare experiments because Cloudflare preview documentation indicates
-  draft-07 subset support; keep draft-14 as experimental until observed passing results justify it.
+- Treat native Rust draft-14 Cloudflare route exchange as passing for direct native peers and for a
+  native gateway bridging WebSocket and MoQ.
+- Do not advertise browser/Node Cloudflare MoQ as passing until the JS runtime stack passes a current
+  endpoint and draft combination.
+- Keep draft-07 as a compatibility target, but implement it as a separate `moq-rs` draft-07 backend
+  or external probe because Cloudflare's draft-07 branch has a different role/session API from
+  `moq-transport` draft-14.
 
 1. Add opt-in live smoke scripts.
    - Gate every live test behind explicit environment variables.
@@ -180,7 +182,8 @@ route exchange in this environment. The current support policy is:
 2. Validate same-stack route exchange.
    - Browser/browser through `@moq/lite`.
    - Node/Node through `primadb-node/moq`.
-   - Native/native through `NativeMoqRouteClient`.
+   - Native/native through `NativeMoqRouteClient`. Native draft-14 passes locally and through
+     Cloudflare draft-14.
    - For each, assert presence exchange, `RoutePayload::Sync`, duplicate suppression, and close
      behavior.
 
@@ -197,12 +200,12 @@ route exchange in this environment. The current support policy is:
    - Assert presence, sync, pull, watch, and strict-scope transaction behavior across the gateway.
    - Add multi-homed loop/dedupe checks by connecting one logical peer through both WebSocket and
      MoQ.
+   - Current signal-route gateway smoke passes through Cloudflare draft-14.
 
 5. Decide draft support policy from evidence.
-   - Prefer draft-07 for current Cloudflare experiments because Cloudflare preview docs identify
-     draft-07 subset support.
-   - Keep draft-14 as best-effort/experimental until the browser and Rust stacks pass against a
-     concrete endpoint.
+   - Prefer draft-14 for native Rust now that Cloudflare draft-14 passes with `moq-rs`.
+   - Keep draft-07 as a separate compatibility target requiring Cloudflare `moq-rs`'s
+     `draft-ietf-moq-transport-07` branch or equivalent wire support.
    - Record observed Cloudflare endpoint behavior in the progress doc.
 
 ### Gap 2: Browser `connectMesh(...)` MoQ Signaling

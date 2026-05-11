@@ -108,6 +108,7 @@ export interface MoqRelayClientConfig {
   subscribe?: string[];
   draft?: MoqDraft;
   retryIntervalMs?: number;
+  tlsDisableVerify?: boolean;
   sessionAuth?: SessionAuthConfig;
 }
 

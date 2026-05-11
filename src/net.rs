@@ -114,6 +114,8 @@ pub struct MoqRelayClientConfig {
     pub draft: MoqDraft,
     #[serde(default = "default_retry_interval_ms")]
     pub retry_interval_ms: u64,
+    #[serde(default, alias = "tlsDisableVerify")]
+    pub tls_disable_verify: bool,
     #[serde(default, alias = "sessionAuth")]
     pub session_auth: SessionAuthConfig,
 }
@@ -129,6 +131,7 @@ impl MoqRelayClientConfig {
             subscribe: vec![path],
             draft: MoqDraft::default(),
             retry_interval_ms: default_retry_interval_ms(),
+            tls_disable_verify: false,
             session_auth: SessionAuthConfig::default(),
         }
     }

@@ -1,6 +1,7 @@
 #[cfg(feature = "native-moq")]
 use primadb::{
-    MoqRelayClientConfig, Result, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig,
+    MoqDraft, MoqRelayClientConfig, Result, RouteEnvelope, RoutePayload, RouteTarget, Router,
+    RouterConfig,
 };
 #[cfg(feature = "native-moq")]
 use std::fs;
@@ -78,6 +79,15 @@ fn route_from(router: &Router, draft: &str, from_label: &str) -> RouteEnvelope {
 }
 
 #[cfg(feature = "native-moq")]
+fn moq_draft_from_label(label: &str) -> MoqDraft {
+    match label {
+        "draft_07" => MoqDraft::Draft07,
+        "draft_14" => MoqDraft::Draft14,
+        _ => MoqDraft::DraftLatest,
+    }
+}
+
+#[cfg(feature = "native-moq")]
 async fn probe_candidate(draft: &str, url: &str) -> Result<serde_json::Value> {
     let token = format!("{}-{}", now_millis(), std::process::id(),);
     let channel = format!("primadb-live-native-{token}");
@@ -87,10 +97,12 @@ async fn probe_candidate(draft: &str, url: &str) -> Result<serde_json::Value> {
     config_a.channel = channel.clone();
     config_a.subscribe = vec![path_b.clone()];
     config_a.retry_interval_ms = 500;
+    config_a.draft = moq_draft_from_label(draft);
     let mut config_b = MoqRelayClientConfig::new(url, &path_b);
     config_b.channel = channel.clone();
     config_b.subscribe = vec![path_a.clone()];
     config_b.retry_interval_ms = 500;
+    config_b.draft = moq_draft_from_label(draft);
 
     let mut client_a = primadb::NativeMoqRouteClient::connect(config_a).await?;
     let mut client_b = primadb::NativeMoqRouteClient::connect(config_b).await?;

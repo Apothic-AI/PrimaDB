@@ -1,5 +1,6 @@
 use crate::clock::now_millis;
-use crate::{MoqRelayClientConfig, PrimadbError, Result, RouteEnvelope};
+use crate::native_moq_ietf::NativeIetfMoqRouteClient;
+use crate::{MoqDraft, MoqRelayClientConfig, PrimadbError, Result, RouteEnvelope};
 use async_channel::{Receiver, Sender, unbounded};
 use bytes::Bytes;
 use moq_lite::{Broadcast, Origin, OriginConsumer, Track};
@@ -22,7 +23,92 @@ struct MoqRouteFrame {
     route: RouteEnvelope,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeMoqRouteClientBackend {
+    IetfDraft14,
+    LegacyLite,
+}
+
 pub struct NativeMoqRouteClient {
+    inner: NativeMoqRouteClientInner,
+}
+
+enum NativeMoqRouteClientInner {
+    Ietf(NativeIetfMoqRouteClient),
+    LegacyLite(NativeMoqLiteRouteClient),
+}
+
+impl NativeMoqRouteClient {
+    pub async fn connect(config: MoqRelayClientConfig) -> Result<Self> {
+        let inner = match config.draft {
+            MoqDraft::Draft07 => NativeMoqRouteClientInner::LegacyLite(
+                NativeMoqLiteRouteClient::connect(config).await?,
+            ),
+            MoqDraft::Draft14 | MoqDraft::DraftLatest => {
+                NativeMoqRouteClientInner::Ietf(NativeIetfMoqRouteClient::connect(config).await?)
+            }
+        };
+        Ok(Self { inner })
+    }
+
+    pub fn backend(&self) -> NativeMoqRouteClientBackend {
+        match &self.inner {
+            NativeMoqRouteClientInner::Ietf(_) => NativeMoqRouteClientBackend::IetfDraft14,
+            NativeMoqRouteClientInner::LegacyLite(_) => NativeMoqRouteClientBackend::LegacyLite,
+        }
+    }
+
+    pub fn config(&self) -> &MoqRelayClientConfig {
+        match &self.inner {
+            NativeMoqRouteClientInner::Ietf(client) => client.config(),
+            NativeMoqRouteClientInner::LegacyLite(client) => client.config(),
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        match &self.inner {
+            NativeMoqRouteClientInner::Ietf(client) => client.is_connected(),
+            NativeMoqRouteClientInner::LegacyLite(client) => client.is_connected(),
+        }
+    }
+
+    pub fn send_route(&self, route: RouteEnvelope) -> Result<()> {
+        match &self.inner {
+            NativeMoqRouteClientInner::Ietf(client) => client.send_route(route),
+            NativeMoqRouteClientInner::LegacyLite(client) => client.send_route(route),
+        }
+    }
+
+    pub async fn recv_route(&self) -> Result<RouteEnvelope> {
+        match &self.inner {
+            NativeMoqRouteClientInner::Ietf(client) => client.recv_route().await,
+            NativeMoqRouteClientInner::LegacyLite(client) => client.recv_route().await,
+        }
+    }
+
+    pub fn try_recv_route(&self) -> Option<RouteEnvelope> {
+        match &self.inner {
+            NativeMoqRouteClientInner::Ietf(client) => client.try_recv_route(),
+            NativeMoqRouteClientInner::LegacyLite(client) => client.try_recv_route(),
+        }
+    }
+
+    pub fn shutdown(&self) {
+        match &self.inner {
+            NativeMoqRouteClientInner::Ietf(client) => client.shutdown(),
+            NativeMoqRouteClientInner::LegacyLite(client) => client.shutdown(),
+        }
+    }
+
+    pub async fn close(&mut self) {
+        match &mut self.inner {
+            NativeMoqRouteClientInner::Ietf(client) => client.close().await,
+            NativeMoqRouteClientInner::LegacyLite(client) => client.close().await,
+        }
+    }
+}
+
+struct NativeMoqLiteRouteClient {
     config: MoqRelayClientConfig,
     outbound: Sender<RouteEnvelope>,
     inbound: Receiver<RouteEnvelope>,
@@ -31,7 +117,7 @@ pub struct NativeMoqRouteClient {
     task: Option<JoinHandle<()>>,
 }
 
-impl NativeMoqRouteClient {
+impl NativeMoqLiteRouteClient {
     pub async fn connect(config: MoqRelayClientConfig) -> Result<Self> {
         let (outbound, outbound_rx) = unbounded();
         let (inbound_tx, inbound) = unbounded();
@@ -107,7 +193,7 @@ impl NativeMoqRouteClient {
     }
 }
 
-impl Drop for NativeMoqRouteClient {
+impl Drop for NativeMoqLiteRouteClient {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::SeqCst);
         self.connected.store(false, Ordering::SeqCst);

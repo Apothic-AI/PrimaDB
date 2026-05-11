@@ -30,6 +30,8 @@ native-moq = [
     "native-websocket",
     "dep:bytes",
     "dep:moq-lite",
+    "dep:moq-native-ietf",
+    "dep:moq-transport",
     "dep:moq-native",
     "dep:tokio",
     "dep:url",
@@ -65,6 +67,8 @@ getrandom = { version = "0.2", features = ["js"], optional = true }
 hkdf = { version = "0.12", optional = true }
 moq-lite = { version = "0.16", features = ["serde"], optional = true }
 moq-native = { version = "0.14", optional = true }
+moq-native-ietf = { version = "0.8", optional = true }
+moq-transport = { version = "0.14", optional = true }
 rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
 rhai = { version = "1.24", default-features = false, features = ["std", "serde"], optional = true }
 sha2 = "0.10"

@@ -124,6 +124,7 @@ export interface PrimadbMoqRelayEndpointConfig {
   subscribe?: string[];
   draft?: "draft_07" | "draft_14" | "draft_latest";
   retryIntervalMs?: number;
+  tlsDisableVerify?: boolean;
   sessionAuth?: unknown;
 }
 

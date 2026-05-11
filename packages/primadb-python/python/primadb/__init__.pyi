@@ -107,6 +107,7 @@ class MoqRelayClientConfig(TypedDict, total=False):
     subscribe: list[str]
     draft: MoqDraft
     retryIntervalMs: int
+    tlsDisableVerify: bool
     sessionAuth: SessionAuthConfig
 
 class WebSocketRelayEndpointConfig(RelayClientConfig, total=False):

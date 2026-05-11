@@ -129,17 +129,20 @@ uv run python examples/moq_sync/main.py
 
 cargo run --features native-moq --example native_moq_live_probe
 cargo run --features "native-websocket native-moq" --example native_gateway_moq_ws_live_probe
+scripts/smoke-native-moq-ietf-local.sh # starts a local Cloudflare moq-rs relay first
 ```
 
 Observed Cloudflare interop caveats:
 
-- Cloudflare's preview interop documentation currently identifies draft-07 subset support and no
-  ANNOUNCE/broadcast discovery support.
-- Node v22 in this workspace has built-in WebSocket but no built-in WebTransport; the Cloudflare MoQ
-  endpoints tested did not complete the WebSocket fallback.
-- The current Rust `moq-lite` API consumes remote broadcasts through ANNOUNCE-style discovery, so
-  native Cloudflare consumption does not receive frames until Rust direct `consume(path)` support is
-  available or a compatible relay/gateway supplies announcements.
+- Native Rust now uses Cloudflare `moq-rs` (`moq-transport`/`moq-native-ietf`) for draft-14/latest
+  route-mode sessions. It publishes one `RouteEnvelope` per MoQ object on a direct namespace/track
+  and retries subscriber setup so subscribe-before-announce races do not strand one direction.
+- The legacy Rust `moq-lite` adapter is retained only for `MoqDraft::Draft07` while draft-07 branch
+  compatibility is evaluated separately.
+- Cloudflare draft-14 native/native and native gateway probes pass in this environment. The
+  configured draft-07 endpoint still does not pass with the legacy adapter.
+- Node v26.1.0 in this workspace has built-in WebSocket but still no built-in WebTransport; Node
+  remains dependent on a WebTransport-capable MoQ runtime/polyfill for WebTransport-only relays.
 
 See also:
 
