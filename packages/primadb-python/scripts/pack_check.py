@@ -24,15 +24,19 @@ def run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]
 
 
 def main() -> None:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is required to run the Python package check")
+
     wheel_dir = Path(tempfile.mkdtemp(prefix="primadb-python-wheel-"))
     consumer_dir = Path(tempfile.mkdtemp(prefix="primadb-python-consumer-"))
     try:
-        run(sys.executable, "-m", "pip", "wheel", str(ROOT), "-w", str(wheel_dir))
+        run(uv, "build", "--wheel", "--out-dir", str(wheel_dir), str(ROOT))
         venv_dir = consumer_dir / ".venv"
-        run(sys.executable, "-m", "venv", str(venv_dir))
+        run(uv, "venv", str(venv_dir))
         python = venv_dir / "bin" / "python"
         wheel = next(wheel_dir.glob("primadb_python-*.whl"))
-        run(str(python), "-m", "pip", "install", str(wheel))
+        run(uv, "pip", "install", "--python", str(python), str(wheel))
 
         smoke = consumer_dir / "smoke.py"
         smoke.write_text(

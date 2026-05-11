@@ -61,10 +61,49 @@
 - `pnpm --dir packages/primadb run typecheck`
 - `node --check packages/primadb-node/moq.js`
 - `python -m py_compile packages/primadb-python/python/primadb/moq.py packages/primadb-python/python/primadb/__init__.py`
+- Rebuilt browser artifacts with `pnpm --dir packages/primadb run build`.
+- Rebuilt Node native artifact with `pnpm --dir packages/primadb-node run build`.
+- Rebuilt Python native extension with `uv run maturin develop --release`.
+- Rebuilt browser example artifacts with `pnpm --dir packages/primadb/examples run build`.
+- Verified browser package smoke with `pnpm --dir packages/primadb run smoke`.
+- Verified MoQ-backed browser mesh signaling with `pnpm --dir packages/primadb run smoke:moq-mesh-signaling`.
+- Verified Node native package smokes:
+  `node ./scripts/smoke-core.mjs`,
+  `node ./scripts/smoke-hooks.mjs`,
+  `node ./scripts/smoke-relay-server.mjs`,
+  `node ./scripts/smoke-relay.mjs`,
+  `node ./scripts/smoke-mesh.mjs`, and
+  `node ./examples/moq-sync/index.mjs`.
+- Verified Python package smokes:
+  `uv run python scripts/smoke_core.py`,
+  `uv run python scripts/smoke_hooks.py`,
+  `uv run python scripts/smoke_relay_server.py`,
+  `uv run python scripts/smoke_relay.py`,
+  `uv run python scripts/smoke_relay_offline.py`,
+  `uv run python scripts/smoke_mesh.py`, and
+  `uv run python examples/moq_sync/main.py`.
+- Verified Python wheel packaging with `uv run python scripts/pack_check.py`.
+- Verified browser examples with `pnpm --dir packages/primadb/examples run smoke`.
+- Verified native Rust relay and WebRTC mesh smokes with
+  `bash examples/test-native-relay-smoke.sh` and
+  `bash examples/test-native-mesh-smoke.sh`.
+- Verified local native MoQ IETF route smoke with `bash scripts/smoke-native-moq-ietf-local.sh`.
+- Verified live Node MoQ probe with `node ./scripts/smoke-moq-live.mjs` from
+  `packages/primadb-node`: Cloudflare draft-14 passed; Cloudflare draft-07 returned
+  `E_SESSION_CLOSED`.
+- Verified live native MoQ probes:
+  `cargo run --features native-moq --example native_moq_live_probe` passed draft-14 and draft-07,
+  and `cargo run --features "native-websocket native-moq" --example native_gateway_moq_ws_live_probe`
+  passed draft-14 and draft-07.
+- Verified live browser MoQ route/signaling probe with
+  `node ./moq-sync/test-live-route.mjs` from `packages/primadb/examples`: Cloudflare draft-14
+  passed browser/browser route exchange, browser/Node route exchange, and browser WebRTC via MoQ
+  signaling; Cloudflare draft-07 failed in JS/browser paths with WebTransport/session close
+  errors.
 
 ## Remaining
 
-- Live relay/MoQ/WebRTC interop smoke coverage for the new APIs is still not run in this sprint.
-- Browser generated `dist/` artifacts are not regenerated until the package build is run.
-- Python and Node native binary artifacts are not rebuilt until their package build/release steps
-  run.
+- JS/browser Cloudflare draft-07 MoQ remains unsupported by the current `@moq/lite`/WebTransport
+  stack. Native Rust draft-07 works through the Cloudflare `moq-rs` draft-07 backend.
+- Python MoQ remains a deterministic route-mode loopback helper; no Python Cloudflare live MoQ
+  client has been added.

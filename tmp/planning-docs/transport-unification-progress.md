@@ -114,6 +114,28 @@
   - `node packages/primadb-node/examples/moq-sync/index.mjs`
   - `node packages/primadb-node/scripts/smoke-moq-live.mjs`
   - `pnpm --dir packages/primadb run smoke:moq-mesh-signaling`
+- Rebuilt and revalidated transport-facing artifacts after the Starla route app/fan-in API work:
+  - `pnpm --dir packages/primadb run build`
+  - `pnpm --dir packages/primadb-node run build`
+  - `uv run maturin develop --release`
+  - `pnpm --dir packages/primadb/examples run build`
+- Re-ran non-live transport/package smokes:
+  - `pnpm --dir packages/primadb run smoke`
+  - `pnpm --dir packages/primadb run smoke:moq-mesh-signaling`
+  - Node native core/hooks/relay-server/relay/mesh/MoQ smoke scripts
+  - Python core/hooks/relay-server/relay/offline-relay/mesh/MoQ loopback smoke scripts
+  - `pnpm --dir packages/primadb/examples run smoke`
+  - `bash examples/test-native-relay-smoke.sh`
+  - `bash examples/test-native-mesh-smoke.sh`
+  - `bash scripts/smoke-native-moq-ietf-local.sh`
+- Re-ran live transport probes:
+  - Node Cloudflare draft-14 route exchange passed; Node Cloudflare draft-07 still returned
+    `E_SESSION_CLOSED`.
+  - Native Cloudflare draft-14 and draft-07 route exchange passed.
+  - Native WebSocket-plus-MoQ gateway bridge passed against Cloudflare draft-14 and draft-07.
+  - Browser Cloudflare draft-14 passed browser/browser route exchange, browser/Node route exchange,
+    and browser WebRTC via MoQ signaling with Cloudflare ICE configuration.
+  - Browser/JS Cloudflare draft-07 still failed with WebTransport/session close errors.
 
 ## Remaining
 
