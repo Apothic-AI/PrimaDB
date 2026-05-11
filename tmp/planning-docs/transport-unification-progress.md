@@ -10,3 +10,5 @@
 - Drafted the transport unification plan.
 - Refined the plan to distinguish generic MoQ relay/services, including Cloudflare MoQ, from
   PrimaDB-aware full-node gateways that bridge MoQ with WebSocket/WebRTC route traffic.
+- Reviewed local `.env` and incorporated the available Cloudflare MoQ relay, STUN/TURN, and SFU
+  variables into the sprint plan without recording secret values.

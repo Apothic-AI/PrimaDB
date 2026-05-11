@@ -31,6 +31,18 @@ when route traffic must be bridged between MoQ clients and WebSocket/WebRTC peer
 participates in the same route-mode MoQ namespace directly. A MoQ-only client is not directly
 WebRTC-meshed unless it also supports WebRTC.
 
+## Available Environment
+
+Local `.env` provides concrete Cloudflare inputs for live validation:
+
+- MoQ relay hosts for draft-07 and draft-14 Cloudflare Media over QUIC endpoints.
+- Cloudflare STUN and TURN hostnames for WebRTC ICE validation.
+- Cloudflare TURN and SFU API credentials for provisioning or testing authenticated relay/media
+  paths.
+
+Do not commit `.env` or derived secrets. Planning and docs should reference variable names and
+public hostnames only.
+
 ## Proposed Architecture
 
 1. Introduce a transport-neutral route session abstraction.
@@ -86,9 +98,11 @@ WebRTC-meshed unless it also supports WebRTC.
    - Move duplicated WebSocket/WebRTC routing logic behind a common coordinator.
    - Preserve current WebSocket and WebRTC behavior.
 
-3. Add route-mode MoQ spike.
+3. Add route-mode MoQ spike against Cloudflare MoQ.
    - Evaluate `moq-native`/`moq-lite`/`web-transport` compatibility with existing `@moq/lite`.
-   - Prove one browser client and one native client can exchange `RouteEnvelope` through MoQ.
+   - Prove one browser client and one native client can exchange `RouteEnvelope` through
+     `MOQ_DRAFT07_RELAY` or `MOQ_DRAFT14_RELAY`.
+   - Identify whether PrimaDB should target one MoQ draft first or support both during transition.
    - Decide dependency and feature flags after the interop spike, not before.
 
 4. Add native MoQ relay/full-node listener and Cloudflare-compatible client path.
@@ -106,6 +120,7 @@ WebRTC-meshed unless it also supports WebRTC.
    - Let `connectMesh(...)` signal through a MoQ relay endpoint.
    - Verify WebRTC-capable MoQ clients can discover and form direct WebRTC links.
    - Verify MoQ-only clients remain relay-routed but reachable.
+   - Use `CLOUDFLARE_STUN` / `CLOUDFLARE_TURN` to validate practical ICE behavior.
 
 7. Retire or reclassify the package-local MoQ sync helper.
    - Either deprecate it in favor of route-mode MoQ or keep it clearly documented as a low-level
