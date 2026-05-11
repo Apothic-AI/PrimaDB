@@ -162,11 +162,16 @@ impl RelayEndpointConfig {
 #[serde(rename_all = "camelCase")]
 pub struct RelayServerConfig {
     pub bind: String,
+    #[serde(default)]
+    pub moq: Option<MoqRelayClientConfig>,
 }
 
 impl RelayServerConfig {
     pub fn new(bind: impl Into<String>) -> Self {
-        Self { bind: bind.into() }
+        Self {
+            bind: bind.into(),
+            moq: None,
+        }
     }
 }
 

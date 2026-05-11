@@ -117,6 +117,7 @@ export type RelayEndpointConfig =
 
 export interface RelayServerConfig {
   bind: string;
+  moq?: MoqRelayClientConfig | null;
 }
 
 export type MeshSignalingMode = "relay" | "broadcast_channel";

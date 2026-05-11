@@ -25,13 +25,16 @@
 - Added optional native Rust `native-moq` support with `NativeMoqRouteClient` for low-level
   `RouteEnvelope` exchange over moq-native/moq-lite and `NativeMoqSync` for DB sync over that route
   underlay.
+- Added an optional MoQ uplink on the native WebSocket relay server so a gateway can forward
+  WebSocket sessions and a route-mode MoQ session through the same `RouteRelayCore`.
 - Documented the old MoQ sync helper behavior as superseded by route-mode MoQ helper frames.
 - Verified `pnpm run typecheck` for `packages/primadb`, `node --check packages/primadb-node/moq.js`,
   `python -m py_compile packages/primadb-python/python/primadb/moq.py`,
   `cargo test --features native-moq --lib`, and
   `cargo check --features "crypto native-websocket native-webrtc native-moq scripting"`.
 
-## In Progress
+## Remaining
 
-- Multi-transport gateway/listener work and direct MoQ-backed WebRTC signaling remain the next
-  integration layer on top of the route-mode MoQ underlay.
+- Direct MoQ-backed WebRTC signaling is still pending as a dedicated integration layer on top of
+  route-mode MoQ. The route payload shape for signaling already exists; the WebRTC mesh connector
+  still needs a MoQ signaling adapter beside the current WebSocket relay adapter.

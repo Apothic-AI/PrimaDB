@@ -117,6 +117,10 @@ class MoqRelayEndpointConfig(MoqRelayClientConfig, total=False):
 
 RelayEndpointConfig = WebSocketRelayEndpointConfig | MoqRelayEndpointConfig
 
+class RelayServerConfig(TypedDict, total=False):
+    bind: str
+    moq: Optional[MoqRelayClientConfig]
+
 class IceServerConfig(TypedDict, total=False):
     urls: str | list[str]
     username: Optional[str]

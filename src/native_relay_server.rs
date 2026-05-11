@@ -1,3 +1,5 @@
+#[cfg(feature = "native-moq")]
+use crate::NativeMoqRouteClient;
 use crate::error::{PrimadbError, Result};
 use crate::{RouteEnvelope, RouteRelayCore};
 use futures_util::{SinkExt, StreamExt};
@@ -23,8 +25,15 @@ enum RelayMessage {
     Close,
 }
 
+#[derive(Clone)]
+enum RelayHandle {
+    WebSocket(UnboundedSender<RelayMessage>),
+    #[cfg(feature = "native-moq")]
+    Moq(Arc<NativeMoqRouteClient>),
+}
+
 struct RelayState {
-    core: RouteRelayCore<UnboundedSender<RelayMessage>>,
+    core: RouteRelayCore<RelayHandle>,
 }
 
 #[derive(Default)]
@@ -39,6 +48,7 @@ pub struct NativeRelayServer {
     metrics: Arc<RelayMetrics>,
     shutdown: watch::Sender<bool>,
     accept_task: StdMutex<Option<JoinHandle<()>>>,
+    moq_task: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl NativeRelayServer {
@@ -69,12 +79,15 @@ impl NativeRelayServer {
             let _ = accept_loop(listener, accept_state, accept_metrics, shutdown_rx).await;
         });
 
+        let moq_task = maybe_start_moq_uplink(config, state.clone(), metrics.clone()).await?;
+
         Ok(Self {
             local_addr,
             state,
             metrics,
             shutdown,
             accept_task: StdMutex::new(Some(accept_task)),
+            moq_task: StdMutex::new(moq_task),
         })
     }
 
@@ -101,11 +114,16 @@ impl NativeRelayServer {
             state.core.session_handles_except(u64::MAX)
         };
         for sender in senders {
-            let _ = sender.send(RelayMessage::Close);
+            close_handle(&sender);
         }
 
         let handle = self.accept_task.lock().unwrap().take();
         if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        let moq_handle = self.moq_task.lock().unwrap().take();
+        if let Some(handle) = moq_handle {
+            handle.abort();
             let _ = handle.await;
         }
     }
@@ -115,6 +133,9 @@ impl Drop for NativeRelayServer {
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
         if let Some(handle) = self.accept_task.lock().unwrap().take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.moq_task.lock().unwrap().take() {
             handle.abort();
         }
     }
@@ -165,7 +186,9 @@ async fn handle_connection(
 
     {
         let mut state = state.lock().await;
-        state.core.insert_session(client_id, sender);
+        state
+            .core
+            .insert_session(client_id, RelayHandle::WebSocket(sender));
         metrics
             .client_count
             .store(state.core.session_count(), Ordering::Relaxed);
@@ -238,7 +261,7 @@ async fn handle_text_message(
                 state.core.session_handles_except(client_id)
             };
             for recipient in recipients {
-                let _ = recipient.send(RelayMessage::Text(payload.clone()));
+                send_text_to_handle(&recipient, payload.clone());
             }
             Ok(())
         }
@@ -261,13 +284,13 @@ async fn forward_route(
     };
 
     if let Some(bootstrap) = forward.bootstrap {
-        send_to_client(&state, client_id, serde_json::to_string(&bootstrap)?).await?;
+        send_route_to_session(&state, client_id, &bootstrap).await?;
     }
 
     if let Some(route) = forward.route {
         let encoded = serde_json::to_string(&route)?;
         for recipient in forward.recipients {
-            let _ = recipient.send(RelayMessage::Text(encoded.clone()));
+            send_route_to_handle(&recipient, &route, encoded.clone());
         }
     }
     Ok(())
@@ -295,25 +318,104 @@ async fn disconnect_client(
     {
         let payload = serde_json::to_string(&route)?;
         for recipient in forward.recipients {
-            let _ = recipient.send(RelayMessage::Text(payload.clone()));
+            send_route_to_handle(&recipient, &route, payload.clone());
         }
     }
     Ok(())
 }
 
-async fn send_to_client(
+async fn send_route_to_session(
     state: &Arc<Mutex<RelayState>>,
     client_id: u64,
-    payload: String,
+    route: &RouteEnvelope,
 ) -> Result<()> {
-    let sender = {
+    let handle = {
         let state = state.lock().await;
         state.core.session_handle(client_id)
     };
-    if let Some(sender) = sender {
-        let _ = sender.send(RelayMessage::Text(payload));
+    if let Some(handle) = handle {
+        let encoded = serde_json::to_string(route)?;
+        send_route_to_handle(&handle, route, encoded);
     }
     Ok(())
+}
+
+fn close_handle(handle: &RelayHandle) {
+    match handle {
+        RelayHandle::WebSocket(sender) => {
+            let _ = sender.send(RelayMessage::Close);
+        }
+        #[cfg(feature = "native-moq")]
+        RelayHandle::Moq(client) => {
+            client.shutdown();
+        }
+    }
+}
+
+fn send_text_to_handle(handle: &RelayHandle, payload: String) {
+    if let RelayHandle::WebSocket(sender) = handle {
+        let _ = sender.send(RelayMessage::Text(payload));
+    }
+}
+
+fn send_route_to_handle(handle: &RelayHandle, route: &RouteEnvelope, encoded: String) {
+    match handle {
+        RelayHandle::WebSocket(sender) => {
+            let _ = sender.send(RelayMessage::Text(encoded));
+        }
+        #[cfg(feature = "native-moq")]
+        RelayHandle::Moq(client) => {
+            let _ = client.send_route(route.clone());
+        }
+    }
+}
+
+#[cfg(feature = "native-moq")]
+async fn maybe_start_moq_uplink(
+    config: RelayServerConfig,
+    state: Arc<Mutex<RelayState>>,
+    metrics: Arc<RelayMetrics>,
+) -> Result<Option<JoinHandle<()>>> {
+    let Some(moq_config) = config.moq else {
+        return Ok(None);
+    };
+    let client = Arc::new(NativeMoqRouteClient::connect(moq_config).await?);
+    let session_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut state = state.lock().await;
+        state
+            .core
+            .insert_session(session_id, RelayHandle::Moq(client.clone()));
+        metrics
+            .client_count
+            .store(state.core.session_count(), Ordering::Relaxed);
+    }
+    let task = tokio::spawn(async move {
+        loop {
+            match client.recv_route().await {
+                Ok(route) => {
+                    let _ = forward_route(state.clone(), metrics.clone(), session_id, route).await;
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = disconnect_client(state, metrics, session_id).await;
+    });
+    Ok(Some(task))
+}
+
+#[cfg(not(feature = "native-moq"))]
+async fn maybe_start_moq_uplink(
+    config: RelayServerConfig,
+    _state: Arc<Mutex<RelayState>>,
+    _metrics: Arc<RelayMetrics>,
+) -> Result<Option<JoinHandle<()>>> {
+    if config.moq.is_some() {
+        return Err(PrimadbError::Message(
+            "relay MoQ uplink requires the native-moq feature".to_owned(),
+        ));
+    }
+    Ok(None)
 }
 
 fn socket_addr_to_local_ws_url(addr: SocketAddr) -> String {
