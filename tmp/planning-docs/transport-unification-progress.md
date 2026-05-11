@@ -70,8 +70,11 @@
   - `pnpm --dir packages/primadb run smoke:moq-mesh-signaling`
   - `node --check` for the new JS smoke scripts
 - Updated monorepo `mise.toml` to Node `26.1.0` and root package metadata to require Node `>=26`.
-  `mise exec node@26.1.0 -- node -p "typeof WebTransport"` still reports `undefined`, so Node's
-  WebTransport issue is not solved by the latest Node release alone.
+  Updated the remaining Node-22-only workspace engine constraint in `apps/aimy.space-website` to
+  Node `>=26` and refreshed its direct `@types/node` dependency. Node's current release page and
+  `mise latest node` both report `26.1.0` as latest; `mise exec node@26.1.0 -- node -p "typeof
+  WebTransport"` still reports `undefined`, so Node's WebTransport issue is not solved by the
+  latest Node release alone.
 
 ## Remaining
 
