@@ -353,12 +353,18 @@ fn close_handle(handle: &RelayHandle) {
 }
 
 fn send_text_to_handle(handle: &RelayHandle, payload: String) {
-    if let RelayHandle::WebSocket(sender) = handle {
-        let _ = sender.send(RelayMessage::Text(payload));
+    match handle {
+        RelayHandle::WebSocket(sender) => {
+            let _ = sender.send(RelayMessage::Text(payload));
+        }
+        #[cfg(feature = "native-moq")]
+        RelayHandle::Moq(_) => {}
     }
 }
 
 fn send_route_to_handle(handle: &RelayHandle, route: &RouteEnvelope, encoded: String) {
+    #[cfg(not(feature = "native-moq"))]
+    let _ = route;
     match handle {
         RelayHandle::WebSocket(sender) => {
             let _ = sender.send(RelayMessage::Text(encoded));

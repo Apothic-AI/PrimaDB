@@ -1,15 +1,16 @@
+#[cfg(feature = "native-moq")]
+use crate::MoqRelayClientConfig;
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
 #[cfg(feature = "native-moq")]
 use crate::native_moq::NativeMoqRouteClient;
 use crate::{
-    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, MoqRelayClientConfig,
-    NodeFetchScheduler, Operation, PeerRecommendation, Primadb, PrimadbError, RecordEntry,
-    RecordScanResult, RelayClientConfig, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
-    RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem,
-    RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame,
-    VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response,
-    error_watch_event,
+    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, NodeFetchScheduler,
+    Operation, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
+    RelayClientConfig, RemoteInterestPolicy, RemoteInterestTarget, RemotePath, RemoteResult,
+    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
+    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
+    WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};

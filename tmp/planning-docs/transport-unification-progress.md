@@ -27,6 +27,9 @@
   underlay.
 - Added an optional MoQ uplink on the native WebSocket relay server so a gateway can forward
   WebSocket sessions and a route-mode MoQ session through the same `RouteRelayCore`.
+- Added native WebRTC mesh signaling over route-mode MoQ when `MeshConfig.relayEndpoint` is a MoQ
+  endpoint and the `native-moq` feature is enabled. It reuses existing `RoutePayload::Signal`
+  messages rather than defining a separate signaling protocol.
 - Documented the old MoQ sync helper behavior as superseded by route-mode MoQ helper frames.
 - Verified `pnpm run typecheck` for `packages/primadb`, `node --check packages/primadb-node/moq.js`,
   `python -m py_compile packages/primadb-python/python/primadb/moq.py`,
@@ -35,6 +38,7 @@
 
 ## Remaining
 
-- Direct MoQ-backed WebRTC signaling is still pending as a dedicated integration layer on top of
-  route-mode MoQ. The route payload shape for signaling already exists; the WebRTC mesh connector
-  still needs a MoQ signaling adapter beside the current WebSocket relay adapter.
+- Live Cloudflare MoQ interop validation is still pending; local deterministic tests and compile
+  checks validate the route frame shape and integration points, but not public relay behavior.
+- Browser `connectMesh(...)` still needs a direct MoQ signaling adapter; native WebRTC signaling now
+  supports MoQ via `relayEndpoint`.

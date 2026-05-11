@@ -1,12 +1,14 @@
+#[cfg(feature = "native-moq")]
+use crate::NativeMoqRouteClient;
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
 use crate::{
     ChangeSubscription, HookTransport, IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode,
     NodeFetchScheduler, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
-    RemoteInterestPolicy, RemoteInterestTarget, RemoteWatchMessage, RemoteWatchSubscription,
-    Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig,
-    SyncEnvelope, SyncFrame, VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind,
-    error_watch_event,
+    RelayEndpointConfig, RemoteInterestPolicy, RemoteInterestTarget, RemoteWatchMessage,
+    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity, WatchEvent, WatchRequest,
+    WatchRequestKind, error_watch_event,
 };
 use async_channel::{Sender, unbounded};
 use futures_util::stream::SplitSink;
@@ -119,6 +121,12 @@ struct MeshRelayState {
     reader_task: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshRelayKind {
+    WebSocket,
+    Moq,
+}
+
 struct NativeWebRtcMeshState {
     db: Primadb,
     api: Arc<API>,
@@ -129,12 +137,17 @@ struct NativeWebRtcMeshState {
     session_id: String,
     session_auth: crate::SessionAuthConfig,
     relay_url: String,
+    relay_kind: MeshRelayKind,
     rtc_configuration: RTCConfiguration,
     closed: AtomicBool,
     relay_connected: AtomicBool,
     relay_connecting: AtomicBool,
     next_message_seq: AtomicU64,
     relay: Mutex<MeshRelayState>,
+    #[cfg(feature = "native-moq")]
+    moq_relay: Option<Arc<NativeMoqRouteClient>>,
+    #[cfg(feature = "native-moq")]
+    moq_reader_task: Mutex<Option<JoinHandle<()>>>,
     peers: Mutex<BTreeMap<String, NativeMeshPeer>>,
     inflight: Mutex<BTreeMap<String, MeshOutbound>>,
     outgoing_watches: Mutex<BTreeMap<String, OutgoingWatch>>,
@@ -164,10 +177,34 @@ impl NativeWebRtcMesh {
                 "native mesh currently requires relay signaling".to_owned(),
             ));
         }
-        let relay_url = config
-            .relay_url
-            .clone()
-            .ok_or_else(|| PrimadbError::Message("native mesh requires a relay_url".to_owned()))?;
+        let relay_endpoint = config.relay_endpoint.clone();
+        let relay_url = match &relay_endpoint {
+            Some(RelayEndpointConfig::WebSocket(endpoint)) => endpoint.url.clone(),
+            Some(RelayEndpointConfig::Moq(endpoint)) => endpoint.url.clone(),
+            None => config.relay_url.clone().ok_or_else(|| {
+                PrimadbError::Message(
+                    "native mesh requires a relay_url or relayEndpoint".to_owned(),
+                )
+            })?,
+        };
+        let relay_kind = match &relay_endpoint {
+            Some(RelayEndpointConfig::Moq(_)) => MeshRelayKind::Moq,
+            _ => MeshRelayKind::WebSocket,
+        };
+
+        #[cfg(feature = "native-moq")]
+        let moq_relay = match relay_endpoint {
+            Some(RelayEndpointConfig::Moq(endpoint)) => {
+                Some(Arc::new(NativeMoqRouteClient::connect(endpoint).await?))
+            }
+            _ => None,
+        };
+        #[cfg(not(feature = "native-moq"))]
+        if matches!(relay_endpoint, Some(RelayEndpointConfig::Moq(_))) {
+            return Err(PrimadbError::Message(
+                "native mesh MoQ signaling requires the native-moq feature".to_owned(),
+            ));
+        }
 
         let rtc_configuration = build_rtc_configuration(&config.effective_ice_servers());
         let api = Arc::new(APIBuilder::new().build());
@@ -191,12 +228,17 @@ impl NativeWebRtcMesh {
             )),
             session_auth: config.session_auth,
             relay_url: relay_url.clone(),
+            relay_kind,
             rtc_configuration,
             closed: AtomicBool::new(false),
             relay_connected: AtomicBool::new(false),
             relay_connecting: AtomicBool::new(false),
             next_message_seq: AtomicU64::new(0),
             relay: Mutex::new(MeshRelayState::default()),
+            #[cfg(feature = "native-moq")]
+            moq_relay,
+            #[cfg(feature = "native-moq")]
+            moq_reader_task: Mutex::new(None),
             peers: Mutex::new(BTreeMap::new()),
             inflight: Mutex::new(BTreeMap::new()),
             outgoing_watches: Mutex::new(BTreeMap::new()),
@@ -206,6 +248,11 @@ impl NativeWebRtcMesh {
             pending_auth_peers: Mutex::new(BTreeMap::new()),
             verified_identities: Mutex::new(BTreeMap::new()),
         });
+
+        #[cfg(feature = "native-moq")]
+        if state.moq_relay.is_some() {
+            start_moq_mesh_reader(&state).await;
+        }
 
         let change_subscription = db.subscribe_changes();
         let change_receiver = change_subscription.receiver();
@@ -263,7 +310,10 @@ impl NativeWebRtcMesh {
     }
 
     pub fn signaling_mode(&self) -> &'static str {
-        "relay"
+        match self.state.relay_kind {
+            MeshRelayKind::WebSocket => "relay",
+            MeshRelayKind::Moq => "moq",
+        }
     }
 
     pub fn relay_url(&self) -> &str {
@@ -2337,6 +2387,16 @@ async fn send_mesh_route_to_peer(
 }
 
 async fn connect_mesh_relay_state(state: &Arc<NativeWebRtcMeshState>) -> Result<bool> {
+    #[cfg(feature = "native-moq")]
+    if let Some(client) = &state.moq_relay {
+        state
+            .relay_connected
+            .store(client.is_connected(), Ordering::SeqCst);
+        send_mesh_presence_state(state).await?;
+        announce_mesh_join_state(state).await?;
+        return Ok(true);
+    }
+
     struct ConnectAttemptGuard<'a> {
         flag: &'a AtomicBool,
     }
@@ -2410,8 +2470,46 @@ async fn connect_mesh_relay_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
     Ok(true)
 }
 
+#[cfg(feature = "native-moq")]
+async fn start_moq_mesh_reader(state: &Arc<NativeWebRtcMeshState>) {
+    let Some(client) = state.moq_relay.clone() else {
+        return;
+    };
+    let reader_state = state.clone();
+    let reader_task = tokio::spawn(async move {
+        loop {
+            if reader_state.closed.load(Ordering::SeqCst) {
+                break;
+            }
+            match client.recv_route().await {
+                Ok(route) => {
+                    if let Ok(payload) = serde_json::to_string(&route) {
+                        let _ = handle_mesh_signaling_message(&reader_state, &payload).await;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        reader_state.relay_connected.store(false, Ordering::SeqCst);
+    });
+    if let Some(previous) = state.moq_reader_task.lock().await.replace(reader_task) {
+        previous.abort();
+    }
+}
+
 async fn disconnect_mesh_relay_state(state: &Arc<NativeWebRtcMeshState>, abort_reader: bool) {
     state.relay_connected.store(false, Ordering::SeqCst);
+    #[cfg(feature = "native-moq")]
+    if let Some(client) = &state.moq_relay {
+        client.shutdown();
+        if abort_reader {
+            if let Some(task) = state.moq_reader_task.lock().await.take() {
+                task.abort();
+            }
+        }
+        return;
+    }
+
     let reader_task = {
         let mut relay = state.relay.lock().await;
         relay.writer.take();
@@ -2437,7 +2535,7 @@ async fn post_mesh_signal_state(
 ) -> Result<()> {
     if !state.relay_connected.load(Ordering::SeqCst) {
         return Err(PrimadbError::Message(
-            "mesh relay websocket is not connected".to_owned(),
+            "mesh signaling relay is not connected".to_owned(),
         ));
     }
     let route = state.router.wrap_signal(
@@ -2496,7 +2594,10 @@ async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
     capabilities.extend(state.db.vector_presence_capabilities());
     let mut route = state.router.presence(
         state.db.replica_id(),
-        "webrtc-relay",
+        match state.relay_kind {
+            MeshRelayKind::WebSocket => "webrtc-relay",
+            MeshRelayKind::Moq => "webrtc-moq",
+        },
         capabilities,
         vec![format!("mesh:{}", state.room)],
     );
@@ -2505,8 +2606,14 @@ async fn send_mesh_presence_state(state: &Arc<NativeWebRtcMeshState>) -> Result<
             .insert("relay_url".to_owned(), state.relay_url.clone());
         peer.metadata
             .insert("mesh_room".to_owned(), state.room.clone());
-        peer.metadata
-            .insert("signaling".to_owned(), "relay".to_owned());
+        peer.metadata.insert(
+            "signaling".to_owned(),
+            match state.relay_kind {
+                MeshRelayKind::WebSocket => "relay",
+                MeshRelayKind::Moq => "moq",
+            }
+            .to_owned(),
+        );
         peer.identity = state.db.session_presence_identity(&state.session_id);
     }
     send_route(state, &route).await
@@ -2520,6 +2627,11 @@ async fn send_route(state: &Arc<NativeWebRtcMeshState>, route: &RouteEnvelope) -
             "route payload exceeds {max_bytes} bytes"
         )));
     }
+    #[cfg(feature = "native-moq")]
+    if let Some(client) = &state.moq_relay {
+        return client.send_route(route.clone());
+    }
+
     let send_result = {
         let mut relay = state.relay.lock().await;
         let Some(writer) = relay.writer.as_mut() else {
