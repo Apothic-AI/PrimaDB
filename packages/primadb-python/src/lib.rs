@@ -1,17 +1,19 @@
 use primadb::{
+    ApplicationRouteFilter, ApplicationRouteMessage,
+    ApplicationRouteSubscription as CoreApplicationRouteSubscription,
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
     ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
     HookDecision, Identity, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
-    NativeRelayServer as CoreRelayServer,
-    NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation,
-    PasswordKeyDerivationOptions, Primadb as CorePrimadb, PublicIdentity, PullRequestKind,
-    QuerySpec, RecordBatch, RecordScan, RelayClientConfig, RelayServerConfig, RemotePath,
-    RemoteInterestPolicy, RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
+    NativeRelayServer as CoreRelayServer, NativeWebSocketSync as CoreWebSocketSync, NetworkHooks,
+    Operation, PasswordKeyDerivationOptions, Primadb as CorePrimadb, PublicIdentity,
+    PullRequestKind, QuerySpec, RecordBatch, RecordScan, RelayClientConfig, RelayServerConfig,
+    RemoteFanInWatch as CoreRemoteFanInWatch, RemoteInterestPolicy, RemotePath,
+    RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
     RemoteWatchSubscription as CoreRemoteWatch, RecordWatchSubscription as CoreRecordWatchSubscription,
-    RoomHookContext, Scope as CoreScope, ScopePolicy, SecretBoxKey, ServeRequestContext,
-    ServeResultContext, ScriptExecutionOptions, Subscription as CoreSubscription,
-    TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
-    TraversalSpec, UserGrant,
+    RoomHookContext, RouteTarget, Scope as CoreScope, ScopePolicy, SecretBoxKey,
+    ServeRequestContext, ServeResultContext, ScriptExecutionOptions,
+    Subscription as CoreSubscription, TransactionOptions, TransactionStep,
+    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
     VectorCollectionConfig, VectorSearchSpec,
     VectorWatchSubscription as CoreVectorWatchSubscription,
     derive_password_key as core_derive_password_key, parse_request_hook_json,
@@ -24,6 +26,7 @@ use pythonize::{depythonize, pythonize};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value as JsonValue, json};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::{Builder, Runtime};
 
@@ -60,6 +63,27 @@ fn remote_policy(value: Option<&Bound<'_, PyAny>>) -> PyResult<RemoteInterestPol
     match value {
         Some(value) if !value.is_none() => from_py(value),
         _ => Ok(RemoteInterestPolicy::default()),
+    }
+}
+
+fn application_filter(value: Option<&Bound<'_, PyAny>>) -> PyResult<ApplicationRouteFilter> {
+    match value {
+        Some(value) if !value.is_none() => from_py(value),
+        _ => Ok(ApplicationRouteFilter::default()),
+    }
+}
+
+fn route_target(value: Option<&Bound<'_, PyAny>>) -> PyResult<RouteTarget> {
+    match value {
+        Some(value) if !value.is_none() => from_py(value),
+        _ => Ok(RouteTarget::Broadcast),
+    }
+}
+
+fn metadata_map(value: Option<&Bound<'_, PyAny>>) -> PyResult<BTreeMap<String, JsonValue>> {
+    match value {
+        Some(value) if !value.is_none() => from_py(value),
+        _ => Ok(BTreeMap::new()),
     }
 }
 
@@ -332,6 +356,16 @@ struct RelayServer {
 #[pyclass(module = "primadb._native")]
 struct RemoteWatch {
     inner: Arc<Mutex<Option<CoreRemoteWatch>>>,
+}
+
+#[pyclass(module = "primadb._native")]
+struct ApplicationRouteSubscription {
+    inner: Arc<Mutex<Option<CoreApplicationRouteSubscription>>>,
+}
+
+#[pyclass(module = "primadb._native")]
+struct RemoteFanInWatch {
+    inner: Arc<Mutex<Option<CoreRemoteFanInWatch>>>,
 }
 
 #[pyclass(module = "primadb._native")]
@@ -1267,6 +1301,87 @@ impl RemoteWatch {
 }
 
 #[pymethods]
+impl ApplicationRouteSubscription {
+    fn next(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("application route subscription"))?
+        };
+        let event = py.detach(|| runtime().block_on(subscription.recv()));
+        self.inner.lock().unwrap().replace(subscription);
+        event.map(|event| to_py(py, event)).transpose()
+    }
+
+    fn try_next(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return Ok(None);
+        };
+        subscription
+            .try_recv()
+            .map(|event| to_py(py, event))
+            .transpose()
+    }
+
+    fn drain(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let events = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(CoreApplicationRouteSubscription::drain)
+            .unwrap_or_default();
+        to_py(py, events)
+    }
+
+    fn close(&self) {
+        if let Some(subscription) = self.inner.lock().unwrap().take() {
+            subscription.close();
+        }
+    }
+}
+
+#[pymethods]
+impl RemoteFanInWatch {
+    fn next(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let watch = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("remote fan-in watch"))?
+        };
+        let event = py.detach(|| runtime().block_on(watch.recv()));
+        self.inner.lock().unwrap().replace(watch);
+        event.map(|event| to_py(py, event)).transpose()
+    }
+
+    fn try_next(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(watch) = guard.as_ref() else {
+            return Ok(None);
+        };
+        watch.try_recv().map(|event| to_py(py, event)).transpose()
+    }
+
+    fn drain(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let events = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(CoreRemoteFanInWatch::drain)
+            .unwrap_or_default();
+        to_py(py, events)
+    }
+
+    fn close(&self) {
+        if let Some(watch) = self.inner.lock().unwrap().take() {
+            watch.close();
+        }
+    }
+}
+
+#[pymethods]
 impl WebSocketSync {
     fn is_connected(&self) -> bool {
         self.inner
@@ -1312,6 +1427,69 @@ impl WebSocketSync {
             .map(CoreWebSocketSync::recommended_peers)
             .unwrap_or_default();
         to_py(py, peers)
+    }
+
+    #[pyo3(signature = (message, target=None))]
+    fn publish_application(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyAny>,
+        target: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let message: ApplicationRouteMessage = from_py(message)?;
+        let target = route_target(target)?;
+        let route = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .publish_application(message, target)
+            .map_err(to_py_err)?;
+        to_py(py, route)
+    }
+
+    #[pyo3(signature = (namespace, protocol, topic, body, metadata=None, target=None))]
+    fn send_application(
+        &self,
+        py: Python<'_>,
+        namespace: String,
+        protocol: String,
+        topic: Option<String>,
+        body: &Bound<'_, PyAny>,
+        metadata: Option<&Bound<'_, PyAny>>,
+        target: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let body: JsonValue = from_py(body)?;
+        let metadata = metadata_map(metadata)?;
+        let target = route_target(target)?;
+        let route = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .send_application(namespace, protocol, topic, body, metadata, target)
+            .map_err(to_py_err)?;
+        to_py(py, route)
+    }
+
+    #[pyo3(signature = (filter=None))]
+    fn subscribe_applications(
+        &self,
+        filter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<ApplicationRouteSubscription> {
+        let filter = application_filter(filter)?;
+        let subscription = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .subscribe_applications(filter);
+        Ok(ApplicationRouteSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
     }
 
     #[pyo3(signature = (path, policy=None))]
@@ -1386,6 +1564,24 @@ impl WebSocketSync {
             guard.take().ok_or_else(|| closed_error("websocket sync"))?
         };
         let result = py.detach(|| runtime().block_on(sync.remote_records_with_policy(scan, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (scan, policy=None))]
+    fn records_fan_in(
+        &self,
+        py: Python<'_>,
+        scan: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let scan: RecordScan = from_py(scan)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.records_fan_in(scan, policy)));
         self.inner.lock().unwrap().replace(sync);
         to_py(py, result.map_err(to_py_err)?)
     }
@@ -1837,6 +2033,27 @@ impl WebSocketSync {
         })
     }
 
+    #[pyo3(signature = (scan, policy=None))]
+    fn watch_records_fan_in(
+        &self,
+        scan: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteFanInWatch> {
+        let scan: RecordScan = from_py(scan)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_records_fan_in(scan, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteFanInWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
     #[pyo3(signature = (collection, query, spec, policy=None))]
     fn watch_vector_search(
         &self,
@@ -2001,6 +2218,85 @@ impl WebRtcMesh {
         let peers = py.detach(|| runtime().block_on(mesh.recommended_peers()));
         self.inner.lock().unwrap().replace(mesh);
         to_py(py, peers)
+    }
+
+    #[pyo3(signature = (message, target=None))]
+    fn publish_application(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyAny>,
+        target: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let message: ApplicationRouteMessage = from_py(message)?;
+        let target = route_target(target)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.publish_application(message, target)));
+        self.inner.lock().unwrap().replace(mesh);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (namespace, protocol, topic, body, metadata=None, target=None))]
+    fn send_application(
+        &self,
+        py: Python<'_>,
+        namespace: String,
+        protocol: String,
+        topic: Option<String>,
+        body: &Bound<'_, PyAny>,
+        metadata: Option<&Bound<'_, PyAny>>,
+        target: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let body: JsonValue = from_py(body)?;
+        let metadata = metadata_map(metadata)?;
+        let target = route_target(target)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| {
+            runtime().block_on(mesh.send_application(namespace, protocol, topic, body, metadata, target))
+        });
+        self.inner.lock().unwrap().replace(mesh);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (filter=None))]
+    fn subscribe_applications(
+        &self,
+        filter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<ApplicationRouteSubscription> {
+        let filter = application_filter(filter)?;
+        let subscription = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("webrtc mesh"))?
+            .subscribe_applications(filter);
+        Ok(ApplicationRouteSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
+    }
+
+    #[pyo3(signature = (scan, policy=None))]
+    fn records_fan_in(
+        &self,
+        py: Python<'_>,
+        scan: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let scan: RecordScan = from_py(scan)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.records_fan_in(scan, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        to_py(py, result.map_err(to_py_err)?)
     }
 
     fn watch_remote_get(
@@ -2257,6 +2553,26 @@ impl WebRtcMesh {
         })
     }
 
+    #[pyo3(signature = (scan, policy=None))]
+    fn watch_records_fan_in(
+        &self,
+        py: Python<'_>,
+        scan: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteFanInWatch> {
+        let scan: RecordScan = from_py(scan)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_records_fan_in(scan, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteFanInWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
     #[pyo3(signature = (collection, query, spec, policy=None))]
     fn watch_vector_search(
         &self,
@@ -2384,6 +2700,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<VectorWatchSubscription>()?;
     module.add_class::<RelayServer>()?;
     module.add_class::<RemoteWatch>()?;
+    module.add_class::<ApplicationRouteSubscription>()?;
+    module.add_class::<RemoteFanInWatch>()?;
     module.add_class::<WebSocketSync>()?;
     module.add_class::<WebRtcMesh>()?;
     module.add_function(wrap_pyfunction!(derive_password_key, module)?)?;

@@ -1,3 +1,4 @@
+use crate::RouteTransportKind;
 use crate::value::{NodeId, NodeState};
 use crate::{
     DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec, RecordEntry,
@@ -224,12 +225,83 @@ pub struct RemoteWatchMessage {
     pub result: RemoteResult,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePeerFailure {
+    pub peer_id: String,
+    pub transport: RouteTransportKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePeerRecords {
+    pub peer_id: String,
+    pub transport: RouteTransportKind,
+    pub result: RecordScanResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRecordConflictSource {
+    pub peer_id: String,
+    pub transport: RouteTransportKind,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRecordConflict {
+    pub key: String,
+    pub winner_peer_id: String,
+    pub winner_hash: String,
+    pub sources: Vec<RemoteRecordConflictSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRecordsFanIn {
+    pub request_id: String,
+    pub records: Vec<RemotePeerRecords>,
+    pub failures: Vec<RemotePeerFailure>,
+    pub merged: RecordScanResult,
+    pub conflicts: Vec<RemoteRecordConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemoteFanInWatchEvent {
+    Update {
+        peer_id: String,
+        transport: RouteTransportKind,
+        initial: bool,
+        sequence: u64,
+        result: RemoteResult,
+    },
+    Failure {
+        peer_id: String,
+        transport: RouteTransportKind,
+        message: String,
+        terminal: bool,
+    },
+    Closed,
+}
+
 pub struct RemoteWatchSubscription {
     inner: Arc<RemoteWatchSubscriptionInner>,
 }
 
+pub struct RemoteFanInWatch {
+    inner: Arc<RemoteFanInWatchInner>,
+}
+
 struct RemoteWatchSubscriptionInner {
     receiver: Receiver<std::result::Result<RemoteWatchMessage, String>>,
+    cancel: Box<dyn Fn() + Send + Sync>,
+}
+
+struct RemoteFanInWatchInner {
+    receiver: Receiver<RemoteFanInWatchEvent>,
     cancel: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -342,6 +414,133 @@ impl RemoteWatchSubscription {
     }
 }
 
+impl RemoteFanInWatch {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn new(
+        receiver: Receiver<RemoteFanInWatchEvent>,
+        cancel: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RemoteFanInWatchInner {
+                receiver,
+                cancel: Box::new(cancel),
+            }),
+        }
+    }
+
+    pub fn receiver(&self) -> Receiver<RemoteFanInWatchEvent> {
+        self.inner.receiver.clone()
+    }
+
+    pub async fn recv(&self) -> Option<RemoteFanInWatchEvent> {
+        self.inner.receiver.recv().await.ok()
+    }
+
+    pub fn try_recv(&self) -> Option<RemoteFanInWatchEvent> {
+        self.inner.receiver.try_recv().ok()
+    }
+
+    pub fn drain(&self) -> Vec<RemoteFanInWatchEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.inner.receiver.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn recv_blocking(&self) -> Option<RemoteFanInWatchEvent> {
+        self.inner.receiver.recv_blocking().ok()
+    }
+
+    pub fn close(&self) {
+        (self.inner.cancel)();
+        self.inner.receiver.close();
+    }
+}
+
+pub fn merge_remote_records_fan_in(
+    request_id: impl Into<String>,
+    records: Vec<RemotePeerRecords>,
+    failures: Vec<RemotePeerFailure>,
+) -> RemoteRecordsFanIn {
+    #[derive(Debug, Clone)]
+    struct SourceRecord {
+        peer_id: String,
+        transport: RouteTransportKind,
+        entry: RecordEntry,
+        content_hash: String,
+    }
+
+    let mut by_key: BTreeMap<String, Vec<SourceRecord>> = BTreeMap::new();
+    let mut cursors = BTreeMap::new();
+    for peer_records in &records {
+        if let Some(cursor) = &peer_records.result.next_cursor {
+            cursors.insert(peer_records.peer_id.clone(), cursor.clone());
+        }
+        for entry in &peer_records.result.entries {
+            let content_hash = stable_content_hash(entry).unwrap_or_else(|| "unknown".to_owned());
+            by_key
+                .entry(entry.key.clone())
+                .or_default()
+                .push(SourceRecord {
+                    peer_id: peer_records.peer_id.clone(),
+                    transport: peer_records.transport.clone(),
+                    entry: entry.clone(),
+                    content_hash,
+                });
+        }
+    }
+
+    let mut entries = Vec::new();
+    let mut conflicts = Vec::new();
+    for (key, mut sources) in by_key {
+        sources.sort_by(|left, right| {
+            left.peer_id
+                .cmp(&right.peer_id)
+                .then_with(|| left.content_hash.cmp(&right.content_hash))
+                .then_with(|| left.transport.as_str().cmp(right.transport.as_str()))
+        });
+        let winner = sources[0].clone();
+        let all_same = sources
+            .iter()
+            .all(|source| source.content_hash == winner.content_hash);
+        if !all_same {
+            conflicts.push(RemoteRecordConflict {
+                key,
+                winner_peer_id: winner.peer_id.clone(),
+                winner_hash: winner.content_hash.clone(),
+                sources: sources
+                    .iter()
+                    .map(|source| RemoteRecordConflictSource {
+                        peer_id: source.peer_id.clone(),
+                        transport: source.transport.clone(),
+                        content_hash: source.content_hash.clone(),
+                    })
+                    .collect(),
+            });
+        }
+        entries.push(winner.entry);
+    }
+
+    let next_cursor = if cursors.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&cursors).ok()
+    };
+
+    RemoteRecordsFanIn {
+        request_id: request_id.into(),
+        records,
+        failures,
+        merged: RecordScanResult {
+            entries,
+            next_cursor,
+        },
+        conflicts,
+    }
+}
+
 pub fn stable_content_hash<T>(value: &T) -> Option<String>
 where
     T: Serialize,
@@ -352,7 +551,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::stable_content_hash;
+    use super::{
+        RemotePeerFailure, RemotePeerRecords, merge_remote_records_fan_in, stable_content_hash,
+    };
+    use crate::{RecordEntry, RecordScanResult, RecordValue, RouteTransportKind};
     use serde_json::json;
 
     #[test]
@@ -365,6 +567,60 @@ mod tests {
         assert_ne!(left, changed);
         assert!(left.starts_with("blake3:"));
         assert_eq!(left.len(), "blake3:".len() + 64);
+    }
+
+    #[test]
+    fn records_fan_in_merge_tags_sources_failures_and_conflicts() {
+        let peer_a = RemotePeerRecords {
+            peer_id: "peer-a".to_owned(),
+            transport: RouteTransportKind::WebSocket,
+            result: RecordScanResult {
+                entries: vec![
+                    RecordEntry {
+                        key: "shared".to_owned(),
+                        value: RecordValue::Json(json!({"winner": true})),
+                    },
+                    RecordEntry {
+                        key: "unique-a".to_owned(),
+                        value: RecordValue::Json(json!(1)),
+                    },
+                ],
+                next_cursor: Some("cursor-a".to_owned()),
+            },
+        };
+        let peer_b = RemotePeerRecords {
+            peer_id: "peer-b".to_owned(),
+            transport: RouteTransportKind::Moq,
+            result: RecordScanResult {
+                entries: vec![RecordEntry {
+                    key: "shared".to_owned(),
+                    value: RecordValue::Json(json!({"winner": false})),
+                }],
+                next_cursor: None,
+            },
+        };
+        let failure = RemotePeerFailure {
+            peer_id: "peer-c".to_owned(),
+            transport: RouteTransportKind::WebRtc,
+            message: "denied".to_owned(),
+        };
+
+        let fan_in = merge_remote_records_fan_in("request-1", vec![peer_b, peer_a], vec![failure]);
+        assert_eq!(fan_in.request_id, "request-1");
+        assert_eq!(fan_in.failures.len(), 1);
+        assert_eq!(fan_in.merged.entries.len(), 2);
+        assert_eq!(fan_in.merged.entries[0].key, "shared");
+        assert_eq!(fan_in.merged.entries[1].key, "unique-a");
+        assert_eq!(fan_in.conflicts.len(), 1);
+        assert_eq!(fan_in.conflicts[0].key, "shared");
+        assert_eq!(fan_in.conflicts[0].winner_peer_id, "peer-a");
+        assert!(
+            fan_in
+                .merged
+                .next_cursor
+                .as_deref()
+                .is_some_and(|cursor| cursor.contains("peer-a"))
+        );
     }
 }
 

@@ -14,6 +14,7 @@ export type PrimadbRouteTarget =
   | { kind: "topic"; value: string };
 
 export type PrimadbRoutePayload =
+  | { kind: "application"; message: PrimadbApplicationRouteMessage }
   | { kind: "sync"; encoding: string; payload: unknown }
   | { kind: "presence"; peer: PrimadbPeerPresence }
   | { kind: "peer_exchange"; peers: PrimadbPeerRecommendation[] }
@@ -21,6 +22,7 @@ export type PrimadbRoutePayload =
   | { kind: string; [key: string]: unknown };
 
 export type PrimadbRouteBatchItem =
+  | { kind: "application"; message: PrimadbApplicationRouteMessage }
   | { kind: "sync"; encoding: string; payload: unknown }
   | { kind: "presence"; peer: PrimadbPeerPresence }
   | { kind: "peer_exchange"; peers: PrimadbPeerRecommendation[] }
@@ -65,6 +67,32 @@ export interface PrimadbMoqRoutePayload {
 }
 
 export type PrimadbRouteHandler = (route: PrimadbRouteEnvelope) => void;
+
+export interface PrimadbApplicationRouteMessage {
+  namespace: string;
+  protocol: string;
+  topic?: string | null;
+  body: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PrimadbApplicationRouteEvent {
+  routeId: string;
+  from: string;
+  channel: string;
+  target: PrimadbRouteTarget;
+  issuedAtMillis: number;
+  receivedAtMillis: number;
+  transport: "moq";
+  verifiedIdentity: null;
+  message: PrimadbApplicationRouteMessage;
+}
+
+export interface PrimadbApplicationRouteFilter {
+  namespace?: string | null;
+  protocol?: string | null;
+  topic?: string | null;
+}
 
 export interface PrimadbMoqSessionOptions {
   path: string;
@@ -113,6 +141,14 @@ export declare function connectPrimadbMoq(
   options: ConnectPrimadbMoqOptions,
 ): Promise<PrimadbMoqSession>;
 
+export declare class PrimadbApplicationRouteSubscription {
+  readonly filter: PrimadbApplicationRouteFilter;
+  next(): Promise<PrimadbApplicationRouteEvent | null>;
+  tryNext(): PrimadbApplicationRouteEvent | null;
+  drain(): PrimadbApplicationRouteEvent[];
+  close(): void;
+}
+
 export declare class PrimadbMoqSession {
   readonly db: Primadb;
   readonly connection: unknown;
@@ -126,6 +162,19 @@ export declare class PrimadbMoqSession {
   subscribe(path?: string): unknown;
   startAutoFlush(): void;
   onRoute(handler: PrimadbRouteHandler): () => void;
+  publishApplication(message: PrimadbApplicationRouteMessage, target?: PrimadbRouteTarget): number;
+  sendApplication(
+    namespace: string,
+    protocol: string,
+    topic: string | null | undefined,
+    body: unknown,
+    metadata?: Record<string, unknown>,
+    target?: PrimadbRouteTarget,
+  ): number;
+  subscribeApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteSubscription;
+  nextApplication(filter?: PrimadbApplicationRouteFilter): Promise<PrimadbApplicationRouteEvent | null>;
+  tryNextApplication(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent | null;
+  drainApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent[];
   addAcceptedPeerId(peerId: string): () => void;
   knownPeers(): PrimadbPeerPresence[];
   recommendedPeers(): PrimadbPeerRecommendation[];

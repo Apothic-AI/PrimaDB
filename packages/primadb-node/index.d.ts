@@ -614,6 +614,95 @@ export interface RemoteWatchMessage {
   error?: string | null;
 }
 
+export type RouteTarget =
+  | { kind: "broadcast" }
+  | { kind: "peer"; value: string }
+  | { kind: "topic"; value: string };
+
+export type RouteTransportKind =
+  | "web_socket"
+  | "moq"
+  | "web_rtc"
+  | "broadcast_channel"
+  | "in_memory";
+
+export interface ApplicationRouteMessage {
+  namespace: string;
+  protocol: string;
+  topic?: string | null;
+  body: JsonValue;
+  metadata?: Record<string, JsonValue>;
+}
+
+export interface ApplicationRouteEvent {
+  routeId: string;
+  from: string;
+  channel: string;
+  target: RouteTarget;
+  issuedAtMillis: number;
+  receivedAtMillis: number;
+  transport: RouteTransportKind;
+  verifiedIdentity?: VerifiedIdentity | null;
+  message: ApplicationRouteMessage;
+}
+
+export interface ApplicationRouteFilter {
+  namespace?: string | null;
+  protocol?: string | null;
+  topic?: string | null;
+}
+
+export interface RemotePeerFailure {
+  peerId: string;
+  transport: RouteTransportKind;
+  message: string;
+}
+
+export interface RemotePeerRecords {
+  peerId: string;
+  transport: RouteTransportKind;
+  result: RecordScanResult;
+}
+
+export interface RemoteRecordConflictSource {
+  peerId: string;
+  transport: RouteTransportKind;
+  contentHash: string;
+}
+
+export interface RemoteRecordConflict {
+  key: string;
+  winnerPeerId: string;
+  winnerHash: string;
+  sources: RemoteRecordConflictSource[];
+}
+
+export interface RemoteRecordsFanIn {
+  requestId: string;
+  records: RemotePeerRecords[];
+  failures: RemotePeerFailure[];
+  merged: RecordScanResult;
+  conflicts: RemoteRecordConflict[];
+}
+
+export type RemoteFanInWatchEvent =
+  | {
+      kind: "update";
+      peerId: string;
+      transport: RouteTransportKind;
+      initial: boolean;
+      sequence: number;
+      result: RemoteResult;
+    }
+  | {
+      kind: "failure";
+      peerId: string;
+      transport: RouteTransportKind;
+      message: string;
+      terminal: boolean;
+    }
+  | { kind: "closed" };
+
 export declare class Primadb {
   constructor(replicaId?: string | null);
   replicaId(): string;
@@ -745,12 +834,36 @@ export declare class RemoteWatch {
   close(): void;
 }
 
+export declare class ApplicationRouteSubscription {
+  next(): Promise<ApplicationRouteEvent | null>;
+  tryNext(): ApplicationRouteEvent | null;
+  drain(): ApplicationRouteEvent[];
+  close(): void;
+}
+
+export declare class RemoteFanInWatch {
+  next(): Promise<RemoteFanInWatchEvent | null>;
+  tryNext(): RemoteFanInWatchEvent | null;
+  drain(): RemoteFanInWatchEvent[];
+  close(): void;
+}
+
 export declare class WebSocketSync {
   isConnected(): boolean;
   pendingCount(): number;
   inflightCount(): number;
   knownPeerCount(): number;
   recommendedPeers(): JsonValue;
+  publishApplication(message: ApplicationRouteMessage, target?: RouteTarget | null): JsonValue;
+  sendApplication(
+    namespace: string,
+    protocol: string,
+    topic: string | null | undefined,
+    body: JsonValue,
+    metadata?: Record<string, JsonValue> | null,
+    target?: RouteTarget | null,
+  ): JsonValue;
+  subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
   get(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
   query(
     path: RemotePath,
@@ -767,6 +880,7 @@ export declare class WebSocketSync {
   ): Promise<VectorSearchResult>;
   node(id: string, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
   snapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
+  recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
   remoteGet(peerId: string, path: RemotePath): Promise<JsonValue | null>;
   remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
   remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
@@ -794,6 +908,7 @@ export declare class WebSocketSync {
   ): RemoteWatch;
   watchLex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
   watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteWatch;
+  watchRecordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteFanInWatch;
   watchVectorSearch(
     collection: string,
     query: number[],
@@ -829,6 +944,17 @@ export declare class WebRtcMesh {
   openPeerCount(): Promise<number>;
   inflightCount(): Promise<number>;
   recommendedPeers(): Promise<JsonValue>;
+  publishApplication(message: ApplicationRouteMessage, target?: RouteTarget | null): Promise<JsonValue>;
+  sendApplication(
+    namespace: string,
+    protocol: string,
+    topic: string | null | undefined,
+    body: JsonValue,
+    metadata?: Record<string, JsonValue> | null,
+    target?: RouteTarget | null,
+  ): Promise<JsonValue>;
+  subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
+  recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
   watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
   watchMap(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
   watchQuery(
@@ -842,6 +968,7 @@ export declare class WebRtcMesh {
     policy?: RemoteInterestPolicy | null,
   ): Promise<RemoteWatch>;
   watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+  watchRecordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteFanInWatch>;
   watchVectorSearch(
     collection: string,
     query: number[],

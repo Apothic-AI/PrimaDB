@@ -1,23 +1,28 @@
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
+use crate::app_route::ApplicationRouteBus;
 use crate::wasm_opfs::{
     apply_segment_transaction_opfs, estimate_segment_namespace_opfs, load_segment_snapshot_opfs,
     load_vector_cache_opfs, replace_segment_transaction_opfs, write_vector_cache_opfs,
 };
 use crate::{
-    BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext,
-    DurableStorageBinding, DurableStorageConfig, HookTransport, HybridClock, IceServerConfig,
-    LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler,
-    Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
-    PullResponseBody, QuerySpec, RecordBatch, RecordEntry, RecordScan, RecordScanResult,
+    ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
+    ApplicationRouteSubscription as CoreApplicationRouteSubscription, BlobRef, BlobStorageBinding,
+    BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext, DurableStorageBinding,
+    DurableStorageConfig, HookTransport, HybridClock, IceServerConfig, LexEntry, LexSpec, MapEntry,
+    MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler, Operation, PeerRecommendation,
+    Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody, QuerySpec, RecordBatch,
+    RecordEntry, RecordScan, RecordScanResult,
     RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig, RelayEndpointConfig,
-    RemoteInterestPolicy, RemoteInterestTarget, RemotePath, RemoteResult, RemoteWatchMessage,
-    RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
+    RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
+    RemotePeerFailure, RemotePeerRecords, RemoteResult, RemoteWatchMessage, RoomHookContext,
+    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, RouteTransportKind, Router,
     RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
     SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
     TraversalSubscription as CoreTraversalSubscription, VectorCollectionConfig, VectorSearchSpec,
     VectorWatchSubscription as CoreVectorWatchSubscription, VerifiedIdentity, WatchEvent,
     WatchRequest, WatchRequestKind, encode_component, error_pull_response, error_watch_event,
+    merge_remote_records_fan_in,
 };
 #[cfg(feature = "scripting")]
 use crate::{NodeScript, ScriptExecutionOptions};
@@ -93,6 +98,21 @@ pub struct WasmRemoteWatch {
 struct WasmRemoteWatchInner {
     receiver: async_channel::Receiver<std::result::Result<RemoteWatchMessage, String>>,
     cancel: Box<dyn Fn()>,
+}
+
+#[wasm_bindgen(js_name = ApplicationRouteSubscription)]
+pub struct WasmApplicationRouteSubscription {
+    inner: Option<CoreApplicationRouteSubscription>,
+}
+
+#[wasm_bindgen(js_name = RemoteFanInWatch)]
+pub struct WasmRemoteFanInWatch {
+    inner: Option<WasmRemoteFanInWatchInner>,
+}
+
+struct WasmRemoteFanInWatchInner {
+    receiver: async_channel::Receiver<RemoteFanInWatchEvent>,
+    close: Box<dyn Fn()>,
 }
 
 #[wasm_bindgen(js_name = IndexedDbPersistence)]
@@ -243,6 +263,7 @@ struct WebSocketSyncState {
     pending_auth_challenges: BTreeMap<String, crate::AuthChallenge>,
     pending_auth_peers: BTreeMap<String, crate::PeerPresence>,
     verified_identities: BTreeMap<String, VerifiedIdentity>,
+    applications: ApplicationRouteBus,
     next_message_seq: u64,
 }
 
@@ -389,6 +410,7 @@ struct WebRtcMeshState {
     pending_auth_challenges: BTreeMap<String, crate::AuthChallenge>,
     pending_auth_peers: BTreeMap<String, crate::PeerPresence>,
     verified_identities: BTreeMap<String, VerifiedIdentity>,
+    applications: ApplicationRouteBus,
     next_message_seq: u64,
     relay_onmessage: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
     relay_onopen: Option<Closure<dyn FnMut(web_sys::Event)>>,
@@ -1732,6 +1754,7 @@ impl WasmPrimadb {
             pending_auth_challenges: BTreeMap::new(),
             pending_auth_peers: BTreeMap::new(),
             verified_identities: BTreeMap::new(),
+            applications: ApplicationRouteBus::default(),
             next_message_seq: 0,
         }));
 
@@ -1770,6 +1793,7 @@ impl WasmPrimadb {
                     "watch_node".to_owned(),
                     "watch_snapshot".to_owned(),
                     "peer_exchange".to_owned(),
+                    "application_routes".to_owned(),
                 ];
                 capabilities.extend(borrowed.db.vector_presence_capabilities());
                 borrowed.router.presence(
@@ -1938,6 +1962,7 @@ impl WasmPrimadb {
             pending_auth_challenges: BTreeMap::new(),
             pending_auth_peers: BTreeMap::new(),
             verified_identities: BTreeMap::new(),
+            applications: ApplicationRouteBus::default(),
             next_message_seq: 0,
             relay_onmessage: None,
             relay_onopen: None,
@@ -2451,6 +2476,87 @@ impl WasmRemoteWatch {
     }
 }
 
+#[wasm_bindgen(js_class = ApplicationRouteSubscription)]
+impl WasmApplicationRouteSubscription {
+    pub async fn next(&self) -> std::result::Result<JsValue, JsValue> {
+        let event = if let Some(inner) = self.inner.as_ref() {
+            inner.recv().await
+        } else {
+            None
+        };
+        match event {
+            Some(event) => to_js(&event),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = tryNext)]
+    pub fn try_next(&self) -> std::result::Result<JsValue, JsValue> {
+        match self.inner.as_ref().and_then(|inner| inner.try_recv()) {
+            Some(event) => to_js(&event),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    pub fn drain(&self) -> std::result::Result<JsValue, JsValue> {
+        let events = self
+            .inner
+            .as_ref()
+            .map(|inner| inner.drain())
+            .unwrap_or_default();
+        to_js(&events)
+    }
+
+    pub fn close(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.close();
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = RemoteFanInWatch)]
+impl WasmRemoteFanInWatch {
+    pub async fn next(&self) -> std::result::Result<JsValue, JsValue> {
+        let event = if let Some(inner) = self.inner.as_ref() {
+            inner.receiver.recv().await.ok()
+        } else {
+            None
+        };
+        match event {
+            Some(event) => to_js(&event),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    #[wasm_bindgen(js_name = tryNext)]
+    pub fn try_next(&self) -> std::result::Result<JsValue, JsValue> {
+        let event = self
+            .inner
+            .as_ref()
+            .and_then(|inner| inner.receiver.try_recv().ok());
+        match event {
+            Some(event) => to_js(&event),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    pub fn drain(&self) -> std::result::Result<JsValue, JsValue> {
+        let mut events = Vec::new();
+        if let Some(inner) = self.inner.as_ref() {
+            while let Ok(event) = inner.receiver.try_recv() {
+                events.push(event);
+            }
+        }
+        to_js(&events)
+    }
+
+    pub fn close(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            (inner.close)();
+        }
+    }
+}
+
 #[wasm_bindgen(js_class = Scope)]
 impl WasmScope {
     pub fn root(&self) -> String {
@@ -2679,6 +2785,54 @@ impl WasmWebSocketSync {
         to_js(&peers)
     }
 
+    #[wasm_bindgen(js_name = publishApplication)]
+    pub fn publish_application(
+        &self,
+        message: JsValue,
+        target: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let message = application_message_from_js(message)?;
+        let target = route_target_from_optional_js(target)?;
+        publish_application_relay_state(&self.state, message, target)
+            .and_then(|route| to_js(&route))
+    }
+
+    #[wasm_bindgen(js_name = sendApplication)]
+    pub fn send_application(
+        &self,
+        namespace: String,
+        protocol: String,
+        topic: Option<String>,
+        body: JsValue,
+        metadata: Option<JsValue>,
+        target: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let body = json_value_from_js(body)?;
+        let metadata = metadata_map_from_js(metadata)?;
+        let target = route_target_from_optional_js(target)?;
+        publish_application_relay_state(
+            &self.state,
+            ApplicationRouteMessage::new(namespace, protocol, topic, body, metadata),
+            target,
+        )
+        .and_then(|route| to_js(&route))
+    }
+
+    #[wasm_bindgen(js_name = subscribeApplications)]
+    pub fn subscribe_applications(
+        &self,
+        filter: Option<JsValue>,
+    ) -> std::result::Result<WasmApplicationRouteSubscription, JsValue> {
+        Ok(WasmApplicationRouteSubscription {
+            inner: Some(
+                self.state
+                    .borrow()
+                    .applications
+                    .subscribe(application_filter_from_js(filter)?),
+            ),
+        })
+    }
+
     pub async fn get(
         &self,
         path: JsValue,
@@ -2774,6 +2928,19 @@ impl WasmWebSocketSync {
                 "expected records result, received {other:?}"
             ))),
         }
+    }
+
+    #[wasm_bindgen(js_name = recordsFanIn)]
+    pub async fn records_fan_in(
+        &self,
+        scan: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        let result = records_fan_in_relay_state(&self.state, scan, policy).await?;
+        to_js(&result)
     }
 
     #[wasm_bindgen(js_name = vectorSearch)]
@@ -2919,6 +3086,18 @@ impl WasmWebSocketSync {
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         let policy = remote_policy_from_js(policy)?;
         start_remote_watch_with_policy_state(&self.state, policy, PullRequestKind::Records { scan })
+    }
+
+    #[wasm_bindgen(js_name = watchRecordsFanIn)]
+    pub fn watch_records_fan_in(
+        &self,
+        scan: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        watch_records_fan_in_relay_state(&self.state, scan, policy)
     }
 
     #[wasm_bindgen(js_name = watchVectorSearch)]
@@ -3367,6 +3546,66 @@ impl WasmWebRtcMesh {
         self.state.borrow().inflight.len()
     }
 
+    #[wasm_bindgen(js_name = publishApplication)]
+    pub fn publish_application(
+        &self,
+        message: JsValue,
+        target: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let message = application_message_from_js(message)?;
+        let target = route_target_from_optional_js(target)?;
+        publish_application_mesh_state(&self.state, message, target).and_then(|route| to_js(&route))
+    }
+
+    #[wasm_bindgen(js_name = sendApplication)]
+    pub fn send_application(
+        &self,
+        namespace: String,
+        protocol: String,
+        topic: Option<String>,
+        body: JsValue,
+        metadata: Option<JsValue>,
+        target: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let body = json_value_from_js(body)?;
+        let metadata = metadata_map_from_js(metadata)?;
+        let target = route_target_from_optional_js(target)?;
+        publish_application_mesh_state(
+            &self.state,
+            ApplicationRouteMessage::new(namespace, protocol, topic, body, metadata),
+            target,
+        )
+        .and_then(|route| to_js(&route))
+    }
+
+    #[wasm_bindgen(js_name = subscribeApplications)]
+    pub fn subscribe_applications(
+        &self,
+        filter: Option<JsValue>,
+    ) -> std::result::Result<WasmApplicationRouteSubscription, JsValue> {
+        Ok(WasmApplicationRouteSubscription {
+            inner: Some(
+                self.state
+                    .borrow()
+                    .applications
+                    .subscribe(application_filter_from_js(filter)?),
+            ),
+        })
+    }
+
+    #[wasm_bindgen(js_name = recordsFanIn)]
+    pub async fn records_fan_in(
+        &self,
+        scan: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        let result = records_fan_in_mesh_state(&self.state, scan, policy).await?;
+        to_js(&result)
+    }
+
     #[wasm_bindgen(js_name = watchGet)]
     pub fn watch_get(
         &self,
@@ -3451,6 +3690,18 @@ impl WasmWebRtcMesh {
             policy,
             PullRequestKind::Records { scan },
         )
+    }
+
+    #[wasm_bindgen(js_name = watchRecordsFanIn)]
+    pub fn watch_records_fan_in(
+        &self,
+        scan: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+        let scan: RecordScan = serde_wasm_bindgen::from_value(scan)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        watch_records_fan_in_mesh_state(&self.state, scan, policy)
     }
 
     #[wasm_bindgen(js_name = watchVectorSearch)]
@@ -3704,16 +3955,19 @@ fn handle_route_message(
     if !decision.deliver {
         return Ok(());
     }
-    handle_route_payload(state, route.from, route.route_id, route.payload)
+    handle_route_payload(state, route)
 }
 
 fn handle_route_payload(
     state: &Rc<RefCell<WebSocketSyncState>>,
-    from: String,
-    route_id: String,
-    payload: RoutePayload,
+    route: RouteEnvelope,
 ) -> std::result::Result<(), JsValue> {
-    let mut pending = vec![payload];
+    let from = route.from;
+    let route_id = route.route_id;
+    let channel = route.channel;
+    let target = route.target;
+    let issued_at_millis = route.issued_at_millis;
+    let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
             RoutePayload::Presence { peer } => {
@@ -3839,6 +4093,26 @@ fn handle_route_payload(
             }
             RoutePayload::WatchEvent { event } => {
                 accept_watch_event_state(state, event)?;
+            }
+            RoutePayload::Application { message } => {
+                let verified_identity = verified_identity_for_peer_state(state, &from);
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
+                {
+                    continue;
+                }
+                let event = ApplicationRouteEvent {
+                    route_id: route_id.clone(),
+                    from: from.clone(),
+                    channel: channel.clone(),
+                    target: target.clone(),
+                    issued_at_millis,
+                    received_at_millis: js_sys::Date::now() as u64,
+                    transport: RouteTransportKind::WebSocket,
+                    verified_identity,
+                    message,
+                };
+                state.borrow().applications.publish(event);
             }
             RoutePayload::PeerExchange { peers } => {
                 for recommendation in peers {
@@ -4318,6 +4592,365 @@ async fn request_remote_result_with_policy_state(
     request_remote_result_state(state, peer_id, request_kind).await
 }
 
+async fn records_fan_in_relay_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    scan: RecordScan,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<crate::RemoteRecordsFanIn, JsValue> {
+    let request_kind = PullRequestKind::Records { scan: scan.clone() };
+    let peers = resolve_relay_peers_for_policy_state(
+        state,
+        &policy,
+        Some("pull_records"),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+    let request_id = next_route_request_id_state(state, "records-fan-in");
+    let mut records = Vec::new();
+    let mut failures = Vec::new();
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match request_remote_result_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::Records { scan: scan.clone() },
+        )
+        .await
+        {
+            Ok(RemoteResult::Records { result }) => records.push(RemotePeerRecords {
+                peer_id: peer.peer_id,
+                transport,
+                result,
+            }),
+            Ok(other) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: format!("expected records result, received {other:?}"),
+            }),
+            Err(error) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+            }),
+        }
+    }
+    Ok(merge_remote_records_fan_in(request_id, records, failures))
+}
+
+fn watch_records_fan_in_relay_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    scan: RecordScan,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+    let request_kind = PullRequestKind::Records { scan: scan.clone() };
+    let peers = resolve_relay_peers_for_policy_state(
+        state,
+        &policy,
+        Some("watch_records"),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+
+    let (sender, receiver) = unbounded();
+    let watches = Rc::new(RefCell::new(Vec::<WasmRemoteWatch>::new()));
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match start_remote_watch_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::Records { scan: scan.clone() },
+        ) {
+            Ok(watch) => {
+                let Some(child_receiver) = watch.inner.as_ref().map(|inner| inner.receiver.clone())
+                else {
+                    continue;
+                };
+                watches.borrow_mut().push(watch);
+                let child_sender = sender.clone();
+                let peer_id = peer.peer_id;
+                spawn_local(async move {
+                    let mut sequence = 0_u64;
+                    while let Ok(message) = child_receiver.recv().await {
+                        let event = match message {
+                            Ok(message) => {
+                                sequence = sequence.saturating_add(1);
+                                RemoteFanInWatchEvent::Update {
+                                    peer_id: peer_id.clone(),
+                                    transport: transport.clone(),
+                                    initial: message.initial,
+                                    sequence,
+                                    result: message.result,
+                                }
+                            }
+                            Err(message) => RemoteFanInWatchEvent::Failure {
+                                peer_id: peer_id.clone(),
+                                transport: transport.clone(),
+                                message,
+                                terminal: false,
+                            },
+                        };
+                        if child_sender.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                let _ = sender.try_send(RemoteFanInWatchEvent::Failure {
+                    peer_id: peer.peer_id,
+                    transport,
+                    message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+                    terminal: true,
+                });
+            }
+        }
+    }
+    let close_sender = sender.clone();
+    Ok(WasmRemoteFanInWatch {
+        inner: Some(WasmRemoteFanInWatchInner {
+            receiver,
+            close: Box::new(move || {
+                for watch in watches.borrow_mut().iter_mut() {
+                    watch.cancel();
+                }
+                close_sender.close();
+            }),
+        }),
+    })
+}
+
+fn publish_application_relay_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    message: ApplicationRouteMessage,
+    target: RouteTarget,
+) -> std::result::Result<RouteEnvelope, JsValue> {
+    let route = state
+        .borrow()
+        .router
+        .wrap_application(message, target, None);
+    send_route_state(state, &route)?;
+    Ok(route)
+}
+
+fn publish_application_mesh_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    message: ApplicationRouteMessage,
+    target: RouteTarget,
+) -> std::result::Result<RouteEnvelope, JsValue> {
+    let route = state
+        .borrow()
+        .router
+        .wrap_application(message, target, None);
+    send_mesh_application_route_state(state, &route)?;
+    Ok(route)
+}
+
+fn send_mesh_application_route_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    route: &RouteEnvelope,
+) -> std::result::Result<(), JsValue> {
+    match &route.target {
+        RouteTarget::Peer(peer_id) => {
+            if send_mesh_route_to_peer(state, peer_id, route).is_ok() {
+                return Ok(());
+            }
+            send_mesh_signal_route_state(state, route)
+        }
+        RouteTarget::Broadcast | RouteTarget::Topic(_) => {
+            let peer_ids = state.borrow().peers.keys().cloned().collect::<Vec<_>>();
+            for peer_id in peer_ids {
+                let _ = send_mesh_route_to_peer(state, &peer_id, route);
+            }
+            send_mesh_signal_route_state(state, route)
+        }
+    }
+}
+
+async fn records_fan_in_mesh_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    scan: RecordScan,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<crate::RemoteRecordsFanIn, JsValue> {
+    let request_kind = PullRequestKind::Records { scan: scan.clone() };
+    let peers = resolve_mesh_peers_for_policy_state(
+        state,
+        &policy,
+        Some("watch_records"),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+
+    let request_id = next_mesh_request_id_state(state, "records-fan-in");
+    let mut records = Vec::new();
+    let mut failures = Vec::new();
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match start_mesh_remote_watch_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::Records { scan: scan.clone() },
+        ) {
+            Ok(mut watch) => {
+                let child_receiver = watch.inner.as_ref().map(|inner| inner.receiver.clone());
+                let message = match child_receiver {
+                    Some(receiver) => receiver.recv().await.ok(),
+                    None => None,
+                };
+                watch.cancel();
+                match message {
+                    Some(Ok(RemoteWatchMessage {
+                        result: RemoteResult::Records { result },
+                        ..
+                    })) => records.push(RemotePeerRecords {
+                        peer_id: peer.peer_id,
+                        transport,
+                        result,
+                    }),
+                    Some(Ok(message)) => failures.push(RemotePeerFailure {
+                        peer_id: peer.peer_id,
+                        transport,
+                        message: format!("expected records result, received {:?}", message.result),
+                    }),
+                    Some(Err(message)) => failures.push(RemotePeerFailure {
+                        peer_id: peer.peer_id,
+                        transport,
+                        message,
+                    }),
+                    None => failures.push(RemotePeerFailure {
+                        peer_id: peer.peer_id,
+                        transport,
+                        message: "watch closed before records result".to_owned(),
+                    }),
+                }
+            }
+            Err(error) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+            }),
+        }
+    }
+    Ok(merge_remote_records_fan_in(request_id, records, failures))
+}
+
+fn watch_records_fan_in_mesh_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    scan: RecordScan,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+    let request_kind = PullRequestKind::Records { scan: scan.clone() };
+    let peers = resolve_mesh_peers_for_policy_state(
+        state,
+        &policy,
+        Some("watch_records"),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+
+    let (sender, receiver) = unbounded();
+    let watches = Rc::new(RefCell::new(Vec::<WasmRemoteWatch>::new()));
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match start_mesh_remote_watch_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::Records { scan: scan.clone() },
+        ) {
+            Ok(watch) => {
+                let Some(child_receiver) = watch.inner.as_ref().map(|inner| inner.receiver.clone())
+                else {
+                    continue;
+                };
+                watches.borrow_mut().push(watch);
+                let child_sender = sender.clone();
+                let peer_id = peer.peer_id;
+                spawn_local(async move {
+                    let mut sequence = 0_u64;
+                    while let Ok(message) = child_receiver.recv().await {
+                        let event = match message {
+                            Ok(message) => {
+                                sequence = sequence.saturating_add(1);
+                                RemoteFanInWatchEvent::Update {
+                                    peer_id: peer_id.clone(),
+                                    transport: transport.clone(),
+                                    initial: message.initial,
+                                    sequence,
+                                    result: message.result,
+                                }
+                            }
+                            Err(message) => RemoteFanInWatchEvent::Failure {
+                                peer_id: peer_id.clone(),
+                                transport: transport.clone(),
+                                message,
+                                terminal: false,
+                            },
+                        };
+                        if child_sender.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                let _ = sender.try_send(RemoteFanInWatchEvent::Failure {
+                    peer_id: peer.peer_id,
+                    transport,
+                    message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+                    terminal: true,
+                });
+            }
+        }
+    }
+    let close_sender = sender.clone();
+    Ok(WasmRemoteFanInWatch {
+        inner: Some(WasmRemoteFanInWatchInner {
+            receiver,
+            close: Box::new(move || {
+                for watch in watches.borrow_mut().iter_mut() {
+                    watch.cancel();
+                }
+                close_sender.close();
+            }),
+        }),
+    })
+}
+
+fn next_route_request_id_state(state: &Rc<RefCell<WebSocketSyncState>>, purpose: &str) -> String {
+    let mut borrowed = state.borrow_mut();
+    borrowed.next_message_seq = borrowed.next_message_seq.saturating_add(1);
+    format!(
+        "{}/{}/{:x}",
+        borrowed.router.peer_id(),
+        purpose,
+        borrowed.next_message_seq
+    )
+}
+
+fn next_mesh_request_id_state(state: &Rc<RefCell<WebRtcMeshState>>, purpose: &str) -> String {
+    let mut borrowed = state.borrow_mut();
+    borrowed.next_message_seq = borrowed.next_message_seq.saturating_add(1);
+    format!(
+        "{}/{}/{:x}",
+        borrowed.peer_id, purpose, borrowed.next_message_seq
+    )
+}
+
 fn start_remote_watch_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
     target_peer_id: String,
@@ -4390,6 +5023,56 @@ fn start_remote_watch_with_policy_state(
     start_remote_watch_state(state, peer_id, request_kind)
 }
 
+fn application_message_from_js(
+    message: JsValue,
+) -> std::result::Result<ApplicationRouteMessage, JsValue> {
+    serde_wasm_bindgen::from_value(message).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn application_filter_from_js(
+    filter: Option<JsValue>,
+) -> std::result::Result<ApplicationRouteFilter, JsValue> {
+    match filter {
+        Some(value) if !value.is_undefined() && !value.is_null() => {
+            serde_wasm_bindgen::from_value(value)
+                .map_err(|error| JsValue::from_str(&error.to_string()))
+        }
+        _ => Ok(ApplicationRouteFilter::default()),
+    }
+}
+
+fn route_target_from_optional_js(
+    target: Option<JsValue>,
+) -> std::result::Result<RouteTarget, JsValue> {
+    match target {
+        Some(value) if !value.is_undefined() && !value.is_null() => {
+            serde_wasm_bindgen::from_value(value)
+                .map_err(|error| JsValue::from_str(&error.to_string()))
+        }
+        _ => Ok(RouteTarget::Broadcast),
+    }
+}
+
+fn json_value_from_js(value: JsValue) -> std::result::Result<JsonValue, JsValue> {
+    if value.is_undefined() {
+        Ok(JsonValue::Null)
+    } else {
+        serde_wasm_bindgen::from_value(value).map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+}
+
+fn metadata_map_from_js(
+    metadata: Option<JsValue>,
+) -> std::result::Result<BTreeMap<String, JsonValue>, JsValue> {
+    match metadata {
+        Some(value) if !value.is_undefined() && !value.is_null() => {
+            serde_wasm_bindgen::from_value(value)
+                .map_err(|error| JsValue::from_str(&error.to_string()))
+        }
+        _ => Ok(BTreeMap::new()),
+    }
+}
+
 fn remote_policy_from_js(
     policy: Option<JsValue>,
 ) -> std::result::Result<RemoteInterestPolicy, JsValue> {
@@ -4408,49 +5091,71 @@ fn select_relay_peer_for_policy_state(
     capability: Option<&str>,
     request: Option<&PullRequestKind>,
 ) -> std::result::Result<String, JsValue> {
-    if let Some(peer_ids) = explicit_policy_peers(policy)? {
-        if peer_ids.is_empty() {
-            return Err(JsValue::from_str(
-                "remote interest policy did not include any peer ids",
-            ));
-        }
-        if !policy.require_capability {
-            return Ok(peer_ids[0].clone());
-        }
-        let borrowed = state.borrow();
-        return peer_ids
-            .into_iter()
-            .find(|peer_id| {
-                borrowed.router.known_peers().iter().any(|peer| {
-                    peer.peer_id == *peer_id && peer_supports_request(peer, capability, request)
-                })
-            })
-            .ok_or_else(|| {
-                JsValue::from_str(&format!(
-                    "no requested peer advertises required capability `{}`",
-                    capability.unwrap_or("unknown")
-                ))
-            });
-    }
-
-    let mut candidates = relay_peer_candidates_state(state);
-    prefer_vector_request_candidates(&mut candidates, request);
-    if let Some(peer) = candidates
-        .iter()
-        .find(|peer| peer_supports_request(peer, capability, request))
+    if let Some(peer) = resolve_relay_peers_for_policy_state(state, policy, capability, request)?
+        .into_iter()
+        .next()
     {
-        return Ok(peer.peer_id.clone());
-    }
-    if !policy.require_capability {
-        if let Some(peer) = candidates.first() {
-            return Ok(peer.peer_id.clone());
-        }
+        return Ok(peer.peer_id);
     }
     let message = match capability {
         Some(capability) => format!("no connected peer advertises capability `{capability}`"),
         None => "no connected peer is available for remote interest".to_owned(),
     };
     Err(JsValue::from_str(&message))
+}
+
+fn resolve_relay_peers_for_policy_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    policy: &RemoteInterestPolicy,
+    capability: Option<&str>,
+    request: Option<&PullRequestKind>,
+) -> std::result::Result<Vec<crate::PeerPresence>, JsValue> {
+    if let Some(peer_ids) = explicit_policy_peers(policy)? {
+        if peer_ids.is_empty() {
+            return Err(JsValue::from_str(
+                "remote interest policy did not include any peer ids",
+            ));
+        }
+        let borrowed = state.borrow();
+        let known = borrowed.router.known_peers();
+        let mut peers = Vec::new();
+        for peer_id in peer_ids {
+            if let Some(peer) = known.iter().find(|peer| peer.peer_id == peer_id).cloned() {
+                if !policy.require_capability || peer_supports_request(&peer, capability, request) {
+                    peers.push(peer);
+                }
+            } else if !policy.require_capability {
+                peers.push(crate::PeerPresence {
+                    peer_id,
+                    replica_id: String::new(),
+                    transport: "websocket".to_owned(),
+                    identity: None,
+                    capabilities: Vec::new(),
+                    topics: Vec::new(),
+                    metadata: BTreeMap::new(),
+                });
+            }
+        }
+        if policy.require_capability && peers.is_empty() {
+            return Err(JsValue::from_str(&format!(
+                "no requested peer advertises required capability `{}`",
+                capability.unwrap_or("unknown")
+            )));
+        }
+        return Ok(peers);
+    }
+
+    let mut candidates = relay_peer_candidates_state(state);
+    prefer_vector_request_candidates(&mut candidates, request);
+    if policy.require_capability {
+        candidates.retain(|peer| peer_supports_request(peer, capability, request));
+    } else if capability.is_some() {
+        candidates.sort_by(|left, right| {
+            peer_supports_request(right, capability, request)
+                .cmp(&peer_supports_request(left, capability, request))
+        });
+    }
+    Ok(candidates)
 }
 
 fn explicit_policy_peers(
@@ -4511,6 +5216,32 @@ fn relay_peer_candidates_state(
         candidates.retain(|peer| borrowed.verified_identities.contains_key(&peer.peer_id));
     }
     candidates
+}
+
+fn route_transport_for_peer(peer: &crate::PeerPresence) -> RouteTransportKind {
+    match peer.transport.as_str() {
+        "moq" => RouteTransportKind::Moq,
+        "webrtc" => RouteTransportKind::WebRtc,
+        "broadcast_channel" => RouteTransportKind::BroadcastChannel,
+        "in_memory" => RouteTransportKind::InMemory,
+        _ => RouteTransportKind::WebSocket,
+    }
+}
+
+fn mesh_signaling_transport_kind_state(state: &Rc<RefCell<WebRtcMeshState>>) -> RouteTransportKind {
+    match &state.borrow().signaling {
+        MeshSignalingTransport::BroadcastChannel(_) => RouteTransportKind::BroadcastChannel,
+        MeshSignalingTransport::Relay { .. } => RouteTransportKind::WebSocket,
+        MeshSignalingTransport::External { mode, .. } => {
+            if mode.contains("moq") {
+                RouteTransportKind::Moq
+            } else if mode.contains("websocket") || mode.contains("relay") {
+                RouteTransportKind::WebSocket
+            } else {
+                RouteTransportKind::InMemory
+            }
+        }
+    }
 }
 
 fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>) -> bool {
@@ -4592,6 +5323,7 @@ fn cancel_remote_watch_state(state: &Rc<RefCell<WebSocketSyncState>>, watch_id: 
     let Some(watch) = state.borrow_mut().outgoing_watches.remove(watch_id) else {
         return;
     };
+    watch.sender.close();
     let _ = send_watch_request_state(
         state,
         &watch.target_peer_id,
@@ -5027,52 +5759,72 @@ fn select_mesh_peer_for_policy_state(
     capability: Option<&str>,
     request: Option<&PullRequestKind>,
 ) -> std::result::Result<String, JsValue> {
-    if let Some(peer_ids) = explicit_policy_peers(policy)? {
-        if peer_ids.is_empty() {
-            return Err(JsValue::from_str(
-                "remote interest policy did not include any peer ids",
-            ));
-        }
-        if !policy.require_capability {
-            return Ok(peer_ids[0].clone());
-        }
-        let borrowed = state.borrow();
-        return peer_ids
-            .into_iter()
-            .find(|peer_id| {
-                borrowed
-                    .recommendations
-                    .get(peer_id)
-                    .is_some_and(|recommendation| {
-                        peer_supports_request(&recommendation.peer, capability, request)
-                    })
-            })
-            .ok_or_else(|| {
-                JsValue::from_str(&format!(
-                    "no requested peer advertises required capability `{}`",
-                    capability.unwrap_or("unknown")
-                ))
-            });
-    }
-
-    let mut candidates = mesh_peer_candidates_state(state);
-    prefer_vector_request_candidates(&mut candidates, request);
-    if let Some(peer) = candidates
-        .iter()
-        .find(|peer| peer_supports_request(peer, capability, request))
+    if let Some(peer) = resolve_mesh_peers_for_policy_state(state, policy, capability, request)?
+        .into_iter()
+        .next()
     {
-        return Ok(peer.peer_id.clone());
-    }
-    if !policy.require_capability {
-        if let Some(peer) = candidates.first() {
-            return Ok(peer.peer_id.clone());
-        }
+        return Ok(peer.peer_id);
     }
     let message = match capability {
         Some(capability) => format!("no open mesh peer advertises capability `{capability}`"),
         None => "no open mesh peer is available for remote interest".to_owned(),
     };
     Err(JsValue::from_str(&message))
+}
+
+fn resolve_mesh_peers_for_policy_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    policy: &RemoteInterestPolicy,
+    capability: Option<&str>,
+    request: Option<&PullRequestKind>,
+) -> std::result::Result<Vec<crate::PeerPresence>, JsValue> {
+    if let Some(peer_ids) = explicit_policy_peers(policy)? {
+        if peer_ids.is_empty() {
+            return Err(JsValue::from_str(
+                "remote interest policy did not include any peer ids",
+            ));
+        }
+        let borrowed = state.borrow();
+        let mut peers = Vec::new();
+        for peer_id in peer_ids {
+            if let Some(recommendation) = borrowed.recommendations.get(&peer_id) {
+                if !policy.require_capability
+                    || peer_supports_request(&recommendation.peer, capability, request)
+                {
+                    peers.push(recommendation.peer.clone());
+                }
+            } else if !policy.require_capability {
+                peers.push(crate::PeerPresence {
+                    peer_id,
+                    replica_id: String::new(),
+                    transport: "webrtc".to_owned(),
+                    identity: None,
+                    capabilities: Vec::new(),
+                    topics: Vec::new(),
+                    metadata: BTreeMap::new(),
+                });
+            }
+        }
+        if policy.require_capability && peers.is_empty() {
+            return Err(JsValue::from_str(&format!(
+                "no requested peer advertises required capability `{}`",
+                capability.unwrap_or("unknown")
+            )));
+        }
+        return Ok(peers);
+    }
+
+    let mut candidates = mesh_peer_candidates_state(state);
+    prefer_vector_request_candidates(&mut candidates, request);
+    if policy.require_capability {
+        candidates.retain(|peer| peer_supports_request(peer, capability, request));
+    } else if capability.is_some() {
+        candidates.sort_by(|left, right| {
+            peer_supports_request(right, capability, request)
+                .cmp(&peer_supports_request(left, capability, request))
+        });
+    }
+    Ok(candidates)
 }
 
 fn mesh_peer_candidates_state(state: &Rc<RefCell<WebRtcMeshState>>) -> Vec<crate::PeerPresence> {
@@ -5134,6 +5886,7 @@ fn cancel_mesh_remote_watch_state(state: &Rc<RefCell<WebRtcMeshState>>, watch_id
     let Some(watch) = state.borrow_mut().outgoing_watches.remove(watch_id) else {
         return;
     };
+    watch.sender.close();
     let _ = send_mesh_watch_request_state(
         state,
         &watch.target_peer_id,
@@ -5931,6 +6684,7 @@ fn send_mesh_presence_state(
             "watch_vector_search".to_owned(),
             "watch_node".to_owned(),
             "watch_snapshot".to_owned(),
+            "application_routes".to_owned(),
         ];
         capabilities.extend(borrowed.db.vector_presence_capabilities());
         let mut route = borrowed.router.presence(
@@ -5975,6 +6729,12 @@ fn handle_mesh_signaling_route(
     }
 
     let room = state.borrow().room.clone();
+    let from = route.from;
+    let route_id = route.route_id;
+    let channel = route.channel;
+    let target = route.target;
+    let issued_at_millis = route.issued_at_millis;
+    let transport = mesh_signaling_transport_kind_state(state);
     let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
@@ -6055,6 +6815,26 @@ fn handle_mesh_signaling_route(
                         },
                     )?;
                 }
+            }
+            RoutePayload::Application { message } => {
+                let verified_identity = verified_mesh_identity_for_peer_state(state, &from);
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
+                {
+                    continue;
+                }
+                let event = ApplicationRouteEvent {
+                    route_id: route_id.clone(),
+                    from: from.clone(),
+                    channel: channel.clone(),
+                    target: target.clone(),
+                    issued_at_millis,
+                    received_at_millis: js_sys::Date::now() as u64,
+                    transport: transport.clone(),
+                    verified_identity,
+                    message,
+                };
+                state.borrow().applications.publish(event);
             }
             RoutePayload::Batch { items } => {
                 for item in items.into_iter().rev() {
@@ -6913,6 +7693,11 @@ fn handle_mesh_route_message(
     if !decision.deliver {
         return Ok(());
     }
+    let from = route.from;
+    let route_id = route.route_id;
+    let channel = route.channel;
+    let target = route.target;
+    let issued_at_millis = route.issued_at_millis;
     let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
@@ -7042,6 +7827,26 @@ fn handle_mesh_route_message(
             }
             RoutePayload::WatchEvent { event } => {
                 accept_mesh_watch_event_state(state, event)?;
+            }
+            RoutePayload::Application { message } => {
+                let verified_identity = verified_mesh_identity_for_peer_state(state, remote_peer);
+                if state.borrow().session_auth.require_authenticated_peers
+                    && verified_identity.is_none()
+                {
+                    continue;
+                }
+                let event = ApplicationRouteEvent {
+                    route_id: route_id.clone(),
+                    from: from.clone(),
+                    channel: channel.clone(),
+                    target: target.clone(),
+                    issued_at_millis,
+                    received_at_millis: js_sys::Date::now() as u64,
+                    transport: RouteTransportKind::WebRtc,
+                    verified_identity,
+                    message,
+                };
+                state.borrow().applications.publish(event);
             }
             RoutePayload::PeerExchange { peers } => {
                 for recommendation in peers {

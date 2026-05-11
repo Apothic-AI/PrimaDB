@@ -669,4 +669,43 @@ mod tests {
             other => panic!("unexpected offline payload: {other:?}"),
         }
     }
+
+    #[test]
+    fn in_memory_application_routes_deliver_to_targeted_peers() {
+        let hub = InMemoryRouteHub::new();
+        let a = hub.connect();
+        let b = hub.connect();
+        let c = hub.connect();
+        let router_a = router("a", "room");
+        let router_b = router("b", "room");
+        let router_c = router("c", "room");
+
+        a.send(presence(&router_a, "room")).unwrap();
+        b.send(presence(&router_b, "room")).unwrap();
+        c.send(presence(&router_c, "room")).unwrap();
+        drain(&a);
+        drain(&b);
+        drain(&c);
+
+        let route = router_a.wrap_application(
+            crate::ApplicationRouteMessage::new(
+                "starla.mesh",
+                "channel.v1",
+                Some("trusted".to_owned()),
+                serde_json::json!({"body": "hello"}),
+                BTreeMap::new(),
+            ),
+            RouteTarget::Peer("b".to_owned()),
+            None,
+        );
+        a.send(route.clone()).unwrap();
+
+        let delivered = b.try_recv().expect("target peer should receive app route");
+        assert_eq!(delivered.route_id, route.route_id);
+        assert!(matches!(
+            delivered.payload,
+            RoutePayload::Application { .. }
+        ));
+        assert!(c.try_recv().is_none());
+    }
 }

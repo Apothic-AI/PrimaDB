@@ -35,6 +35,12 @@ The non-`Remote` helpers select a connected/recommended peer automatically. Pass
 `RemoteInterestPolicy` only when the caller needs to constrain selection; the explicit
 `watchRemote*` / `remote*` methods remain available for concrete peer targeting.
 
+Relay and mesh handles also expose RouteEnvelope-level application traffic through
+`publishApplication(...)`, `sendApplication(...)`, and `subscribeApplications(...)`. Use these for
+trusted application protocols without reaching into WebSocket, WebRTC, or MoQ internals. Use
+`recordsFanIn(...)` and `watchRecordsFanIn(...)` when a caller needs source-tagged record results
+from all policy-matching reachable peers instead of single-peer ambient selection.
+
 The browser bindings also expose `db.scope(...)`, `db.transaction(...)`, and
 `scope.transaction(...)` for step-based local transactions and strict-scope proposal workflows.
 Relay sync clients can submit strict-scope transactions to an authority peer with

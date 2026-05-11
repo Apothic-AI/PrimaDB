@@ -1,3 +1,4 @@
+mod app_route;
 #[cfg(feature = "crypto")]
 mod auth;
 mod binary;
@@ -48,6 +49,10 @@ mod wasm;
 #[cfg(target_arch = "wasm32")]
 mod wasm_opfs;
 
+pub use app_route::{
+    ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
+    ApplicationRouteSubscription,
+};
 #[cfg(feature = "crypto")]
 pub use auth::{
     AuthClaims, AuthenticatedSyncFrame, DataCertificate, EncryptedSyncFrame,
@@ -144,10 +149,12 @@ pub use storage::{MemoryStorageAdapter, StorageAdapter, StorageReport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{SnapshotFileAdapter, SnapshotLogFileAdapter};
 pub use sync::{
-    PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemoteInterestPolicy,
-    RemoteInterestTarget, RemotePath, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription,
-    SyncEnvelope, SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response,
-    error_watch_event, stable_content_hash,
+    PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemoteFanInWatch,
+    RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
+    RemotePeerFailure, RemotePeerRecords, RemoteRecordConflict, RemoteRecordConflictSource,
+    RemoteRecordsFanIn, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, SyncEnvelope,
+    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
+    merge_remote_records_fan_in, stable_content_hash,
 };
 pub use transport::{
     InMemoryRouteHub, InMemoryRouteSession, RouteRelayCore, RouteRelayForward, RouteSessionInfo,

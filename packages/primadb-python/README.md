@@ -20,6 +20,8 @@ Current surface:
 - native WebRTC mesh through `connect_mesh(...)`, including disconnected startup with background relay retry
 - peer-agnostic relay pulls through `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)`, with optional `RemoteInterestPolicy` constraints
 - peer-agnostic relay/mesh watches through `watch_get(...)`, `watch_map(...)`, `watch_query(...)`, `watch_lex(...)`, `watch_records(...)`, `watch_node(...)`, and `watch_snapshot(...)`
+- application RouteEnvelope payloads through `publish_application(...)`, `send_application(...)`, and `subscribe_applications(...)`
+- source-tagged multi-peer record fan-in through `records_fan_in(...)` and `watch_records_fan_in(...)`
 - explicit peer-targeted pulls and watches through `remote_get(...)`, `remote_query(...)`, `remote_lex(...)`, `remote_records(...)`, `remote_node(...)`, `remote_snapshot(...)`, `watch_remote_get(...)`, `watch_remote_map(...)`, `watch_remote_query(...)`, `watch_remote_lex(...)`, `watch_remote_records(...)`, `watch_remote_node(...)`, and `watch_remote_snapshot(...)`
 - authenticated relay/mesh session identity through `generate_identity()`, `authenticate_local_user(...)`, `sessionAuth` config, and `context["verifiedIdentity"]`
 - Argon2id password-derived secret-box keys through `derive_password_key(...)`, usable with `set_snapshot_encryption_key(...)` and `set_transport_encryption_key(...)`

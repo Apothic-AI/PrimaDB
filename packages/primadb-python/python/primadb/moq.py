@@ -92,6 +92,38 @@ def _route_targets_peer(route: dict[str, Any], peer_ids: set[str], channel: str)
     return False
 
 
+def _is_application_message(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("namespace"), str)
+        and isinstance(value.get("protocol"), str)
+        and "body" in value
+    )
+
+
+def _normalize_application_message(message: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "namespace": message["namespace"],
+        "protocol": message["protocol"],
+        "topic": message.get("topic"),
+        "body": message.get("body"),
+        "metadata": message.get("metadata", {}),
+    }
+
+
+def _application_matches_filter(event: dict[str, Any], filter: dict[str, Any]) -> bool:
+    message = event.get("message", {})
+    return (
+        (filter.get("namespace") is None or filter.get("namespace") == message.get("namespace"))
+        and (filter.get("protocol") is None or filter.get("protocol") == message.get("protocol"))
+        and (filter.get("topic") is None or filter.get("topic") == message.get("topic"))
+    )
+
+
+def _trim_queue(queue: list[Any], max_size: int = 1024) -> None:
+    del queue[: max(0, len(queue) - max_size)]
+
+
 @dataclass
 class PrimadbMoqFrame:
     path: str
@@ -101,6 +133,40 @@ class PrimadbMoqFrame:
 
     def json(self) -> Any:
         return json.loads(self.payload.decode("utf-8"))
+
+
+class PrimadbApplicationRouteSubscription:
+    def __init__(self, filter: dict[str, Any], on_close: Callable[[], None]) -> None:
+        self.filter = filter
+        self._on_close = on_close
+        self._queue: list[dict[str, Any]] = []
+        self._closed = False
+
+    def next(self) -> Optional[dict[str, Any]]:
+        return self.try_next()
+
+    def try_next(self) -> Optional[dict[str, Any]]:
+        if not self._queue:
+            return None
+        return self._queue.pop(0)
+
+    def drain(self) -> list[dict[str, Any]]:
+        events = self._queue
+        self._queue = []
+        return events
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._queue = []
+        self._on_close()
+
+    def enqueue(self, event: dict[str, Any]) -> None:
+        if self._closed or not _application_matches_filter(event, self.filter):
+            return
+        self._queue.append(event)
+        _trim_queue(self._queue)
 
 
 class PrimadbMoqSession:
@@ -133,6 +199,8 @@ class PrimadbMoqSession:
         self._known_peers: dict[str, dict[str, Any]] = {}
         self._recommendations: dict[str, dict[str, Any]] = {}
         self._accepted_peer_ids: set[str] = {self.peer_id}
+        self._application_subscriptions: list[PrimadbApplicationRouteSubscription] = []
+        self._application_events: list[dict[str, Any]] = []
         self._closed = False
 
     def subscribe_from(self, publisher: "PrimadbMoqSession") -> None:
@@ -163,6 +231,72 @@ class PrimadbMoqSession:
 
     def recommended_peers(self) -> list[dict[str, Any]]:
         return list(self._recommendations.values())
+
+    def publish_application(self, message: dict[str, Any], target: Optional[dict[str, Any]] = None) -> int:
+        return self.send_route(
+            self.create_route(
+                {
+                    "kind": "application",
+                    "message": _normalize_application_message(message),
+                },
+                target,
+            )
+        )
+
+    def send_application(
+        self,
+        namespace: str,
+        protocol: str,
+        topic: Optional[str],
+        body: Any,
+        metadata: Optional[dict[str, Any]] = None,
+        target: Optional[dict[str, Any]] = None,
+    ) -> int:
+        return self.publish_application(
+            {
+                "namespace": namespace,
+                "protocol": protocol,
+                "topic": topic,
+                "body": body,
+                "metadata": metadata or {},
+            },
+            target,
+        )
+
+    def subscribe_applications(
+        self, filter: Optional[dict[str, Any]] = None
+    ) -> PrimadbApplicationRouteSubscription:
+        subscription: PrimadbApplicationRouteSubscription
+
+        def on_close() -> None:
+            if subscription in self._application_subscriptions:
+                self._application_subscriptions.remove(subscription)
+
+        subscription = PrimadbApplicationRouteSubscription(filter or {}, on_close)
+        self._application_subscriptions.append(subscription)
+        return subscription
+
+    def next_application(self, filter: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        return self.try_next_application(filter)
+
+    def try_next_application(self, filter: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        filter = filter or {}
+        for index, event in enumerate(self._application_events):
+            if _application_matches_filter(event, filter):
+                return self._application_events.pop(index)
+        return None
+
+    def drain_applications(self, filter: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+        filter = filter or {}
+        drained: list[dict[str, Any]] = []
+        retained: list[dict[str, Any]] = []
+        for event in self._application_events:
+            if _application_matches_filter(event, filter):
+                drained.append(event)
+            else:
+                retained.append(event)
+        self._application_events = retained
+        return drained
 
     def create_route(
         self,
@@ -214,7 +348,7 @@ class PrimadbMoqSession:
                         "peer_id": self.peer_id,
                         "replica_id": self.db.replica_id(),
                         "transport": "moq",
-                        "capabilities": ["sync", "ack", "routing", "batch", "peer_exchange"],
+                        "capabilities": ["sync", "ack", "routing", "batch", "peer_exchange", "application_routes"],
                         "topics": [self.channel],
                         "metadata": {
                             "moq_path": self.path,
@@ -282,15 +416,30 @@ class PrimadbMoqSession:
             self._seen_routes.pop()
         for handler in list(self._route_handlers):
             handler(route)
-        return self._accept_route_payload(route["from"], route["route_id"], route["payload"])
+        return self._accept_route_payload(route, route["payload"])
 
-    def _accept_route_payload(self, route_from: str, route_id: str, payload: dict[str, Any]) -> int:
+    def _accept_route_payload(self, route: dict[str, Any], payload: dict[str, Any]) -> int:
         if payload.get("kind") == "batch" and isinstance(payload.get("items"), list):
             total = 0
             for item in payload["items"]:
                 if isinstance(item, dict):
-                    total += self._accept_route_payload(route_from, route_id, item)
+                    total += self._accept_route_payload(route, item)
             return total
+        if payload.get("kind") == "application" and _is_application_message(payload.get("message")):
+            self._enqueue_application_route(
+                {
+                    "routeId": route["route_id"],
+                    "from": route["from"],
+                    "channel": route["channel"],
+                    "target": route["target"],
+                    "issuedAtMillis": route["issued_at_millis"],
+                    "receivedAtMillis": _now_millis(),
+                    "transport": "moq",
+                    "verifiedIdentity": None,
+                    "message": _normalize_application_message(payload["message"]),
+                }
+            )
+            return 0
         if payload.get("kind") == "presence" and isinstance(payload.get("peer"), dict):
             peer = payload["peer"]
             if peer.get("metadata", {}).get("state") == "offline":
@@ -324,15 +473,24 @@ class PrimadbMoqSession:
                         "applied": applied,
                     },
                 },
-                {"kind": "peer", "value": route_from},
-                route_id,
+                {"kind": "peer", "value": route["from"]},
+                route["route_id"],
             )
         )
         return applied
 
+    def _enqueue_application_route(self, event: dict[str, Any]) -> None:
+        self._application_events.append(event)
+        _trim_queue(self._application_events)
+        for subscription in list(self._application_subscriptions):
+            subscription.enqueue(event)
+
     def close(self) -> None:
         self._closed = True
         self._subscribers.clear()
+        self._application_events.clear()
+        for subscription in list(self._application_subscriptions):
+            subscription.close()
 
 
 class PrimadbMoqLoopback:

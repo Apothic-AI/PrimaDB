@@ -57,8 +57,9 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Async IndexedDB save/load helpers in the WASM bindings.
 - Automatic IndexedDB persistence hook in the WASM bindings.
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
-- Routed transport envelopes with presence, signaling, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
+- Routed transport envelopes with presence, signaling, application payloads, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
 - Remote live watches for `get` / `map` / `query` / `lex` / `records` / `node` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
+- Multi-peer `records_fan_in(...)` / `watch_records_fan_in(...)` APIs with source peer metadata, partial failures, deterministic merged records, and conflict reports.
 - Narrow watch invalidation based on touched logical paths, plus burst coalescing in relay/mesh watch refresh loops so unrelated writes do not fan out through every active watch.
 - Browser WebRTC mesh sync with both local `BroadcastChannel` signaling and relay-backed signaling for cross-browser peers.
 - Native WebRTC mesh starts offline, keeps local reads/writes/durable state available, and retries relay signaling in the background until a relay peer appears.

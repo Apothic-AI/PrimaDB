@@ -6,6 +6,11 @@ Expose RouteEnvelope-level primitives that let Starla move trusted mesh-channel,
 trust/share/profile/vault proposal, and future memory-coordination traffic through
 PrimaDB without raw transport handles, while adding true multi-peer remote record fan-in.
 
+## Implementation Status
+
+Implemented in the current sprint branch. Remaining work is limited to live transport smoke
+validation and generated package artifacts, both tracked in the companion progress document.
+
 ## Current Evidence
 
 - `RouteEnvelope`, `RouteTarget`, and `RoutePayload` are public, but `RoutePayload` has no

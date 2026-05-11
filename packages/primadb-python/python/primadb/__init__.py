@@ -1,7 +1,9 @@
 from ._native import (
+    ApplicationRouteSubscription,
     Chain,
     Primadb,
     RelayServer,
+    RemoteFanInWatch,
     RemoteWatch,
     Scope,
     Subscription,
@@ -10,15 +12,24 @@ from ._native import (
     derive_password_key,
     generate_identity,
 )
-from .moq import PrimadbMoqFrame, PrimadbMoqLoopback, PrimadbMoqSession, create_primadb_moq_loopback
+from .moq import (
+    PrimadbApplicationRouteSubscription as PrimadbMoqApplicationRouteSubscription,
+    PrimadbMoqFrame,
+    PrimadbMoqLoopback,
+    PrimadbMoqSession,
+    create_primadb_moq_loopback,
+)
 
 __all__ = [
     "Chain",
     "Primadb",
     "PrimadbMoqFrame",
     "PrimadbMoqLoopback",
+    "PrimadbMoqApplicationRouteSubscription",
     "PrimadbMoqSession",
     "RelayServer",
+    "ApplicationRouteSubscription",
+    "RemoteFanInWatch",
     "RemoteWatch",
     "Scope",
     "Subscription",

@@ -1,4 +1,5 @@
 use crate::DatabaseSnapshot;
+use crate::app_route::ApplicationRouteMessage;
 use crate::clock::now_millis;
 use crate::session_auth::{AuthChallenge, AuthResponse, PresenceIdentity};
 use crate::sync::{PullRequest, PullResponse, WatchEvent, WatchRequest, stable_content_hash};
@@ -44,6 +45,9 @@ pub struct PeerRecommendation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteBatchItem {
+    Application {
+        message: ApplicationRouteMessage,
+    },
     Sync {
         encoding: String,
         payload: JsonValue,
@@ -88,6 +92,9 @@ pub enum RouteBatchItem {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RoutePayload {
+    Application {
+        message: ApplicationRouteMessage,
+    },
     Sync {
         encoding: String,
         payload: JsonValue,
@@ -276,6 +283,19 @@ impl Router {
             },
             target,
             None,
+        )
+    }
+
+    pub fn wrap_application(
+        &self,
+        message: ApplicationRouteMessage,
+        target: RouteTarget,
+        reply_to: impl Into<Option<String>>,
+    ) -> RouteEnvelope {
+        self.wrap_payload(
+            RoutePayload::Application { message },
+            target,
+            reply_to.into(),
         )
     }
 
@@ -506,6 +526,7 @@ impl Router {
 impl RoutePayload {
     pub fn from_batch_item(item: RouteBatchItem) -> Self {
         match item {
+            RouteBatchItem::Application { message } => Self::Application { message },
             RouteBatchItem::Sync { encoding, payload } => Self::Sync { encoding, payload },
             RouteBatchItem::Presence { peer } => Self::Presence { peer },
             RouteBatchItem::Signal { room, payload } => Self::Signal { room, payload },
@@ -561,7 +582,11 @@ fn trim_seen_cache(seen: &mut BTreeMap<String, u64>, max_seen_routes: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerPresence, RouteEnvelope, RoutePayload, RouteTarget, Router, RouterConfig};
+    use super::{
+        PeerPresence, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, Router,
+        RouterConfig,
+    };
+    use crate::ApplicationRouteMessage;
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -645,5 +670,40 @@ mod tests {
 
         router.accept(offline);
         assert!(router.known_peers().is_empty());
+    }
+
+    #[test]
+    fn application_payload_round_trips_and_converts_from_batch() {
+        let router = Router::new(RouterConfig::new("peer-a"));
+        let message = ApplicationRouteMessage::new(
+            "starla.mesh",
+            "trust.v1",
+            Some("proposal".to_owned()),
+            json!({"proposalId": "p1"}),
+            BTreeMap::from([("priority".to_owned(), json!("high"))]),
+        );
+
+        let route = router.wrap_application(
+            message.clone(),
+            RouteTarget::Topic("starla.mesh".to_owned()),
+            None,
+        );
+        assert!(
+            route
+                .content_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        let encoded = serde_json::to_string(&route).unwrap();
+        let decoded: RouteEnvelope = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded.payload,
+            RoutePayload::Application {
+                message: message.clone()
+            }
+        );
+
+        let converted = RoutePayload::from_batch_item(RouteBatchItem::Application { message });
+        assert!(matches!(converted, RoutePayload::Application { .. }));
     }
 }

@@ -24,6 +24,7 @@ export type PrimadbRouteTarget =
   | { kind: "topic"; value: string };
 
 export type PrimadbRoutePayload =
+  | { kind: "application"; message: PrimadbApplicationRouteMessage }
   | { kind: "sync"; encoding: string; payload: unknown }
   | { kind: "presence"; peer: PrimadbPeerPresence }
   | { kind: "peer_exchange"; peers: PrimadbPeerRecommendation[] }
@@ -31,6 +32,7 @@ export type PrimadbRoutePayload =
   | { kind: string; [key: string]: unknown };
 
 export type PrimadbRouteBatchItem =
+  | { kind: "application"; message: PrimadbApplicationRouteMessage }
   | { kind: "sync"; encoding: string; payload: unknown }
   | { kind: "presence"; peer: PrimadbPeerPresence }
   | { kind: "peer_exchange"; peers: PrimadbPeerRecommendation[] }
@@ -75,6 +77,32 @@ export interface PrimadbMoqRoutePayload {
 }
 
 export type PrimadbRouteHandler = (route: PrimadbRouteEnvelope) => void;
+
+export interface PrimadbApplicationRouteMessage {
+  namespace: string;
+  protocol: string;
+  topic?: string | null;
+  body: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PrimadbApplicationRouteEvent {
+  routeId: string;
+  from: string;
+  channel: string;
+  target: PrimadbRouteTarget;
+  issuedAtMillis: number;
+  receivedAtMillis: number;
+  transport: "moq";
+  verifiedIdentity: null;
+  message: PrimadbApplicationRouteMessage;
+}
+
+export interface PrimadbApplicationRouteFilter {
+  namespace?: string | null;
+  protocol?: string | null;
+  topic?: string | null;
+}
 
 export interface PrimadbMoqSessionOptions {
   path: string;
@@ -426,6 +454,66 @@ export function connectMeshViaMoqSession(
   };
 }
 
+export class PrimadbApplicationRouteSubscription {
+  #queue: PrimadbApplicationRouteEvent[] = [];
+  #waiters: Array<(event: PrimadbApplicationRouteEvent | null) => void> = [];
+  #closed = false;
+  readonly filter: PrimadbApplicationRouteFilter;
+  readonly #onClose: () => void;
+
+  constructor(filter: PrimadbApplicationRouteFilter, onClose: () => void) {
+    this.filter = filter;
+    this.#onClose = onClose;
+  }
+
+  next(): Promise<PrimadbApplicationRouteEvent | null> {
+    if (this.#queue.length > 0) {
+      return Promise.resolve(this.#queue.shift() ?? null);
+    }
+    if (this.#closed) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      this.#waiters.push(resolve);
+    });
+  }
+
+  tryNext(): PrimadbApplicationRouteEvent | null {
+    return this.#queue.shift() ?? null;
+  }
+
+  drain(): PrimadbApplicationRouteEvent[] {
+    const events = this.#queue;
+    this.#queue = [];
+    return events;
+  }
+
+  close(): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    this.#onClose();
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter(null);
+    }
+    this.#queue = [];
+  }
+
+  enqueue(event: PrimadbApplicationRouteEvent): void {
+    if (this.#closed || !applicationRouteMatchesFilter(event, this.filter)) {
+      return;
+    }
+    const waiter = this.#waiters.shift();
+    if (waiter) {
+      waiter(event);
+      return;
+    }
+    this.#queue.push(event);
+    trimQueue(this.#queue);
+  }
+}
+
 export class PrimadbMoqSession {
   readonly db: PrimadbLike;
   readonly connection: MoqConnection;
@@ -441,6 +529,12 @@ export class PrimadbMoqSession {
   #subscribedTracks = new Set<MoqTrack>();
   #subscribedPaths = new Set<string>();
   #routeHandlers = new Set<PrimadbRouteHandler>();
+  #applicationSubscriptions = new Set<PrimadbApplicationRouteSubscription>();
+  #applicationEvents: PrimadbApplicationRouteEvent[] = [];
+  #applicationWaiters: Array<{
+    filter: PrimadbApplicationRouteFilter;
+    resolve: (event: PrimadbApplicationRouteEvent | null) => void;
+  }> = [];
   #seenRoutes = new Set<string>();
   #knownPeers = new Map<string, PrimadbPeerPresence>();
   #recommendations = new Map<string, PrimadbPeerRecommendation>();
@@ -500,6 +594,92 @@ export class PrimadbMoqSession {
     return () => {
       this.#routeHandlers.delete(handler);
     };
+  }
+
+  publishApplication(
+    message: PrimadbApplicationRouteMessage,
+    target: PrimadbRouteTarget = this.#target,
+  ): number {
+    return this.sendRoute(
+      this.createRoute({
+        kind: "application",
+        message: normalizeApplicationMessage(message),
+      }, target),
+    );
+  }
+
+  sendApplication(
+    namespace: string,
+    protocol: string,
+    topic: string | null | undefined,
+    body: unknown,
+    metadata: Record<string, unknown> = {},
+    target: PrimadbRouteTarget = this.#target,
+  ): number {
+    return this.publishApplication(
+      {
+        namespace,
+        protocol,
+        topic: topic ?? null,
+        body,
+        metadata,
+      },
+      target,
+    );
+  }
+
+  subscribeApplications(
+    filter: PrimadbApplicationRouteFilter = {},
+  ): PrimadbApplicationRouteSubscription {
+    let subscription: PrimadbApplicationRouteSubscription;
+    subscription = new PrimadbApplicationRouteSubscription(filter, () => {
+      this.#applicationSubscriptions.delete(subscription);
+    });
+    this.#applicationSubscriptions.add(subscription);
+    return subscription;
+  }
+
+  nextApplication(
+    filter: PrimadbApplicationRouteFilter = {},
+  ): Promise<PrimadbApplicationRouteEvent | null> {
+    const index = this.#applicationEvents.findIndex((event) =>
+      applicationRouteMatchesFilter(event, filter),
+    );
+    if (index >= 0) {
+      const [event] = this.#applicationEvents.splice(index, 1);
+      return Promise.resolve(event ?? null);
+    }
+    if (this.#closed) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      this.#applicationWaiters.push({ filter, resolve });
+    });
+  }
+
+  tryNextApplication(
+    filter: PrimadbApplicationRouteFilter = {},
+  ): PrimadbApplicationRouteEvent | null {
+    const index = this.#applicationEvents.findIndex((event) =>
+      applicationRouteMatchesFilter(event, filter),
+    );
+    if (index < 0) {
+      return null;
+    }
+    const [event] = this.#applicationEvents.splice(index, 1);
+    return event ?? null;
+  }
+
+  drainApplications(filter: PrimadbApplicationRouteFilter = {}): PrimadbApplicationRouteEvent[] {
+    const drained: PrimadbApplicationRouteEvent[] = [];
+    this.#applicationEvents = this.#applicationEvents.filter((event) => {
+      if (!applicationRouteMatchesFilter(event, filter)) {
+        return true;
+      }
+      drained.push(event);
+      return false;
+    });
+    return drained;
   }
 
   addAcceptedPeerId(peerId: string): () => void {
@@ -568,7 +748,7 @@ export class PrimadbMoqSession {
           peer_id: this.peerId,
           replica_id: this.db.replicaId(),
           transport: "moq",
-          capabilities: ["sync", "ack", "routing", "batch", "peer_exchange"],
+          capabilities: ["sync", "ack", "routing", "batch", "peer_exchange", "application_routes"],
           topics: [this.channel],
           metadata: {
             moq_path: this.path,
@@ -623,6 +803,13 @@ export class PrimadbMoqSession {
     for (const track of this.#subscribedTracks) {
       track.close();
     }
+    for (const waiter of this.#applicationWaiters.splice(0)) {
+      waiter.resolve(null);
+    }
+    for (const subscription of [...this.#applicationSubscriptions]) {
+      subscription.close();
+    }
+    this.#applicationEvents = [];
     this.#published?.close();
     if (this.#closeConnection) {
       closeConnectionSoon(this.connection);
@@ -729,14 +916,28 @@ export class PrimadbMoqSession {
     for (const handler of this.#routeHandlers) {
       handler(route);
     }
-    this.#acceptRoutePayload(route.from, route.route_id, route.payload);
+    this.#acceptRoutePayload(route, route.payload);
   }
 
-  #acceptRoutePayload(from: string, routeId: string, payload: PrimadbRoutePayload): void {
+  #acceptRoutePayload(route: PrimadbRouteEnvelope, payload: PrimadbRoutePayload): void {
     if (payload.kind === "batch" && Array.isArray((payload as { items?: unknown }).items)) {
       for (const item of (payload as { items: PrimadbRouteBatchItem[] }).items) {
-        this.#acceptRoutePayload(from, routeId, item as PrimadbRoutePayload);
+        this.#acceptRoutePayload(route, item as PrimadbRoutePayload);
       }
+      return;
+    }
+    if (payload.kind === "application" && isApplicationRouteMessage((payload as { message?: unknown }).message)) {
+      this.#enqueueApplicationRoute({
+        routeId: route.route_id,
+        from: route.from,
+        channel: route.channel,
+        target: route.target,
+        issuedAtMillis: route.issued_at_millis,
+        receivedAtMillis: nowMillis(),
+        transport: "moq",
+        verifiedIdentity: null,
+        message: normalizeApplicationMessage((payload as { message: PrimadbApplicationRouteMessage }).message),
+      });
       return;
     }
     if (payload.kind === "presence" && isPeerPresence((payload as { peer?: unknown }).peer)) {
@@ -778,10 +979,26 @@ export class PrimadbMoqSession {
               applied,
             },
           },
-          { kind: "peer", value: from },
-          routeId,
+          { kind: "peer", value: route.from },
+          route.route_id,
         ),
       );
+    }
+  }
+
+  #enqueueApplicationRoute(event: PrimadbApplicationRouteEvent): void {
+    const waiterIndex = this.#applicationWaiters.findIndex((waiter) =>
+      applicationRouteMatchesFilter(event, waiter.filter),
+    );
+    if (waiterIndex >= 0) {
+      const [waiter] = this.#applicationWaiters.splice(waiterIndex, 1);
+      waiter?.resolve(event);
+    } else {
+      this.#applicationEvents.push(event);
+      trimQueue(this.#applicationEvents);
+    }
+    for (const subscription of this.#applicationSubscriptions) {
+      subscription.enqueue(event);
     }
   }
 }
@@ -883,6 +1100,45 @@ function isPeerPresence(value: unknown): value is PrimadbPeerPresence {
       typeof (value as { replica_id?: unknown }).replica_id === "string" &&
       typeof (value as { transport?: unknown }).transport === "string",
   );
+}
+
+function isApplicationRouteMessage(value: unknown): value is PrimadbApplicationRouteMessage {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof (value as { namespace?: unknown }).namespace === "string" &&
+      typeof (value as { protocol?: unknown }).protocol === "string" &&
+      "body" in value,
+  );
+}
+
+function normalizeApplicationMessage(
+  message: PrimadbApplicationRouteMessage,
+): PrimadbApplicationRouteMessage {
+  return {
+    namespace: message.namespace,
+    protocol: message.protocol,
+    topic: message.topic ?? null,
+    body: message.body,
+    metadata: message.metadata ?? {},
+  };
+}
+
+function applicationRouteMatchesFilter(
+  event: PrimadbApplicationRouteEvent,
+  filter: PrimadbApplicationRouteFilter,
+): boolean {
+  return (
+    (filter.namespace == null || filter.namespace === event.message.namespace) &&
+    (filter.protocol == null || filter.protocol === event.message.protocol) &&
+    (filter.topic == null || filter.topic === event.message.topic)
+  );
+}
+
+function trimQueue<T>(queue: T[], max = 1024): void {
+  while (queue.length > max) {
+    queue.shift();
+  }
 }
 
 function isSyncFrame(value: unknown): value is

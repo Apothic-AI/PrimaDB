@@ -2,15 +2,20 @@
 use crate::MoqRelayClientConfig;
 #[cfg(feature = "crypto")]
 use crate::SecureSyncFrame;
+use crate::app_route::ApplicationRouteBus;
 #[cfg(feature = "native-moq")]
 use crate::native_moq::NativeMoqRouteClient;
 use crate::{
-    ChangeSubscription, HookTransport, HybridClock, LexEntry, MapEntry, NodeFetchScheduler,
-    Operation, PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult,
-    RelayClientConfig, RemoteInterestPolicy, RemoteInterestTarget, RemotePath, RemoteResult,
-    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
-    RoutePayload, RouteTarget, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
+    ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
+    ApplicationRouteSubscription, ChangeSubscription, HookTransport, HybridClock, LexEntry,
+    MapEntry, NodeFetchScheduler, Operation, PeerPresence, PeerRecommendation, Primadb,
+    PrimadbError, RecordEntry, RecordScanResult, RelayClientConfig, RemoteFanInWatch,
+    RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
+    RemotePeerFailure, RemotePeerRecords, RemoteRecordsFanIn, RemoteResult, RemoteWatchMessage,
+    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    RouteTransportKind, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
     WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
+    merge_remote_records_fan_in,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
@@ -107,6 +112,8 @@ enum PullAccumulator {
 struct NativeWebSocketSyncState {
     db: Primadb,
     router: Router,
+    transport: RouteTransportKind,
+    applications: ApplicationRouteBus,
     session_id: String,
     session_auth: crate::SessionAuthConfig,
     closed: AtomicBool,
@@ -187,6 +194,8 @@ impl NativeWebSocketSync {
         let state = Arc::new(NativeWebSocketSyncState {
             db: db.clone(),
             router,
+            transport: RouteTransportKind::WebSocket,
+            applications: ApplicationRouteBus::default(),
             session_id: crate::session_auth::random_session_id(&format!(
                 "native:{}",
                 db.replica_id()
@@ -373,6 +382,38 @@ impl NativeWebSocketSync {
             .values()
             .cloned()
             .collect()
+    }
+
+    pub fn publish_application(
+        &self,
+        message: ApplicationRouteMessage,
+        target: RouteTarget,
+    ) -> Result<RouteEnvelope> {
+        publish_application_state(&self.state, message, target, None)
+    }
+
+    pub fn send_application(
+        &self,
+        namespace: impl Into<String>,
+        protocol: impl Into<String>,
+        topic: Option<String>,
+        body: JsonValue,
+        metadata: BTreeMap<String, JsonValue>,
+        target: RouteTarget,
+    ) -> Result<RouteEnvelope> {
+        publish_application_state(
+            &self.state,
+            ApplicationRouteMessage::new(namespace, protocol, topic, body, metadata),
+            target,
+            None,
+        )
+    }
+
+    pub fn subscribe_applications(
+        &self,
+        filter: ApplicationRouteFilter,
+    ) -> ApplicationRouteSubscription {
+        self.state.applications.subscribe(filter)
     }
 
     pub fn watch_get(
@@ -794,6 +835,22 @@ impl NativeWebSocketSync {
         }
     }
 
+    pub async fn records_fan_in(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteRecordsFanIn> {
+        records_fan_in_state(&self.state, scan, policy).await
+    }
+
+    pub fn watch_records_fan_in(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteFanInWatch> {
+        watch_records_fan_in_state(&self.state, scan, policy)
+    }
+
     pub async fn remote_vector_search_with_policy(
         &self,
         collection: impl Into<String>,
@@ -941,6 +998,8 @@ impl NativeMoqSync {
         let state = Arc::new(NativeWebSocketSyncState {
             db: db.clone(),
             router,
+            transport: RouteTransportKind::Moq,
+            applications: ApplicationRouteBus::default(),
             session_id: crate::session_auth::random_session_id(&format!(
                 "moq:native:{}",
                 db.replica_id()
@@ -1090,6 +1149,38 @@ impl NativeMoqSync {
             .collect()
     }
 
+    pub fn publish_application(
+        &self,
+        message: ApplicationRouteMessage,
+        target: RouteTarget,
+    ) -> Result<RouteEnvelope> {
+        publish_application_state(&self.state, message, target, None)
+    }
+
+    pub fn send_application(
+        &self,
+        namespace: impl Into<String>,
+        protocol: impl Into<String>,
+        topic: Option<String>,
+        body: JsonValue,
+        metadata: BTreeMap<String, JsonValue>,
+        target: RouteTarget,
+    ) -> Result<RouteEnvelope> {
+        publish_application_state(
+            &self.state,
+            ApplicationRouteMessage::new(namespace, protocol, topic, body, metadata),
+            target,
+            None,
+        )
+    }
+
+    pub fn subscribe_applications(
+        &self,
+        filter: ApplicationRouteFilter,
+    ) -> ApplicationRouteSubscription {
+        self.state.applications.subscribe(filter)
+    }
+
     pub fn watch_get(
         &self,
         peer_id: impl Into<String>,
@@ -1146,6 +1237,84 @@ impl NativeMoqSync {
                 "expected get result, received {other:?}"
             ))),
         }
+    }
+
+    pub async fn remote_records(
+        &self,
+        peer_id: impl Into<String>,
+        scan: crate::RecordScan,
+    ) -> Result<RecordScanResult> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Records { scan },
+        )
+        .await?
+        {
+            RemoteResult::Records { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected records result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_records_with_policy(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RecordScanResult> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Records { scan },
+        )
+        .await?
+        {
+            RemoteResult::Records { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected records result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub fn watch_records(
+        &self,
+        peer_id: impl Into<String>,
+        scan: crate::RecordScan,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::Records { scan },
+        )
+    }
+
+    pub fn watch_records_with_policy(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::Records { scan },
+        )
+    }
+
+    pub async fn records_fan_in(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteRecordsFanIn> {
+        records_fan_in_state(&self.state, scan, policy).await
+    }
+
+    pub fn watch_records_fan_in(
+        &self,
+        scan: crate::RecordScan,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteFanInWatch> {
+        watch_records_fan_in_state(&self.state, scan, policy)
     }
 
     pub async fn remote_transaction(
@@ -1274,6 +1443,150 @@ async fn request_remote_result(
         .map_err(PrimadbError::Message)
 }
 
+async fn records_fan_in_state(
+    state: &Arc<NativeWebSocketSyncState>,
+    scan: crate::RecordScan,
+    policy: RemoteInterestPolicy,
+) -> Result<RemoteRecordsFanIn> {
+    let request_kind = crate::PullRequestKind::Records { scan: scan.clone() };
+    let peers = resolve_relay_peers_for_policy(
+        state,
+        &policy,
+        pull_capability_for_request(&request_kind),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(PrimadbError::Message(
+            "remote interest policy did not select any peers".to_owned(),
+        ));
+    }
+
+    let request_id = format!(
+        "{}/records-fan-in/{:x}",
+        state.db.replica_id(),
+        state.next_message_seq.fetch_add(1, Ordering::SeqCst) + 1
+    );
+    let mut records = Vec::new();
+    let mut failures = Vec::new();
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer, &state.transport);
+        match request_remote_result(
+            state,
+            peer.peer_id.clone(),
+            crate::PullRequestKind::Records { scan: scan.clone() },
+        )
+        .await
+        {
+            Ok(RemoteResult::Records { result }) => records.push(RemotePeerRecords {
+                peer_id: peer.peer_id,
+                transport,
+                result,
+            }),
+            Ok(other) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: format!("expected records result, received {other:?}"),
+            }),
+            Err(error) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    Ok(merge_remote_records_fan_in(request_id, records, failures))
+}
+
+fn watch_records_fan_in_state(
+    state: &Arc<NativeWebSocketSyncState>,
+    scan: crate::RecordScan,
+    policy: RemoteInterestPolicy,
+) -> Result<RemoteFanInWatch> {
+    let request_kind = crate::PullRequestKind::Records { scan: scan.clone() };
+    let peers = resolve_relay_peers_for_policy(
+        state,
+        &policy,
+        Some(&watch_capability_for_request(&request_kind)),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(PrimadbError::Message(
+            "remote interest policy did not select any peers".to_owned(),
+        ));
+    }
+
+    let (sender, receiver) = unbounded();
+    let watches = Arc::new(Mutex::new(Vec::<RemoteWatchSubscription>::new()));
+    let tasks = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
+
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer, &state.transport);
+        match start_remote_watch(
+            state,
+            peer.peer_id.clone(),
+            crate::PullRequestKind::Records { scan: scan.clone() },
+        ) {
+            Ok(watch) => {
+                let child_receiver = watch.receiver();
+                watches.lock().unwrap().push(watch);
+                let child_sender = sender.clone();
+                let peer_id = peer.peer_id.clone();
+                let task = tokio::spawn(async move {
+                    let mut sequence = 0_u64;
+                    while let Ok(message) = child_receiver.recv().await {
+                        match message {
+                            Ok(message) => {
+                                sequence = sequence.saturating_add(1);
+                                let _ = child_sender
+                                    .send(RemoteFanInWatchEvent::Update {
+                                        peer_id: peer_id.clone(),
+                                        transport: transport.clone(),
+                                        initial: message.initial,
+                                        sequence,
+                                        result: message.result,
+                                    })
+                                    .await;
+                            }
+                            Err(message) => {
+                                let _ = child_sender
+                                    .send(RemoteFanInWatchEvent::Failure {
+                                        peer_id: peer_id.clone(),
+                                        transport: transport.clone(),
+                                        message,
+                                        terminal: true,
+                                    })
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+                });
+                tasks.lock().unwrap().push(task);
+            }
+            Err(error) => {
+                let _ = sender.try_send(RemoteFanInWatchEvent::Failure {
+                    peer_id: peer.peer_id,
+                    transport,
+                    message: error.to_string(),
+                    terminal: true,
+                });
+            }
+        }
+    }
+
+    let cancel_watches = watches.clone();
+    let cancel_tasks = tasks.clone();
+    Ok(RemoteFanInWatch::new(receiver, move || {
+        for watch in cancel_watches.lock().unwrap().drain(..) {
+            watch.close();
+        }
+        for task in cancel_tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+    }))
+}
+
 fn start_remote_watch_with_policy(
     state: &Arc<NativeWebSocketSyncState>,
     policy: RemoteInterestPolicy,
@@ -1338,48 +1651,69 @@ fn select_relay_peer_for_policy(
     capability: Option<&str>,
     request: Option<&crate::PullRequestKind>,
 ) -> Result<String> {
+    if let Some(peer) = resolve_relay_peers_for_policy(state, policy, capability, request)?
+        .into_iter()
+        .next()
+    {
+        return Ok(peer.peer_id);
+    }
+    Err(PrimadbError::Message(match capability {
+        Some(capability) => format!("no connected peer advertises capability `{capability}`"),
+        None => "no connected peer is available for remote interest".to_owned(),
+    }))
+}
+
+fn resolve_relay_peers_for_policy(
+    state: &Arc<NativeWebSocketSyncState>,
+    policy: &RemoteInterestPolicy,
+    capability: Option<&str>,
+    request: Option<&crate::PullRequestKind>,
+) -> Result<Vec<PeerPresence>> {
     if let Some(peer_ids) = explicit_policy_peers(policy)? {
         if peer_ids.is_empty() {
             return Err(PrimadbError::Message(
                 "remote interest policy did not include any peer ids".to_owned(),
             ));
         }
-        if !policy.require_capability {
-            return Ok(peer_ids[0].clone());
+        let known = relay_peer_candidates(state);
+        let mut peers = Vec::new();
+        for peer_id in peer_ids {
+            if let Some(peer) = known.iter().find(|peer| peer.peer_id == peer_id).cloned() {
+                if !policy.require_capability || peer_supports_request(&peer, capability, request) {
+                    peers.push(peer);
+                }
+            } else if !policy.require_capability {
+                peers.push(PeerPresence {
+                    peer_id,
+                    replica_id: String::new(),
+                    transport: state.transport.as_str().to_owned(),
+                    identity: None,
+                    capabilities: Vec::new(),
+                    topics: Vec::new(),
+                    metadata: BTreeMap::new(),
+                });
+            }
         }
-        let known = state.router.known_peers();
-        return peer_ids
-            .into_iter()
-            .find(|peer_id| {
-                known.iter().any(|peer| {
-                    peer.peer_id == *peer_id && peer_supports_request(peer, capability, request)
-                })
-            })
-            .ok_or_else(|| {
-                PrimadbError::Message(format!(
-                    "no requested peer advertises required capability `{}`",
-                    capability.unwrap_or("unknown")
-                ))
-            });
+        if policy.require_capability && peers.is_empty() {
+            return Err(PrimadbError::Message(format!(
+                "no requested peer advertises required capability `{}`",
+                capability.unwrap_or("unknown")
+            )));
+        }
+        return Ok(peers);
     }
 
     let mut candidates = relay_peer_candidates(state);
     prefer_vector_request_candidates(&mut candidates, request);
-    if let Some(peer) = candidates
-        .iter()
-        .find(|peer| peer_supports_request(peer, capability, request))
-    {
-        return Ok(peer.peer_id.clone());
+    if policy.require_capability {
+        candidates.retain(|peer| peer_supports_request(peer, capability, request));
+    } else if capability.is_some() {
+        candidates.sort_by(|left, right| {
+            peer_supports_request(right, capability, request)
+                .cmp(&peer_supports_request(left, capability, request))
+        });
     }
-    if !policy.require_capability {
-        if let Some(peer) = candidates.first() {
-            return Ok(peer.peer_id.clone());
-        }
-    }
-    Err(PrimadbError::Message(match capability {
-        Some(capability) => format!("no connected peer advertises capability `{capability}`"),
-        None => "no connected peer is available for remote interest".to_owned(),
-    }))
+    Ok(candidates)
 }
 
 fn explicit_policy_peers(policy: &RemoteInterestPolicy) -> Result<Option<Vec<String>>> {
@@ -1437,6 +1771,20 @@ fn relay_peer_candidates(state: &Arc<NativeWebSocketSyncState>) -> Vec<crate::Pe
         candidates.retain(|peer| verified_identity_for_peer(state, &peer.peer_id).is_some());
     }
     candidates
+}
+
+fn route_transport_for_peer(
+    peer: &PeerPresence,
+    fallback: &RouteTransportKind,
+) -> RouteTransportKind {
+    match peer.transport.as_str() {
+        "websocket" => RouteTransportKind::WebSocket,
+        "moq" => RouteTransportKind::Moq,
+        "webrtc" => RouteTransportKind::WebRtc,
+        "broadcast_channel" => RouteTransportKind::BroadcastChannel,
+        "in_memory" => RouteTransportKind::InMemory,
+        _ => fallback.clone(),
+    }
 }
 
 fn peer_supports_capability(peer: &crate::PeerPresence, capability: Option<&str>) -> bool {
@@ -1587,18 +1935,38 @@ async fn handle_route_envelope(
     if !decision.deliver {
         return Ok(());
     }
-    handle_route_payload(state, route.from, route.route_id, route.payload).await
+    handle_route_payload(state, route).await
 }
 
 async fn handle_route_payload(
     state: &Arc<NativeWebSocketSyncState>,
-    from: String,
-    route_id: String,
-    payload: RoutePayload,
+    route: RouteEnvelope,
 ) -> Result<()> {
-    let mut pending = vec![payload];
+    let from = route.from.clone();
+    let route_id = route.route_id.clone();
+    let channel = route.channel.clone();
+    let target = route.target.clone();
+    let issued_at_millis = route.issued_at_millis;
+    let mut pending = vec![route.payload];
     while let Some(payload) = pending.pop() {
         match payload {
+            RoutePayload::Application { message } => {
+                let verified_identity = verified_identity_for_peer(state, &from);
+                if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
+                    continue;
+                }
+                state.applications.publish(ApplicationRouteEvent {
+                    route_id: route_id.clone(),
+                    from: from.clone(),
+                    channel: channel.clone(),
+                    target: target.clone(),
+                    issued_at_millis,
+                    received_at_millis: crate::clock::now_millis(),
+                    transport: state.transport.clone(),
+                    verified_identity,
+                    message,
+                });
+            }
             RoutePayload::Presence { peer } => {
                 maybe_send_relay_auth_challenge(state, &peer)?;
                 if state.session_auth.require_authenticated_peers
@@ -1730,6 +2098,17 @@ async fn handle_route_payload(
         }
     }
     Ok(())
+}
+
+fn publish_application_state(
+    state: &Arc<NativeWebSocketSyncState>,
+    message: ApplicationRouteMessage,
+    target: RouteTarget,
+    reply_to: Option<String>,
+) -> Result<RouteEnvelope> {
+    let route = state.router.wrap_application(message, target, reply_to);
+    send_route(state, &route)?;
+    Ok(route)
 }
 
 fn verified_identity_for_peer(

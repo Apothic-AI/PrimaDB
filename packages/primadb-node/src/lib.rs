@@ -4,19 +4,21 @@ use napi::threadsafe_function::{ThreadSafeCallContext, ThreadsafeFunction};
 use napi::{Env, JsFunction, JsObject, JsUnknown, ValueType};
 use napi_derive::napi;
 use primadb::{
+    ApplicationRouteFilter, ApplicationRouteMessage,
+    ApplicationRouteSubscription as CoreApplicationRouteSubscription,
     BlobStorageBinding as CoreBlobStorageBinding, BlobStorageConfig, Chain as CoreChain,
     ConnectHookContext, DurableStorageBinding as CoreDurableStorageBinding, DurableStorageConfig,
     HookDecision, Identity, LexSpec, MeshConfig, NativeWebRtcMesh as CoreWebRtcMesh,
-    NativeRelayServer as CoreRelayServer,
-    NativeWebSocketSync as CoreWebSocketSync, NetworkHooks, Operation, Primadb as CorePrimadb,
-    PasswordKeyDerivationOptions, PublicIdentity, PullRequestKind, QuerySpec, RelayClientConfig,
-    RecordBatch, RecordScan, RelayServerConfig, RemoteInterestPolicy, RemotePath,
+    NativeRelayServer as CoreRelayServer, NativeWebSocketSync as CoreWebSocketSync, NetworkHooks,
+    Operation, Primadb as CorePrimadb, PasswordKeyDerivationOptions, PublicIdentity,
+    PullRequestKind, QuerySpec, RecordBatch, RecordScan, RelayClientConfig, RelayServerConfig,
+    RemoteFanInWatch as CoreRemoteFanInWatch, RemoteInterestPolicy, RemotePath,
     RemoteResult as CoreRemoteResult, RemoteWatchMessage as CoreRemoteWatchMessage,
     RemoteWatchSubscription as CoreRemoteWatch, RecordWatchSubscription as CoreRecordWatchSubscription,
-    RoomHookContext, SecretBoxKey, ServeRequestContext, ServeResultContext, Scope as CoreScope,
-    ScopePolicy, ScriptExecutionOptions, Subscription as CoreSubscription, TransactionOptions,
-    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
-    VectorCollectionConfig, VectorSearchSpec,
+    RoomHookContext, RouteTarget, SecretBoxKey, ServeRequestContext, ServeResultContext,
+    Scope as CoreScope, ScopePolicy, ScriptExecutionOptions, Subscription as CoreSubscription,
+    TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
+    TraversalSpec, UserGrant, VectorCollectionConfig, VectorSearchSpec,
     VectorWatchSubscription as CoreVectorWatchSubscription,
     derive_password_key as core_derive_password_key, parse_request_hook_json, parse_result_hook_json,
     parse_void_hook_json,
@@ -24,6 +26,7 @@ use primadb::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 fn to_napi_error(error: impl ToString) -> Error {
@@ -46,6 +49,27 @@ fn remote_policy(value: Option<JsonValue>) -> Result<RemoteInterestPolicy> {
     match value {
         Some(value) => from_json(value),
         None => Ok(RemoteInterestPolicy::default()),
+    }
+}
+
+fn application_filter(value: Option<JsonValue>) -> Result<ApplicationRouteFilter> {
+    match value {
+        Some(value) => from_json(value),
+        None => Ok(ApplicationRouteFilter::default()),
+    }
+}
+
+fn route_target(value: Option<JsonValue>) -> Result<RouteTarget> {
+    match value {
+        Some(value) => from_json(value),
+        None => Ok(RouteTarget::Broadcast),
+    }
+}
+
+fn metadata_map(value: Option<JsonValue>) -> Result<BTreeMap<String, JsonValue>> {
+    match value {
+        Some(value) => from_json(value),
+        None => Ok(BTreeMap::new()),
     }
 }
 
@@ -361,6 +385,16 @@ pub struct RelayServer {
 #[napi]
 pub struct RemoteWatch {
     inner: Arc<Mutex<Option<CoreRemoteWatch>>>,
+}
+
+#[napi]
+pub struct ApplicationRouteSubscription {
+    inner: Arc<Mutex<Option<CoreApplicationRouteSubscription>>>,
+}
+
+#[napi]
+pub struct RemoteFanInWatch {
+    inner: Arc<Mutex<Option<CoreRemoteFanInWatch>>>,
 }
 
 #[napi]
@@ -1300,6 +1334,88 @@ impl RemoteWatch {
 }
 
 #[napi]
+impl ApplicationRouteSubscription {
+    #[napi]
+    pub async fn next(&self) -> Result<Option<JsonValue>> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("application route subscription"))?
+        };
+        let event = subscription.recv().await;
+        self.inner.lock().unwrap().replace(subscription);
+        event.map(to_json).transpose()
+    }
+
+    #[napi(js_name = "tryNext")]
+    pub fn try_next(&self) -> Result<Option<JsonValue>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return Ok(None);
+        };
+        subscription.try_recv().map(to_json).transpose()
+    }
+
+    #[napi]
+    pub fn drain(&self) -> Result<JsonValue> {
+        let guard = self.inner.lock().unwrap();
+        let events = guard
+            .as_ref()
+            .map(CoreApplicationRouteSubscription::drain)
+            .unwrap_or_default();
+        to_json(events)
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        if let Some(subscription) = self.inner.lock().unwrap().take() {
+            subscription.close();
+        }
+    }
+}
+
+#[napi]
+impl RemoteFanInWatch {
+    #[napi]
+    pub async fn next(&self) -> Result<Option<JsonValue>> {
+        let watch = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("remote fan-in watch"))?
+        };
+        let event = watch.recv().await;
+        self.inner.lock().unwrap().replace(watch);
+        event.map(to_json).transpose()
+    }
+
+    #[napi(js_name = "tryNext")]
+    pub fn try_next(&self) -> Result<Option<JsonValue>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(watch) = guard.as_ref() else {
+            return Ok(None);
+        };
+        watch.try_recv().map(to_json).transpose()
+    }
+
+    #[napi]
+    pub fn drain(&self) -> Result<JsonValue> {
+        let guard = self.inner.lock().unwrap();
+        let events = guard
+            .as_ref()
+            .map(CoreRemoteFanInWatch::drain)
+            .unwrap_or_default();
+        to_json(events)
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        if let Some(watch) = self.inner.lock().unwrap().take() {
+            watch.close();
+        }
+    }
+}
+
+#[napi]
 impl WebSocketSync {
     #[napi(js_name = "isConnected")]
     pub fn is_connected(&self) -> bool {
@@ -1350,6 +1466,66 @@ impl WebSocketSync {
             .map(CoreWebSocketSync::recommended_peers)
             .unwrap_or_default();
         to_json(peers)
+    }
+
+    #[napi(js_name = "publishApplication")]
+    pub fn publish_application(
+        &self,
+        message: JsonValue,
+        target: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let message: ApplicationRouteMessage = from_json(message)?;
+        let target = route_target(target)?;
+        let route = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .publish_application(message, target)
+            .map_err(to_napi_error)?;
+        to_json(route)
+    }
+
+    #[napi(js_name = "sendApplication")]
+    pub fn send_application(
+        &self,
+        namespace: String,
+        protocol: String,
+        topic: Option<String>,
+        body: JsonValue,
+        metadata: Option<JsonValue>,
+        target: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let metadata = metadata_map(metadata)?;
+        let target = route_target(target)?;
+        let route = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .send_application(namespace, protocol, topic, body, metadata, target)
+            .map_err(to_napi_error)?;
+        to_json(route)
+    }
+
+    #[napi(js_name = "subscribeApplications")]
+    pub fn subscribe_applications(
+        &self,
+        filter: Option<JsonValue>,
+    ) -> Result<ApplicationRouteSubscription> {
+        let filter = application_filter(filter)?;
+        let subscription = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .subscribe_applications(filter);
+        Ok(ApplicationRouteSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
     }
 
     #[napi(js_name = "get")]
@@ -1424,6 +1600,19 @@ impl WebSocketSync {
             .remote_records_with_policy(scan, policy)
             .await
             .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "recordsFanIn")]
+    pub async fn records_fan_in(&self, scan: JsonValue, policy: Option<JsonValue>) -> Result<JsonValue> {
+        let scan: RecordScan = from_json(scan)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync.records_fan_in(scan, policy).await.map_err(to_napi_error);
         self.inner.lock().unwrap().replace(sync);
         to_json(result?)
     }
@@ -1871,6 +2060,27 @@ impl WebSocketSync {
         })
     }
 
+    #[napi(js_name = "watchRecordsFanIn")]
+    pub fn watch_records_fan_in(
+        &self,
+        scan: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteFanInWatch> {
+        let scan: RecordScan = from_json(scan)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_records_fan_in(scan, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteFanInWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
     #[napi(js_name = "watchVectorSearch")]
     pub fn watch_vector_search(
         &self,
@@ -2044,6 +2254,81 @@ impl WebRtcMesh {
         let peers = mesh.recommended_peers().await;
         self.inner.lock().unwrap().replace(mesh);
         to_json(peers)
+    }
+
+    #[napi(js_name = "publishApplication")]
+    pub async fn publish_application(
+        &self,
+        message: JsonValue,
+        target: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let message: ApplicationRouteMessage = from_json(message)?;
+        let target = route_target(target)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .publish_application(message, target)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "sendApplication")]
+    pub async fn send_application(
+        &self,
+        namespace: String,
+        protocol: String,
+        topic: Option<String>,
+        body: JsonValue,
+        metadata: Option<JsonValue>,
+        target: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let metadata = metadata_map(metadata)?;
+        let target = route_target(target)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .send_application(namespace, protocol, topic, body, metadata, target)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "subscribeApplications")]
+    pub fn subscribe_applications(
+        &self,
+        filter: Option<JsonValue>,
+    ) -> Result<ApplicationRouteSubscription> {
+        let filter = application_filter(filter)?;
+        let subscription = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("webrtc mesh"))?
+            .subscribe_applications(filter);
+        Ok(ApplicationRouteSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
+    }
+
+    #[napi(js_name = "recordsFanIn")]
+    pub async fn records_fan_in(&self, scan: JsonValue, policy: Option<JsonValue>) -> Result<JsonValue> {
+        let scan: RecordScan = from_json(scan)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh.records_fan_in(scan, policy).await.map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        to_json(result?)
     }
 
     #[napi(js_name = "watchRemoteGet")]
@@ -2291,6 +2576,28 @@ impl WebRtcMesh {
             .map_err(to_napi_error);
         self.inner.lock().unwrap().replace(mesh);
         Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchRecordsFanIn")]
+    pub async fn watch_records_fan_in(
+        &self,
+        scan: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteFanInWatch> {
+        let scan: RecordScan = from_json(scan)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_records_fan_in(scan, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteFanInWatch {
             inner: Arc::new(Mutex::new(Some(result?))),
         })
     }

@@ -187,12 +187,74 @@ function closeConnectionSoon(connection) {
   timer.unref?.();
 }
 
+export class PrimadbApplicationRouteSubscription {
+  #queue = [];
+  #waiters = [];
+  #closed = false;
+  #onClose;
+
+  constructor(filter, onClose) {
+    this.filter = filter;
+    this.#onClose = onClose;
+  }
+
+  next() {
+    if (this.#queue.length > 0) {
+      return Promise.resolve(this.#queue.shift() ?? null);
+    }
+    if (this.#closed) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      this.#waiters.push(resolve);
+    });
+  }
+
+  tryNext() {
+    return this.#queue.shift() ?? null;
+  }
+
+  drain() {
+    const events = this.#queue;
+    this.#queue = [];
+    return events;
+  }
+
+  close() {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    this.#onClose();
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter(null);
+    }
+    this.#queue = [];
+  }
+
+  enqueue(event) {
+    if (this.#closed || !applicationRouteMatchesFilter(event, this.filter)) {
+      return;
+    }
+    const waiter = this.#waiters.shift();
+    if (waiter) {
+      waiter(event);
+      return;
+    }
+    this.#queue.push(event);
+    trimQueue(this.#queue);
+  }
+}
+
 export class PrimadbMoqSession {
   #published;
   #publishTracks = new Set();
   #subscribedTracks = new Set();
   #subscribedPaths = new Set();
   #routeHandlers = new Set();
+  #applicationSubscriptions = new Set();
+  #applicationEvents = [];
+  #applicationWaiters = [];
   #seenRoutes = new Set();
   #knownPeers = new Map();
   #recommendations = new Map();
@@ -251,6 +313,79 @@ export class PrimadbMoqSession {
     return () => {
       this.#routeHandlers.delete(handler);
     };
+  }
+
+  publishApplication(message, target = this.#target) {
+    return this.sendRoute(
+      this.createRoute(
+        {
+          kind: "application",
+          message: normalizeApplicationMessage(message),
+        },
+        target,
+      ),
+    );
+  }
+
+  sendApplication(namespace, protocol, topic, body, metadata = {}, target = this.#target) {
+    return this.publishApplication(
+      {
+        namespace,
+        protocol,
+        topic: topic ?? null,
+        body,
+        metadata,
+      },
+      target,
+    );
+  }
+
+  subscribeApplications(filter = {}) {
+    let subscription;
+    subscription = new PrimadbApplicationRouteSubscription(filter, () => {
+      this.#applicationSubscriptions.delete(subscription);
+    });
+    this.#applicationSubscriptions.add(subscription);
+    return subscription;
+  }
+
+  nextApplication(filter = {}) {
+    const index = this.#applicationEvents.findIndex((event) =>
+      applicationRouteMatchesFilter(event, filter),
+    );
+    if (index >= 0) {
+      const [event] = this.#applicationEvents.splice(index, 1);
+      return Promise.resolve(event ?? null);
+    }
+    if (this.#closed) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      this.#applicationWaiters.push({ filter, resolve });
+    });
+  }
+
+  tryNextApplication(filter = {}) {
+    const index = this.#applicationEvents.findIndex((event) =>
+      applicationRouteMatchesFilter(event, filter),
+    );
+    if (index < 0) {
+      return null;
+    }
+    const [event] = this.#applicationEvents.splice(index, 1);
+    return event ?? null;
+  }
+
+  drainApplications(filter = {}) {
+    const drained = [];
+    this.#applicationEvents = this.#applicationEvents.filter((event) => {
+      if (!applicationRouteMatchesFilter(event, filter)) {
+        return true;
+      }
+      drained.push(event);
+      return false;
+    });
+    return drained;
   }
 
   addAcceptedPeerId(peerId) {
@@ -315,7 +450,7 @@ export class PrimadbMoqSession {
           peer_id: this.peerId,
           replica_id: this.db.replicaId(),
           transport: "moq",
-          capabilities: ["sync", "ack", "routing", "batch", "peer_exchange"],
+          capabilities: ["sync", "ack", "routing", "batch", "peer_exchange", "application_routes"],
           topics: [this.channel],
           metadata: {
             moq_path: this.path,
@@ -368,6 +503,13 @@ export class PrimadbMoqSession {
     for (const track of this.#subscribedTracks) {
       track.close();
     }
+    for (const waiter of this.#applicationWaiters.splice(0)) {
+      waiter.resolve(null);
+    }
+    for (const subscription of [...this.#applicationSubscriptions]) {
+      subscription.close();
+    }
+    this.#applicationEvents = [];
     this.#published?.close();
     if (this.#closeConnection) {
       closeConnectionSoon(this.connection);
@@ -472,14 +614,28 @@ export class PrimadbMoqSession {
     for (const handler of this.#routeHandlers) {
       handler(route);
     }
-    this.#acceptRoutePayload(route.from, route.route_id, route.payload);
+    this.#acceptRoutePayload(route, route.payload);
   }
 
-  #acceptRoutePayload(from, routeId, payload) {
+  #acceptRoutePayload(route, payload) {
     if (payload.kind === "batch" && Array.isArray(payload.items)) {
       for (const item of payload.items) {
-        this.#acceptRoutePayload(from, routeId, item);
+        this.#acceptRoutePayload(route, item);
       }
+      return;
+    }
+    if (payload.kind === "application" && isApplicationRouteMessage(payload.message)) {
+      this.#enqueueApplicationRoute({
+        routeId: route.route_id,
+        from: route.from,
+        channel: route.channel,
+        target: route.target,
+        issuedAtMillis: route.issued_at_millis,
+        receivedAtMillis: nowMillis(),
+        transport: "moq",
+        verifiedIdentity: null,
+        message: normalizeApplicationMessage(payload.message),
+      });
       return;
     }
     if (payload.kind === "presence" && isPeerPresence(payload.peer)) {
@@ -519,10 +675,26 @@ export class PrimadbMoqSession {
               applied,
             },
           },
-          { kind: "peer", value: from },
-          routeId,
+          { kind: "peer", value: route.from },
+          route.route_id,
         ),
       );
+    }
+  }
+
+  #enqueueApplicationRoute(event) {
+    const waiterIndex = this.#applicationWaiters.findIndex((waiter) =>
+      applicationRouteMatchesFilter(event, waiter.filter),
+    );
+    if (waiterIndex >= 0) {
+      const [waiter] = this.#applicationWaiters.splice(waiterIndex, 1);
+      waiter?.resolve(event);
+    } else {
+      this.#applicationEvents.push(event);
+      trimQueue(this.#applicationEvents);
+    }
+    for (const subscription of this.#applicationSubscriptions) {
+      subscription.enqueue(event);
     }
   }
 }
@@ -618,6 +790,40 @@ function isPeerPresence(value) {
       typeof value.replica_id === "string" &&
       typeof value.transport === "string",
   );
+}
+
+function isApplicationRouteMessage(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof value.namespace === "string" &&
+      typeof value.protocol === "string" &&
+      "body" in value,
+  );
+}
+
+function normalizeApplicationMessage(message) {
+  return {
+    namespace: message.namespace,
+    protocol: message.protocol,
+    topic: message.topic ?? null,
+    body: message.body,
+    metadata: message.metadata ?? {},
+  };
+}
+
+function applicationRouteMatchesFilter(event, filter) {
+  return (
+    (filter.namespace == null || filter.namespace === event.message.namespace) &&
+    (filter.protocol == null || filter.protocol === event.message.protocol) &&
+    (filter.topic == null || filter.topic === event.message.topic)
+  );
+}
+
+function trimQueue(queue, max = 1024) {
+  while (queue.length > max) {
+    queue.shift();
+  }
 }
 
 function isSyncFrame(value) {
