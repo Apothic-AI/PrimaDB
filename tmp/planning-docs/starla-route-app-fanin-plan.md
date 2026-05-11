@@ -27,6 +27,11 @@ Keep `RouteEnvelope` as the only public network protocol. Add higher-level appli
 APIs on top of RouteEnvelope and existing pull/watch messages rather than exposing transport
 internals.
 
+This sprint should not remove existing advanced public APIs such as `RouteEnvelope`,
+`NativeMoqRouteClient`, route-mode MoQ `sendRoute(...)`/`onRoute(...)`, or test relay/session
+helpers. The Starla-facing additions should simply avoid requiring raw transport handles or socket
+internals for application delivery and remote fan-in.
+
 Transport roles remain unchanged:
 
 - WebSocket: relay RouteEnvelope underlay.
@@ -121,8 +126,9 @@ Python:
 - `subscribe_applications(filter=None)`
 - subscription `next()`, `try_next()`, `drain()`, and `close()`
 
-Do not expose raw WebSocket, MoQ, WebTransport, WebRTC data-channel, relay-client, or gateway
-internals.
+Do not make the new application APIs depend on raw WebSocket, MoQ, WebTransport, WebRTC
+data-channel, relay-client, or gateway internals. Keep existing advanced route-level APIs available
+unless a separate cleanup explicitly decides otherwise.
 
 ## Application Route Implementation Plan
 

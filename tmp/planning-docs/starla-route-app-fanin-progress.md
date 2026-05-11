@@ -20,6 +20,8 @@
 - Confirmed JS MoQ route sessions expose low-level route handlers but not typed application route
   subscriptions.
 - Drafted the Starla route application and fan-in sprint plan.
+- Clarified that the sprint should preserve existing advanced route-level APIs while keeping the
+  new Starla-facing APIs free of raw transport-handle requirements.
 
 ## In Progress
 
