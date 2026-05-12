@@ -379,7 +379,7 @@ impl PullResponse {
 }
 
 impl RemoteWatchSubscription {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, feature = "native-websocket"))]
     pub(crate) fn new(
         receiver: Receiver<std::result::Result<RemoteWatchMessage, String>>,
         cancel: impl Fn() + Send + Sync + 'static,
@@ -415,7 +415,7 @@ impl RemoteWatchSubscription {
 }
 
 impl RemoteFanInWatch {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, feature = "native-websocket"))]
     pub(crate) fn new(
         receiver: Receiver<RemoteFanInWatchEvent>,
         cancel: impl Fn() + Send + Sync + 'static,

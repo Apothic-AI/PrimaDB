@@ -1,4 +1,5 @@
 use crate::clock::now_millis;
+#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 use crate::error::{PrimadbError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -144,22 +145,34 @@ pub struct AuthResponse {
     pub signature: String,
 }
 
-#[cfg(feature = "crypto")]
+#[cfg(all(
+    feature = "crypto",
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 pub fn random_session_id(prefix: &str) -> String {
     format!("{prefix}/session/{}", random_token())
 }
 
-#[cfg(not(feature = "crypto"))]
+#[cfg(all(
+    not(feature = "crypto"),
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 pub fn random_session_id(prefix: &str) -> String {
     format!("{prefix}/session/{:x}", now_millis())
 }
 
-#[cfg_attr(not(feature = "crypto"), allow(dead_code))]
+#[cfg(all(
+    feature = "crypto",
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 pub fn challenge_is_expired(challenge: &AuthChallenge) -> bool {
     now_millis() > challenge.expires_at_millis
 }
 
-#[cfg(feature = "crypto")]
+#[cfg(all(
+    feature = "crypto",
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 pub fn create_auth_challenge(
     issuer_peer_id: &str,
     issuer_replica_id: &str,
@@ -186,7 +199,10 @@ pub fn create_auth_challenge(
     }
 }
 
-#[cfg(feature = "crypto")]
+#[cfg(all(
+    feature = "crypto",
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 pub fn sign_auth_response(
     identity: &crate::Identity,
     alias: Option<String>,
@@ -247,7 +263,10 @@ pub fn sign_auth_response(
     })
 }
 
-#[cfg(feature = "crypto")]
+#[cfg(all(
+    feature = "crypto",
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 pub fn verify_auth_response(
     challenge: &AuthChallenge,
     response: &AuthResponse,
@@ -326,7 +345,10 @@ pub fn verify_auth_response(
     })
 }
 
-#[cfg(not(feature = "crypto"))]
+#[cfg(all(
+    not(feature = "crypto"),
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 pub fn verify_auth_response(
     _challenge: &AuthChallenge,
     _response: &AuthResponse,
@@ -337,7 +359,10 @@ pub fn verify_auth_response(
     ))
 }
 
-#[cfg(feature = "crypto")]
+#[cfg(all(
+    feature = "crypto",
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 fn resolve_trust(identity: &PresenceIdentity, config: &SessionAuthConfig) -> Result<IdentityTrust> {
     let trust_lists_are_empty =
         config.trusted_public_keys.is_empty() && config.trusted_aliases.is_empty();
@@ -365,7 +390,10 @@ fn resolve_trust(identity: &PresenceIdentity, config: &SessionAuthConfig) -> Res
     ))
 }
 
-#[cfg(feature = "crypto")]
+#[cfg(all(
+    feature = "crypto",
+    any(test, target_arch = "wasm32", feature = "native-websocket")
+))]
 fn random_token() -> String {
     use base64ct::{Base64UrlUnpadded, Encoding};
     use rand_core::{OsRng, RngCore};

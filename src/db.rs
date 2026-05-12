@@ -17,9 +17,12 @@ use crate::engine::{
 };
 use crate::error::{PrimadbError, Result};
 use crate::hardening::{PrimadbLimits, PrimadbStats};
+use crate::hooks::NetworkHooks;
+#[cfg(any(test, target_arch = "wasm32", feature = "native-webrtc"))]
+use crate::hooks::RoomHookContext;
+#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 use crate::hooks::{
-    ConnectHookContext, HookDecision, HookTransport, NetworkHooks, RoomHookContext,
-    ServeRequestContext, ServeResultContext,
+    ConnectHookContext, HookDecision, HookTransport, ServeRequestContext, ServeResultContext,
 };
 use crate::operation::{Operation, OperationAction, OperationValue};
 use crate::persistence::{PersistenceTarget, load_snapshot_payload, store_snapshot_payload};
@@ -28,6 +31,7 @@ use crate::record::{
     RecordBatch, RecordBatchReport, RecordEntry, RecordMutation, RecordPrecondition, RecordScan,
     RecordScanResult, RecordValue,
 };
+#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 use crate::session_auth::{PresenceIdentity, SessionAuthConfig, VerifiedIdentity};
 use crate::snapshot::DatabaseSnapshot;
 use crate::storage::StorageAdapter;
@@ -230,7 +234,7 @@ struct Inner {
     missing_nodes: BTreeSet<NodeId>,
     relationship_index: RelationshipIndex,
     node_fetch_schedulers: BTreeMap<u64, Arc<dyn NodeFetchScheduler>>,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     next_node_fetch_scheduler_id: u64,
     scheduled_node_fetches: BTreeSet<NodeId>,
     scope_policies: BTreeMap<String, ScopePolicy>,
@@ -510,6 +514,7 @@ impl Primadb {
                 missing_nodes: BTreeSet::new(),
                 relationship_index: RelationshipIndex::default(),
                 node_fetch_schedulers: BTreeMap::new(),
+                #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
                 next_node_fetch_scheduler_id: 0,
                 scheduled_node_fetches: BTreeSet::new(),
                 scope_policies: BTreeMap::new(),
@@ -1192,6 +1197,7 @@ impl Primadb {
         }
     }
 
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn full_storage_transaction(&self) -> StorageTransaction {
         let inner = self.inner.lock().unwrap();
         let tx_id = inner.next_storage_tx_id;
@@ -1201,12 +1207,14 @@ impl Primadb {
         transaction
     }
 
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn full_storage_transaction_without_pending_ops(&self) -> StorageTransaction {
         let mut transaction = self.full_storage_transaction();
         transaction.metadata.pending_ops.clear();
         transaction
     }
 
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn incremental_storage_transaction(&self) -> StorageTransaction {
         let inner = self.inner.lock().unwrap();
         let tx_id = inner.next_storage_tx_id;
@@ -1218,6 +1226,7 @@ impl Primadb {
         }
     }
 
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn incremental_storage_transaction_without_pending_ops(&self) -> StorageTransaction {
         let mut transaction = self.incremental_storage_transaction();
         transaction.metadata.pending_ops.clear();
@@ -1236,11 +1245,13 @@ impl Primadb {
         Ok(())
     }
 
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn register_external_storage_hook(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.external_storage_hooks = inner.external_storage_hooks.saturating_add(1);
     }
 
+    #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn unregister_external_storage_hook(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.external_storage_hooks = inner.external_storage_hooks.saturating_sub(1);
@@ -1508,7 +1519,10 @@ impl Primadb {
         inner.security.decode_sync_frame(frame)
     }
 
-    #[cfg(feature = "crypto")]
+    #[cfg(all(
+        feature = "crypto",
+        any(test, target_arch = "wasm32", feature = "native-websocket")
+    ))]
     pub(crate) fn session_presence_identity(&self, session_id: &str) -> Option<PresenceIdentity> {
         let inner = self.inner.lock().unwrap();
         let local_user = inner.security.local_user.as_ref()?;
@@ -1525,12 +1539,18 @@ impl Primadb {
         })
     }
 
-    #[cfg(not(feature = "crypto"))]
+    #[cfg(all(
+        not(feature = "crypto"),
+        any(test, target_arch = "wasm32", feature = "native-websocket")
+    ))]
     pub(crate) fn session_presence_identity(&self, _session_id: &str) -> Option<PresenceIdentity> {
         None
     }
 
-    #[cfg(feature = "crypto")]
+    #[cfg(all(
+        feature = "crypto",
+        any(test, target_arch = "wasm32", feature = "native-websocket")
+    ))]
     pub(crate) fn sign_session_auth_response(
         &self,
         challenge: &crate::AuthChallenge,
@@ -1557,7 +1577,10 @@ impl Primadb {
         .map(Some)
     }
 
-    #[cfg(not(feature = "crypto"))]
+    #[cfg(all(
+        not(feature = "crypto"),
+        any(test, target_arch = "wasm32", feature = "native-websocket")
+    ))]
     pub(crate) fn sign_session_auth_response(
         &self,
         _challenge: &crate::AuthChallenge,
@@ -1637,7 +1660,7 @@ impl Primadb {
         Ok(changed)
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn register_node_fetch_scheduler(
         &self,
         scheduler: Arc<dyn NodeFetchScheduler>,
@@ -1649,12 +1672,12 @@ impl Primadb {
         id
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn unregister_node_fetch_scheduler(&self, id: u64) {
         self.inner.lock().unwrap().node_fetch_schedulers.remove(&id);
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn clear_scheduled_node_fetch(&self, id: &str) {
         self.inner.lock().unwrap().scheduled_node_fetches.remove(id);
     }
@@ -1764,6 +1787,7 @@ impl Primadb {
         self.execute_pull_request_kind(&request.request)
     }
 
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn allow_peer_connection(&self, context: &ConnectHookContext) -> HookDecision<()> {
         self.inner
             .lock()
@@ -1774,6 +1798,7 @@ impl Primadb {
             .unwrap_or_else(|| HookDecision::allow(()))
     }
 
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-webrtc"))]
     pub(crate) fn allow_room_join(&self, context: &RoomHookContext) -> HookDecision<()> {
         self.inner
             .lock()
@@ -1784,6 +1809,7 @@ impl Primadb {
             .unwrap_or_else(|| HookDecision::allow(()))
     }
 
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn authorize_pull_request_for_peer(
         &self,
         peer_id: &str,
@@ -1806,6 +1832,7 @@ impl Primadb {
         })
     }
 
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn authorize_watch_request_for_peer(
         &self,
         peer_id: &str,
@@ -1828,6 +1855,7 @@ impl Primadb {
         })
     }
 
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn filter_served_result_for_peer(
         &self,
         peer_id: &str,
@@ -1857,6 +1885,7 @@ impl Primadb {
         )
     }
 
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn serve_pull_request_for_peer(
         &self,
         peer_id: &str,
@@ -1891,6 +1920,7 @@ impl Primadb {
         ))
     }
 
+    #[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
     pub(crate) fn serve_watch_result_for_peer(
         &self,
         peer_id: &str,
