@@ -100,6 +100,11 @@
   passed browser/browser route exchange, browser/Node route exchange, and browser WebRTC via MoQ
   signaling; Cloudflare draft-07 failed in JS/browser paths with WebTransport/session close
   errors.
+- Regenerated generated API docs with `pnpm --dir website run generate:api`.
+- Updated authored docs for application routes, record fan-in, and MoQ/WebTransport fallback
+  semantics in the root README, routing/mesh concept docs, relay/full-node/mesh guide, MoQ guide,
+  and package MoQ example README.
+- Verified docs site generation with `pnpm --dir website run build`.
 
 ## Remaining
 

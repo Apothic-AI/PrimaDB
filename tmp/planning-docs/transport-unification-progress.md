@@ -136,6 +136,9 @@
   - Browser Cloudflare draft-14 passed browser/browser route exchange, browser/Node route exchange,
     and browser WebRTC via MoQ signaling with Cloudflare ICE configuration.
   - Browser/JS Cloudflare draft-07 still failed with WebTransport/session close errors.
+- Updated generated API docs and authored transport docs to clarify that JS MoQ WebSocket fallback
+  is MoQ-over-WebSocket for compatible MoQ endpoints, not PrimaDB WebSocket relay fallback.
+- Verified docs site generation with `pnpm --dir website run build`.
 
 ## Remaining
 

@@ -14,6 +14,13 @@ This page covers the public Rust crate surface. The site also serves the full bu
 
 ## Re-export map
 
+### `app_route`
+
+- `ApplicationRouteEvent`
+- `ApplicationRouteFilter`
+- `ApplicationRouteMessage`
+- `ApplicationRouteSubscription`
+
 ### `auth`
 
 - `AuthClaims`
@@ -103,6 +110,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `TransactionChain`
 - `TraversalSubscription`
 - `VacuumReport`
+- `VectorWatchSubscription`
 
 ### `durable`
 
@@ -169,12 +177,26 @@ This page covers the public Rust crate surface. The site also serves the full bu
 
 - `NativeWebRtcMesh`
 
+### `native_moq`
+
+- `NativeMoqRouteClient`
+- `NativeMoqRouteClientBackend`
+
+### `native_moq_draft07`
+
+- `NativeDraft07MoqRouteClient`
+
+### `native_moq_ietf`
+
+- `NativeIetfMoqRouteClient`
+
 ### `native_relay_server`
 
 - `NativeRelayServer`
 
 ### `native_sync`
 
+- `NativeMoqSync`
 - `NativeWebSocketSync`
 
 ### `net`
@@ -184,7 +206,10 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `MeshConfig`
 - `MeshSignal`
 - `MeshSignalingMode`
+- `MoqDraft`
+- `MoqRelayClientConfig`
 - `RelayClientConfig`
+- `RelayEndpointConfig`
 - `RelayServerConfig`
 
 ### `operation`
@@ -268,14 +293,22 @@ This page covers the public Rust crate surface. The site also serves the full bu
 
 - `error_pull_response`
 - `error_watch_event`
+- `merge_remote_records_fan_in`
 - `PullChunk`
 - `PullRequest`
 - `PullRequestKind`
 - `PullResponse`
 - `PullResponseBody`
+- `RemoteFanInWatch`
+- `RemoteFanInWatchEvent`
 - `RemoteInterestPolicy`
 - `RemoteInterestTarget`
 - `RemotePath`
+- `RemotePeerFailure`
+- `RemotePeerRecords`
+- `RemoteRecordConflict`
+- `RemoteRecordConflictSource`
+- `RemoteRecordsFanIn`
 - `RemoteResult`
 - `RemoteWatchMessage`
 - `RemoteWatchSubscription`
@@ -285,6 +318,15 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `WatchEvent`
 - `WatchRequest`
 - `WatchRequestKind`
+
+### `transport`
+
+- `InMemoryRouteHub`
+- `InMemoryRouteSession`
+- `RouteRelayCore`
+- `RouteRelayForward`
+- `RouteSessionInfo`
+- `RouteTransportKind`
 
 ### `traversal`
 
@@ -303,6 +345,44 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `NodeId`
 - `NodeState`
 - `SetState`
+
+### `vector`
+
+- `VectorBackendKind`
+- `VectorCacheFiles`
+- `VectorCacheKeyRecord`
+- `VectorCacheManifest`
+- `VectorChunkHeader`
+- `VectorChunkingConfig`
+- `VectorCollectionConfig`
+- `VectorEntry`
+- `VectorFilter`
+- `VectorHnswConfig`
+- `VectorIndexStats`
+- `VectorItemMeta`
+- `VectorManagerState`
+- `VectorMatch`
+- `VectorMetadataFilter`
+- `VectorMetric`
+- `VectorSearchResult`
+- `VectorSearchSpec`
+- `VectorStalePolicy`
+
+## Application routes
+
+Rust relay, MoQ, and mesh handles expose RouteEnvelope-level application messages through `publish_application(...)`, `send_application(...)`, and `subscribe_applications(...)`.
+
+The public types are re-exported from the crate root and include `ApplicationRouteMessage`, `ApplicationRouteEvent`, `ApplicationRouteFilter`, and `ApplicationRouteSubscription`.
+
+Application routes preserve the surrounding route id, source peer, target, TTL, dedupe, and transport metadata instead of embedding transport-specific socket handles.
+
+## Record fan-in
+
+Rust relay, MoQ, and mesh handles expose `records_fan_in(...)` and `watch_records_fan_in(...)` for source-tagged multi-peer record scans and watches.
+
+The public types are re-exported from the crate root and include `RemoteRecordsFanIn`, `RemotePeerRecords`, `RemotePeerFailure`, `RemoteRecordConflict`, `RemoteFanInWatch`, and `RemoteFanInWatchEvent`.
+
+Fan-in results include deterministic merged records, conflict metadata, and partial failures while preserving per-peer source metadata.
 
 ## Strict consistency and transactions
 

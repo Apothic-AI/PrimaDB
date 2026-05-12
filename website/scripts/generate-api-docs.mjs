@@ -374,6 +374,34 @@ const strictConsistencyRustBody = [
   "The current coordinated implementation is a single-authority path. Quorum policy types exist, but quorum consensus, authority sequence certificates, and distributed multi-scope transactions are not implemented yet.",
 ].join("\n");
 
+const applicationRoutesApiBody = [
+  "Application route APIs carry caller-defined messages inside `RoutePayload::Application` / `{ kind: \"application\" }` while preserving the surrounding `RouteEnvelope` metadata.",
+  "",
+  "Use `publishApplication(...)` / `publish_application(...)` when the caller has already assembled an application message, or `sendApplication(...)` / `send_application(...)` for the namespace/protocol/topic/body convenience shape.",
+  "",
+  "`subscribeApplications(...)` / `subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, and the application message.",
+  "",
+  "These APIs are RouteEnvelope-level. They do not expose raw WebSocket, WebRTC, WebTransport, or MoQ socket handles.",
+].join("\n");
+
+const recordFanInApiBody = [
+  "`recordsFanIn(...)` / `records_fan_in(...)` sends a record scan to every currently reachable peer that matches the supplied `RemoteInterestPolicy` instead of selecting one ambient peer.",
+  "",
+  "`watchRecordsFanIn(...)` / `watch_records_fan_in(...)` keeps child watches open across all matching peers and emits source-tagged updates plus partial failures. Closing the returned watch cancels all child watches.",
+  "",
+  "Fan-in results include per-peer records, a deterministic merged result, conflict metadata, and partial failure diagnostics. Per-peer source metadata is preserved so callers can apply their own trust or dedupe policy above the built-in deterministic merge.",
+].join("\n");
+
+const jsMoqInteropApiBody = [
+  "`connectPrimadbMoq(...)` uses the JS MoQ stack. In browsers that means `@moq/lite` over WebTransport when available; in Node it uses the configured WebTransport implementation or the package's Node provider.",
+  "",
+  "`@moq/lite`'s WebSocket option is a MoQ transport fallback for compatible MoQ endpoints. It is not the same thing as falling back to PrimaDB's WebSocket relay protocol.",
+  "",
+  "`connectMeshViaMoq(...)` uses MoQ as the WebRTC signaling underlay. Once WebRTC data channels open, mesh data moves over WebRTC. If the MoQ session itself cannot connect, callers should explicitly choose a separate fallback such as normal `connectMesh(...)` with WebSocket relay signaling or local BroadcastChannel signaling.",
+  "",
+  "Current interop evidence: browser/Node JS MoQ passes Cloudflare draft-14 in this workspace; JS draft-07 still fails with WebTransport/session close errors. Native Rust draft-07 uses a separate Cloudflare `moq-rs` backend and passes independently.",
+].join("\n");
+
 function splitTopLevel(text, delimiter = ",") {
   const parts = [];
   let current = "";
@@ -862,6 +890,10 @@ function generateApiDocs() {
           ].join("\n\n"),
         },
         {
+          title: "MoQ and WebTransport fallback",
+          body: jsMoqInteropApiBody,
+        },
+        {
           title: "Related pages",
           body:
             "- [Browser runtime API](browser-runtime)\n- [Threaded browser package API](browser-threads)\n- [Gun runtime API](gun-runtime-api)",
@@ -902,6 +934,14 @@ function generateApiDocs() {
             "Relay `WebSocketSync` exposes peer-agnostic pulls such as `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)`. Relay and mesh handles expose peer-agnostic watches such as `watchQuery(...)` and `watchRecords(...)`.",
             "The default policy selects any connected/recommended peer. Pass a `RemoteInterestPolicy` object only when a caller needs to pin or constrain selection; explicit `remote*` / `watchRemote*` methods remain available for direct peer targeting.",
           ].join("\n\n"),
+        },
+        {
+          title: "Application routes",
+          body: applicationRoutesApiBody,
+        },
+        {
+          title: "Record fan-in",
+          body: recordFanInApiBody,
         },
         {
           title: "Strict consistency and transactions",
@@ -998,6 +1038,18 @@ function generateApiDocs() {
           ].join("\n\n"),
         },
         {
+          title: "Application routes",
+          body: applicationRoutesApiBody,
+        },
+        {
+          title: "Record fan-in",
+          body: recordFanInApiBody,
+        },
+        {
+          title: "MoQ and WebTransport fallback",
+          body: jsMoqInteropApiBody,
+        },
+        {
           title: "Strict consistency and transactions",
           body: strictConsistencyApiBody.replaceAll(
             "`remoteTransaction(...)` / `remote_transaction(...)`",
@@ -1033,6 +1085,19 @@ function generateApiDocs() {
           ].join("\n\n"),
         },
         {
+          title: "Application routes",
+          body: applicationRoutesApiBody
+            .replaceAll("`publishApplication(...)` / `publish_application(...)`", "`publish_application(...)`")
+            .replaceAll("`sendApplication(...)` / `send_application(...)`", "`send_application(...)`")
+            .replaceAll("`subscribeApplications(...)` / `subscribe_applications(...)`", "`subscribe_applications(...)`"),
+        },
+        {
+          title: "Record fan-in",
+          body: recordFanInApiBody
+            .replaceAll("`recordsFanIn(...)` / `records_fan_in(...)`", "`records_fan_in(...)`")
+            .replaceAll("`watchRecordsFanIn(...)` / `watch_records_fan_in(...)`", "`watch_records_fan_in(...)`"),
+        },
+        {
           title: "Strict consistency and transactions",
           body: strictConsistencyApiBody.replaceAll("`remoteTransaction(...)` / `remote_transaction(...)`", "`remote_transaction(...)`"),
         },
@@ -1058,6 +1123,22 @@ function generateApiDocs() {
         "This page covers the public Rust crate surface. The site also serves the full bundled rustdoc so Rust consumers can browse the real crate API directly.",
       libPath: resolve(repoRoot, "src", "lib.rs"),
       extraSections: [
+        {
+          title: "Application routes",
+          body: [
+            "Rust relay, MoQ, and mesh handles expose RouteEnvelope-level application messages through `publish_application(...)`, `send_application(...)`, and `subscribe_applications(...)`.",
+            "The public types are re-exported from the crate root and include `ApplicationRouteMessage`, `ApplicationRouteEvent`, `ApplicationRouteFilter`, and `ApplicationRouteSubscription`.",
+            "Application routes preserve the surrounding route id, source peer, target, TTL, dedupe, and transport metadata instead of embedding transport-specific socket handles.",
+          ].join("\n\n"),
+        },
+        {
+          title: "Record fan-in",
+          body: [
+            "Rust relay, MoQ, and mesh handles expose `records_fan_in(...)` and `watch_records_fan_in(...)` for source-tagged multi-peer record scans and watches.",
+            "The public types are re-exported from the crate root and include `RemoteRecordsFanIn`, `RemotePeerRecords`, `RemotePeerFailure`, `RemoteRecordConflict`, `RemoteFanInWatch`, and `RemoteFanInWatchEvent`.",
+            "Fan-in results include deterministic merged records, conflict metadata, and partial failures while preserving per-peer source metadata.",
+          ].join("\n\n"),
+        },
         {
           title: "Strict consistency and transactions",
           body: strictConsistencyRustBody,

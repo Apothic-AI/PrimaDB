@@ -6,7 +6,8 @@ overlay protocol instead of using a separate MoQ-only sync format.
 
 It uses an in-process WebTransport pair so it runs without a public MoQ relay. The same helper can
 also connect to a real MoQ relay with `connectPrimadbMoq(...)`; `@moq/lite` handles WebTransport
-and WebSocket fallback selection.
+and MoQ-over-WebSocket fallback selection for compatible MoQ endpoints. That fallback is not the
+same as PrimaDB's WebSocket relay protocol.
 
 ## Run
 

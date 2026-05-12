@@ -113,6 +113,12 @@ external signaling, forwards outgoing `RoutePayload::Signal` routes into MoQ, an
 MoQ routes back into the mesh. MoQ-only peers are still relay-routed; they only form direct WebRTC
 links if they also run the WebRTC mesh layer.
 
+MoQ signaling failure is not an automatic PrimaDB WebSocket relay fallback. If an application wants
+that behavior, implement an explicit connection ladder: try `connectMeshViaMoq(...)`, then normal
+`connectMesh(...)` with a WebSocket relay endpoint, then local `BroadcastChannel` signaling if that
+fits the deployment. The JS MoQ helper's WebSocket option is a MoQ transport fallback for compatible
+MoQ endpoints, not the PrimaDB WebSocket relay protocol.
+
 Use the package-local examples when evaluating them:
 
 ```bash

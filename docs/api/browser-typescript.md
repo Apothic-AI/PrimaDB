@@ -103,6 +103,187 @@ export interface PrimadbMoqSyncPayload {
 }
 ```
 
+#### `PrimadbRouteTarget`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteTarget = {
+    kind: "broadcast";
+} | {
+    kind: "peer";
+    value: string;
+} | {
+    kind: "topic";
+    value: string;
+};
+```
+
+#### `PrimadbRoutePayload`
+
+Kind: type alias
+
+```ts
+export type PrimadbRoutePayload = {
+    kind: "application";
+    message: PrimadbApplicationRouteMessage;
+} | {
+    kind: "sync";
+    encoding: string;
+    payload: unknown;
+} | {
+    kind: "presence";
+    peer: PrimadbPeerPresence;
+} | {
+    kind: "peer_exchange";
+    peers: PrimadbPeerRecommendation[];
+} | {
+    kind: "batch";
+    items: PrimadbRouteBatchItem[];
+} | {
+    kind: string;
+    [key: string]: unknown;
+};
+```
+
+#### `PrimadbRouteBatchItem`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteBatchItem = {
+    kind: "application";
+    message: PrimadbApplicationRouteMessage;
+} | {
+    kind: "sync";
+    encoding: string;
+    payload: unknown;
+} | {
+    kind: "presence";
+    peer: PrimadbPeerPresence;
+} | {
+    kind: "peer_exchange";
+    peers: PrimadbPeerRecommendation[];
+} | {
+    kind: string;
+    [key: string]: unknown;
+};
+```
+
+#### `PrimadbPeerPresence`
+
+Kind: interface
+
+```ts
+export interface PrimadbPeerPresence {
+    peer_id: string;
+    replica_id: string;
+    transport: string;
+    identity?: unknown;
+    capabilities?: string[];
+    topics?: string[];
+    metadata?: Record<string, string>;
+}
+```
+
+#### `PrimadbPeerRecommendation`
+
+Kind: interface
+
+```ts
+export interface PrimadbPeerRecommendation {
+    peer: PrimadbPeerPresence;
+    relay_urls?: string[];
+    score?: number;
+    discovered_at_millis?: number;
+}
+```
+
+#### `PrimadbRouteEnvelope`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteEnvelope {
+    route_id: string;
+    from: string;
+    channel: string;
+    target: PrimadbRouteTarget;
+    ttl: number;
+    hops: number;
+    issued_at_millis: number;
+    reply_to?: string | null;
+    content_hash?: string | null;
+    seen_by: string[];
+    payload: PrimadbRoutePayload;
+}
+```
+
+#### `PrimadbMoqRoutePayload`
+
+Kind: interface
+
+```ts
+export interface PrimadbMoqRoutePayload {
+    type: "primadb.route.v1";
+    from: string;
+    sentAt: number;
+    route: PrimadbRouteEnvelope;
+}
+```
+
+#### `PrimadbRouteHandler`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteHandler = (route: PrimadbRouteEnvelope) => void;
+```
+
+#### `PrimadbApplicationRouteMessage`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationRouteMessage {
+    namespace: string;
+    protocol: string;
+    topic?: string | null;
+    body: unknown;
+    metadata?: Record<string, unknown>;
+}
+```
+
+#### `PrimadbApplicationRouteEvent`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationRouteEvent {
+    routeId: string;
+    from: string;
+    channel: string;
+    target: PrimadbRouteTarget;
+    issuedAtMillis: number;
+    receivedAtMillis: number;
+    transport: "moq";
+    verifiedIdentity: null;
+    message: PrimadbApplicationRouteMessage;
+}
+```
+
+#### `PrimadbApplicationRouteFilter`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationRouteFilter {
+    namespace?: string | null;
+    protocol?: string | null;
+    topic?: string | null;
+}
+```
+
 #### `PrimadbMoqSessionOptions`
 
 Kind: interface
@@ -115,6 +296,7 @@ export interface PrimadbMoqSessionOptions {
     peerId?: string;
     target?: PrimadbRouteTarget;
     intervalMs?: number;
+    retryIntervalMs?: number;
     publish?: boolean;
     subscribe?: string[];
     closeConnection?: boolean;
@@ -135,40 +317,116 @@ export interface ConnectPrimadbMoqOptions extends PrimadbMoqSessionOptions {
 }
 ```
 
+#### `PrimadbExternalMesh`
+
+Kind: interface
+
+```ts
+export interface PrimadbExternalMesh {
+    peerId(): string;
+    signalingMode(): string;
+    relayUrl(): string | undefined;
+    signalingReadyState(): number | undefined;
+    peerCount(): number;
+    openPeerCount(): number;
+    acceptSignalingRoute(route: PrimadbRouteEnvelope): void;
+    announceSignalingPresence(): void;
+    close(): void;
+}
+```
+
 #### `PrimadbMeshLike`
 
 Kind: interface
 
 ```ts
 export interface PrimadbMeshLike extends PrimadbLike {
-  connectMeshWithExternalSignaling(
-    config: PrimadbExternalMeshConfig,
-    sendRoute: (route: PrimadbRouteEnvelope) => unknown,
-  ): PrimadbExternalMesh;
+    connectMeshWithExternalSignaling(config: PrimadbExternalMeshConfig, sendRoute: (route: PrimadbRouteEnvelope) => unknown): PrimadbExternalMesh;
 }
 ```
 
-#### `connectMeshViaMoq`
+#### `PrimadbMoqRelayEndpointConfig`
 
-Kind: function
+Kind: interface
 
 ```ts
-export declare function connectMeshViaMoq(
-  db: PrimadbMeshLike,
-  options: ConnectPrimadbMeshViaMoqOptions,
-): Promise<PrimadbMoqMesh>;
+export interface PrimadbMoqRelayEndpointConfig {
+    kind: "moq";
+    url: string;
+    path: string;
+    track?: string;
+    channel?: string;
+    subscribe?: string[];
+    draft?: "draft_07" | "draft_14" | "draft_latest";
+    retryIntervalMs?: number;
+    tlsDisableVerify?: boolean;
+    sessionAuth?: unknown;
+}
 ```
 
-#### `connectMeshViaMoqSession`
+#### `PrimadbExternalMeshConfig`
 
-Kind: function
+Kind: interface
 
 ```ts
-export declare function connectMeshViaMoqSession(
-  db: PrimadbMeshLike,
-  moq: PrimadbMoqSession,
-  options: ConnectPrimadbMeshViaMoqSessionOptions,
-): PrimadbMoqMesh;
+export interface PrimadbExternalMeshConfig {
+    room: string;
+    signaling?: "relay" | "broadcast_channel";
+    relayEndpoint?: PrimadbMoqRelayEndpointConfig;
+    retryIntervalMs?: number;
+    iceServers?: unknown[];
+    sessionAuth?: unknown;
+    [key: string]: unknown;
+}
+```
+
+#### `ConnectPrimadbMeshViaMoqOptions`
+
+Kind: interface
+
+```ts
+export interface ConnectPrimadbMeshViaMoqOptions extends ConnectPrimadbMoqOptions {
+    room: string;
+    retryIntervalMs?: number;
+    iceServers?: unknown[];
+    sessionAuth?: unknown;
+    draft?: "draft_07" | "draft_14" | "draft_latest";
+    meshConfig?: Record<string, unknown>;
+}
+```
+
+#### `ConnectPrimadbMeshViaMoqSessionOptions`
+
+Kind: interface
+
+```ts
+export interface ConnectPrimadbMeshViaMoqSessionOptions {
+    room: string;
+    url?: string | URL;
+    path?: string;
+    track?: string;
+    channel?: string;
+    subscribe?: string[];
+    retryIntervalMs?: number;
+    intervalMs?: number;
+    iceServers?: unknown[];
+    sessionAuth?: unknown;
+    draft?: "draft_07" | "draft_14" | "draft_latest";
+    meshConfig?: Record<string, unknown>;
+    closeMoqSession?: boolean;
+}
+```
+
+#### `PrimadbMoqMesh`
+
+Kind: interface
+
+```ts
+export interface PrimadbMoqMesh {
+    mesh: PrimadbExternalMesh;
+    moq: PrimadbMoqSession;
+    close(): void;
+}
 ```
 
 #### `PrimadbMoqLoopbackOptions`
@@ -181,6 +439,7 @@ export interface PrimadbMoqLoopbackOptions {
     subscriberDb: PrimadbLike;
     path: string;
     track?: string;
+    channel?: string;
     intervalMs?: number;
     url?: string | URL;
     protocol?: string;
@@ -220,13 +479,44 @@ Kind: function
 export declare function connectPrimadbMoq(db: PrimadbLike, options: ConnectPrimadbMoqOptions): Promise<PrimadbMoqSession>;
 ```
 
+#### `connectMeshViaMoq`
+
+Kind: function
+
+```ts
+export declare function connectMeshViaMoq(db: PrimadbMeshLike, options: ConnectPrimadbMeshViaMoqOptions): Promise<PrimadbMoqMesh>;
+```
+
+#### `connectMeshViaMoqSession`
+
+Kind: function
+
+```ts
+export declare function connectMeshViaMoqSession(db: PrimadbMeshLike, moq: PrimadbMoqSession, options: ConnectPrimadbMeshViaMoqSessionOptions): PrimadbMoqMesh;
+```
+
+#### `PrimadbApplicationRouteSubscription`
+
+Kind: class
+
+```ts
+export declare class PrimadbApplicationRouteSubscription {
+    readonly filter: PrimadbApplicationRouteFilter;
+    constructor(filter: PrimadbApplicationRouteFilter, onClose: () => void);
+    next(): Promise<PrimadbApplicationRouteEvent | null>;
+    tryNext(): PrimadbApplicationRouteEvent | null;
+    drain(): PrimadbApplicationRouteEvent[];
+    close(): void;
+    enqueue(event: PrimadbApplicationRouteEvent): void;
+}
+```
+
 #### `PrimadbMoqSession`
 
 Kind: class
 
 ```ts
 export declare class PrimadbMoqSession {
-    #private;
     readonly db: PrimadbLike;
     readonly connection: MoqConnection;
     readonly path: string;
@@ -240,6 +530,12 @@ export declare class PrimadbMoqSession {
     subscribe(path?: string): string;
     startAutoFlush(): void;
     onRoute(handler: PrimadbRouteHandler): () => void;
+    publishApplication(message: PrimadbApplicationRouteMessage, target?: PrimadbRouteTarget): number;
+    sendApplication(namespace: string, protocol: string, topic: string | null | undefined, body: unknown, metadata?: Record<string, unknown>, target?: PrimadbRouteTarget): number;
+    subscribeApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteSubscription;
+    nextApplication(filter?: PrimadbApplicationRouteFilter): Promise<PrimadbApplicationRouteEvent | null>;
+    tryNextApplication(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent | null;
+    drainApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent[];
     addAcceptedPeerId(peerId: string): () => void;
     knownPeers(): PrimadbPeerPresence[];
     recommendedPeers(): PrimadbPeerRecommendation[];
@@ -526,6 +822,157 @@ export interface RecordBatchReport {
 }
 ```
 
+#### `VectorMetric`
+
+Kind: type alias
+
+```ts
+export type VectorMetric = "cosine" | "l2" | "dot";
+```
+
+#### `VectorBackendKind`
+
+Kind: type alias
+
+```ts
+export type VectorBackendKind = "exact" | "edgevec";
+```
+
+#### `VectorManagerState`
+
+Kind: type alias
+
+```ts
+export type VectorManagerState = "ready" | "catching_up" | "rebuilding" | "stale" | "failed";
+```
+
+#### `VectorStalePolicy`
+
+Kind: type alias
+
+```ts
+export type VectorStalePolicy = "fallback_exact" | "allow_stale" | "error";
+```
+
+#### `VectorHnswConfig`
+
+Kind: interface
+
+```ts
+export interface VectorHnswConfig {
+    m?: number | null;
+    efConstruction?: number | null;
+    efSearch?: number | null;
+    tombstoneRebuildRatio?: number | null;
+}
+```
+
+#### `VectorChunkingConfig`
+
+Kind: interface
+
+```ts
+export interface VectorChunkingConfig {
+    chunkBytes: number;
+}
+```
+
+#### `VectorCollectionConfig`
+
+Kind: interface
+
+```ts
+export interface VectorCollectionConfig {
+    dim: number;
+    metric?: VectorMetric;
+    backend?: VectorBackendKind | null;
+    hnsw?: VectorHnswConfig | null;
+    chunking?: VectorChunkingConfig;
+}
+```
+
+#### `VectorEntry`
+
+Kind: interface
+
+```ts
+export interface VectorEntry {
+    id: string;
+    vector: number[];
+    metadata?: JsonValue | null;
+    writeId: string;
+    checksum: string;
+}
+```
+
+#### `VectorMetadataFilter`
+
+Kind: interface
+
+```ts
+export interface VectorMetadataFilter {
+    eq?: Record<string, JsonValue>;
+    prefix?: Record<string, string>;
+    exists?: string[];
+}
+```
+
+#### `VectorFilter`
+
+Kind: interface
+
+```ts
+export interface VectorFilter {
+    idPrefix?: string | null;
+    ids?: string[];
+    metadata?: VectorMetadataFilter | null;
+}
+```
+
+#### `VectorSearchSpec`
+
+Kind: interface
+
+```ts
+export interface VectorSearchSpec {
+    limit: number;
+    ef?: number | null;
+    filter?: VectorFilter | null;
+    includeVector?: boolean;
+    includeMetadata?: boolean;
+    exact?: boolean;
+    stalePolicy?: VectorStalePolicy;
+}
+```
+
+#### `VectorMatch`
+
+Kind: interface
+
+```ts
+export interface VectorMatch {
+    id: string;
+    distance: number;
+    metadata?: JsonValue | null;
+    vector?: number[] | null;
+}
+```
+
+#### `VectorSearchResult`
+
+Kind: interface
+
+```ts
+export interface VectorSearchResult {
+    matches: VectorMatch[];
+    exact: boolean;
+    backend: VectorBackendKind;
+    state: VectorManagerState;
+    stale: boolean;
+    approximateReason?: string | null;
+}
+```
+
 #### `StorageSyncReport`
 
 Kind: interface
@@ -671,6 +1118,11 @@ export type PullRequestKind = {
     kind: "records";
     scan: RecordScan;
 } | {
+    kind: "vector_search";
+    collection: string;
+    query: number[];
+    spec: VectorSearchSpec;
+} | {
     kind: "node";
     id: string;
 } | {
@@ -699,6 +1151,9 @@ export type RemoteResult = {
 } | {
     kind: "records";
     result: RecordScanResult;
+} | {
+    kind: "vector_search";
+    result: VectorSearchResult;
 } | {
     kind: "node";
     node: unknown | null;
@@ -809,6 +1264,16 @@ export declare function clearNetworkHooks(db: Primadb): void;
 Traversal methods are exported from the generated WASM runtime types.
 
 `traverse(...)` is local-first and bounded. Connected relay or mesh transports schedule missing linked nodes for background fetch, and traversal watches receive updates as those nodes arrive.
+
+## MoQ and WebTransport fallback
+
+`connectPrimadbMoq(...)` uses the JS MoQ stack. In browsers that means `@moq/lite` over WebTransport when available; in Node it uses the configured WebTransport implementation or the package's Node provider.
+
+`@moq/lite`'s WebSocket option is a MoQ transport fallback for compatible MoQ endpoints. It is not the same thing as falling back to PrimaDB's WebSocket relay protocol.
+
+`connectMeshViaMoq(...)` uses MoQ as the WebRTC signaling underlay. Once WebRTC data channels open, mesh data moves over WebRTC. If the MoQ session itself cannot connect, callers should explicitly choose a separate fallback such as normal `connectMesh(...)` with WebSocket relay signaling or local BroadcastChannel signaling.
+
+Current interop evidence: browser/Node JS MoQ passes Cloudflare draft-14 in this workspace; JS draft-07 still fails with WebTransport/session close errors. Native Rust draft-07 uses a separate Cloudflare `moq-rs` backend and passes independently.
 
 ## Related pages
 

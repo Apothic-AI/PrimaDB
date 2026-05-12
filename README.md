@@ -782,6 +782,8 @@ Primadb now routes transport messages through `RouteEnvelope` with:
 - peer recommendation exchange
 - routed sync payloads
 - routed pull request/response payloads
+- routed application payloads for caller-defined protocols
+- multi-peer record fan-in requests and watch events
 - batch payloads for grouped route delivery
 - signaling payloads
 - snapshot request/response
@@ -802,6 +804,11 @@ The included relay example upgrades that into a networked DAM-style path:
 - new clients receive the current peer set plus peer recommendations on connect
 - targeted `peer` routes are forwarded only to the addressed client
 - disconnects broadcast offline presence so peer lists converge
+
+MoQ/WebTransport can be used as a route underlay and as browser WebRTC signaling through
+`connectMeshViaMoq(...)`. That path does not silently fall back to PrimaDB's WebSocket relay
+protocol if the MoQ session fails; callers that want a fallback ladder should explicitly try MoQ,
+then relay-backed WebRTC signaling, then local BroadcastChannel signaling where appropriate.
 
 ## Native Sync And Mesh
 

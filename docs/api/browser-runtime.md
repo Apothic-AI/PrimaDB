@@ -108,11 +108,13 @@ class Primadb {
   scanRecords(scan: any): any;
   watchRecords(scan: any, callback: Function): RecordWatchSubscription;
   createVectorCollection(name: string, config: any): void;
-  putVector(collection: string, id: string, vector: any, metadata: any | null): void;
+  putVector(collection: string, id: string, vector: any, metadata: any): void;
   deleteVector(collection: string, id: string): void;
   getVector(collection: string, id: string): any;
   searchVectors(collection: string, query: any, spec: any): any;
   watchVectorSearch(collection: string, query: any, spec: any, callback: Function): VectorWatchSubscription;
+  saveVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<any>;
+  loadVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<boolean>;
   applyRecordBatch(batch: any): any;
   deleteRecord(key: string): void;
   syncStorage(): any;
@@ -135,8 +137,6 @@ class Primadb {
   saveOpfsSegments(directory: string, namespace: string): Promise<void>;
   loadOpfsSegments(directory: string, namespace: string): Promise<boolean>;
   enableOpfsSegmentPersistence(directory: string, namespace: string, load_existing: boolean | null): Promise<OpfsSegmentPersistence>;
-  saveVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<any>;
-  loadVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<boolean>;
   openBlobStorage(config: any): any;
   enableIndexedDbBlobStorage(database_name: string, store_name: string, namespace: string): IndexedDbBlobStorage;
   connectWebSocket(url: string, retry_interval_ms: number | null): WebSocketSync;
@@ -144,6 +144,7 @@ class Primadb {
   connectWebRtcMesh(room: string, retry_interval_ms: number | null, options: any | null): WebRtcMesh;
   connectWebRtcMeshViaRelay(url: string, room: string, retry_interval_ms: number | null, options: any | null): WebRtcMesh;
   connectMesh(config: any): WebRtcMesh;
+  connectMeshWithExternalSignaling(config: any, send_route: Function): WebRtcMesh;
 }
 ```
 
@@ -217,6 +218,28 @@ class RemoteWatch {
 }
 ```
 
+### `ApplicationRouteSubscription`
+
+```ts
+class ApplicationRouteSubscription {
+  next(): Promise<any>;
+  tryNext(): any;
+  drain(): any;
+  close(): void;
+}
+```
+
+### `RemoteFanInWatch`
+
+```ts
+class RemoteFanInWatch {
+  next(): Promise<any>;
+  tryNext(): any;
+  drain(): any;
+  close(): void;
+}
+```
+
 ### `Scope`
 
 ```ts
@@ -279,10 +302,14 @@ class WebSocketSync {
   pendingCount(): number;
   inflightCount(): number;
   recommendedPeers(): any;
+  publishApplication(message: any, target: any | null): any;
+  sendApplication(namespace: string, protocol: string, topic: string | null, body: any, metadata: any | null, target: any | null): any;
+  subscribeApplications(filter: any | null): ApplicationRouteSubscription;
   get(path: any, policy: any | null): Promise<any>;
   query(path: any, spec: any, policy: any | null): Promise<any>;
   lex(path: any, spec: any, policy: any | null): Promise<any>;
   records(scan: any, policy: any | null): Promise<any>;
+  recordsFanIn(scan: any, policy: any | null): Promise<any>;
   vectorSearch(collection: string, query: any, spec: any, policy: any | null): Promise<any>;
   node(id: string, policy: any | null): Promise<any>;
   snapshot(root: string | null, policy: any | null): Promise<any>;
@@ -291,6 +318,7 @@ class WebSocketSync {
   watchQuery(path: any, spec: any, policy: any | null): RemoteWatch;
   watchLex(path: any, spec: any, policy: any | null): RemoteWatch;
   watchRecords(scan: any, policy: any | null): RemoteWatch;
+  watchRecordsFanIn(scan: any, policy: any | null): RemoteFanInWatch;
   watchVectorSearch(collection: string, query: any, spec: any, policy: any | null): RemoteWatch;
   watchNode(id: string, policy: any | null): RemoteWatch;
   watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
@@ -324,14 +352,21 @@ class WebRtcMesh {
   signalingMode(): string;
   relayUrl(): string | null;
   signalingReadyState(): number | null;
+  acceptSignalingRoute(route: any): void;
+  announceSignalingPresence(): void;
   peerCount(): number;
   openPeerCount(): number;
   inflightCount(): number;
+  publishApplication(message: any, target: any | null): any;
+  sendApplication(namespace: string, protocol: string, topic: string | null, body: any, metadata: any | null, target: any | null): any;
+  subscribeApplications(filter: any | null): ApplicationRouteSubscription;
+  recordsFanIn(scan: any, policy: any | null): Promise<any>;
   watchGet(path: any, policy: any | null): RemoteWatch;
   watchMap(path: any, policy: any | null): RemoteWatch;
   watchQuery(path: any, spec: any, policy: any | null): RemoteWatch;
   watchLex(path: any, spec: any, policy: any | null): RemoteWatch;
   watchRecords(scan: any, policy: any | null): RemoteWatch;
+  watchRecordsFanIn(scan: any, policy: any | null): RemoteFanInWatch;
   watchVectorSearch(collection: string, query: any, spec: any, policy: any | null): RemoteWatch;
   watchNode(id: string, policy: any | null): RemoteWatch;
   watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
@@ -372,6 +407,24 @@ Records persist through IndexedDB/OPFS segment persistence and use the same grap
 Relay `WebSocketSync` exposes peer-agnostic pulls such as `get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)`. Relay and mesh handles expose peer-agnostic watches such as `watchQuery(...)` and `watchRecords(...)`.
 
 The default policy selects any connected/recommended peer. Pass a `RemoteInterestPolicy` object only when a caller needs to pin or constrain selection; explicit `remote*` / `watchRemote*` methods remain available for direct peer targeting.
+
+## Application routes
+
+Application route APIs carry caller-defined messages inside `RoutePayload::Application` / `{ kind: "application" }` while preserving the surrounding `RouteEnvelope` metadata.
+
+Use `publishApplication(...)` / `publish_application(...)` when the caller has already assembled an application message, or `sendApplication(...)` / `send_application(...)` for the namespace/protocol/topic/body convenience shape.
+
+`subscribeApplications(...)` / `subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, and the application message.
+
+These APIs are RouteEnvelope-level. They do not expose raw WebSocket, WebRTC, WebTransport, or MoQ socket handles.
+
+## Record fan-in
+
+`recordsFanIn(...)` / `records_fan_in(...)` sends a record scan to every currently reachable peer that matches the supplied `RemoteInterestPolicy` instead of selecting one ambient peer.
+
+`watchRecordsFanIn(...)` / `watch_records_fan_in(...)` keeps child watches open across all matching peers and emits source-tagged updates plus partial failures. Closing the returned watch cancels all child watches.
+
+Fan-in results include per-peer records, a deterministic merged result, conflict metadata, and partial failure diagnostics. Per-peer source metadata is preserved so callers can apply their own trust or dedupe policy above the built-in deterministic merge.
 
 ## Strict consistency and transactions
 

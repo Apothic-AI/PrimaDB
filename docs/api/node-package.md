@@ -210,6 +210,47 @@ export interface RelayClientConfig {
 }
 ```
 
+#### `MoqDraft`
+
+Kind: type alias
+
+```ts
+export type MoqDraft = "draft07" | "draft14" | "draft_latest";
+```
+
+#### `MoqRelayClientConfig`
+
+Kind: interface
+
+```ts
+export interface MoqRelayClientConfig {
+    url: string;
+    path: string;
+    track?: string;
+    channel?: string;
+    subscribe?: string[];
+    draft?: MoqDraft;
+    retryIntervalMs?: number;
+    tlsDisableVerify?: boolean;
+    sessionAuth?: SessionAuthConfig;
+}
+```
+
+#### `RelayEndpointConfig`
+
+Kind: type alias
+
+```ts
+export type RelayEndpointConfig = {
+    kind: "web_socket";
+    url: string;
+    retryIntervalMs?: number;
+    sessionAuth?: SessionAuthConfig;
+} | ({
+    kind: "moq";
+} & MoqRelayClientConfig);
+```
+
 #### `RelayServerConfig`
 
 Kind: interface
@@ -217,6 +258,7 @@ Kind: interface
 ```ts
 export interface RelayServerConfig {
     bind: string;
+    moq?: MoqRelayClientConfig | null;
 }
 ```
 
@@ -249,6 +291,7 @@ export interface MeshConfig {
     room: string;
     signaling?: MeshSignalingMode;
     relayUrl?: string | null;
+    relayEndpoint?: RelayEndpointConfig | null;
     retryIntervalMs?: number;
     iceServers?: IceServerConfig[];
     sessionAuth?: SessionAuthConfig;
@@ -462,6 +505,157 @@ export interface RecordBatchReport {
     deletes: number;
     rangeDeletes: number;
     operationCount: number;
+}
+```
+
+#### `VectorMetric`
+
+Kind: type alias
+
+```ts
+export type VectorMetric = "cosine" | "l2" | "dot";
+```
+
+#### `VectorBackendKind`
+
+Kind: type alias
+
+```ts
+export type VectorBackendKind = "exact" | "edgevec";
+```
+
+#### `VectorManagerState`
+
+Kind: type alias
+
+```ts
+export type VectorManagerState = "ready" | "catching_up" | "rebuilding" | "stale" | "failed";
+```
+
+#### `VectorStalePolicy`
+
+Kind: type alias
+
+```ts
+export type VectorStalePolicy = "fallback_exact" | "allow_stale" | "error";
+```
+
+#### `VectorHnswConfig`
+
+Kind: interface
+
+```ts
+export interface VectorHnswConfig {
+    m?: number | null;
+    efConstruction?: number | null;
+    efSearch?: number | null;
+    tombstoneRebuildRatio?: number | null;
+}
+```
+
+#### `VectorChunkingConfig`
+
+Kind: interface
+
+```ts
+export interface VectorChunkingConfig {
+    chunkBytes: number;
+}
+```
+
+#### `VectorCollectionConfig`
+
+Kind: interface
+
+```ts
+export interface VectorCollectionConfig {
+    dim: number;
+    metric?: VectorMetric;
+    backend?: VectorBackendKind | null;
+    hnsw?: VectorHnswConfig | null;
+    chunking?: VectorChunkingConfig;
+}
+```
+
+#### `VectorEntry`
+
+Kind: interface
+
+```ts
+export interface VectorEntry {
+    id: string;
+    vector: number[];
+    metadata?: JsonValue | null;
+    writeId: string;
+    checksum: string;
+}
+```
+
+#### `VectorMetadataFilter`
+
+Kind: interface
+
+```ts
+export interface VectorMetadataFilter {
+    eq?: Record<string, JsonValue>;
+    prefix?: Record<string, string>;
+    exists?: string[];
+}
+```
+
+#### `VectorFilter`
+
+Kind: interface
+
+```ts
+export interface VectorFilter {
+    idPrefix?: string | null;
+    ids?: string[];
+    metadata?: VectorMetadataFilter | null;
+}
+```
+
+#### `VectorSearchSpec`
+
+Kind: interface
+
+```ts
+export interface VectorSearchSpec {
+    limit: number;
+    ef?: number | null;
+    filter?: VectorFilter | null;
+    includeVector?: boolean;
+    includeMetadata?: boolean;
+    exact?: boolean;
+    stalePolicy?: VectorStalePolicy;
+}
+```
+
+#### `VectorMatch`
+
+Kind: interface
+
+```ts
+export interface VectorMatch {
+    id: string;
+    distance: number;
+    metadata?: JsonValue | null;
+    vector?: number[] | null;
+}
+```
+
+#### `VectorSearchResult`
+
+Kind: interface
+
+```ts
+export interface VectorSearchResult {
+    matches: VectorMatch[];
+    exact: boolean;
+    backend: VectorBackendKind;
+    state: VectorManagerState;
+    stale: boolean;
+    approximateReason?: string | null;
 }
 ```
 
@@ -972,6 +1166,11 @@ export type PullRequestKind = {
     kind: "records";
     scan: RecordScan;
 } | {
+    kind: "vector_search";
+    collection: string;
+    query: number[];
+    spec: VectorSearchSpec;
+} | {
     kind: "node";
     id: string;
 } | {
@@ -1005,6 +1204,9 @@ export type RemoteResult = {
 } | {
     kind: "records";
     result: RecordScanResult;
+} | {
+    kind: "vector_search";
+    result: VectorSearchResult;
 } | {
     kind: "node";
     node: JsonValue | null;
@@ -1122,6 +1324,160 @@ export interface RemoteWatchMessage {
 }
 ```
 
+#### `RouteTarget`
+
+Kind: type alias
+
+```ts
+export type RouteTarget = {
+    kind: "broadcast";
+} | {
+    kind: "peer";
+    value: string;
+} | {
+    kind: "topic";
+    value: string;
+};
+```
+
+#### `RouteTransportKind`
+
+Kind: type alias
+
+```ts
+export type RouteTransportKind = "web_socket" | "moq" | "web_rtc" | "broadcast_channel" | "in_memory";
+```
+
+#### `ApplicationRouteMessage`
+
+Kind: interface
+
+```ts
+export interface ApplicationRouteMessage {
+    namespace: string;
+    protocol: string;
+    topic?: string | null;
+    body: JsonValue;
+    metadata?: Record<string, JsonValue>;
+}
+```
+
+#### `ApplicationRouteEvent`
+
+Kind: interface
+
+```ts
+export interface ApplicationRouteEvent {
+    routeId: string;
+    from: string;
+    channel: string;
+    target: RouteTarget;
+    issuedAtMillis: number;
+    receivedAtMillis: number;
+    transport: RouteTransportKind;
+    verifiedIdentity?: VerifiedIdentity | null;
+    message: ApplicationRouteMessage;
+}
+```
+
+#### `ApplicationRouteFilter`
+
+Kind: interface
+
+```ts
+export interface ApplicationRouteFilter {
+    namespace?: string | null;
+    protocol?: string | null;
+    topic?: string | null;
+}
+```
+
+#### `RemotePeerFailure`
+
+Kind: interface
+
+```ts
+export interface RemotePeerFailure {
+    peerId: string;
+    transport: RouteTransportKind;
+    message: string;
+}
+```
+
+#### `RemotePeerRecords`
+
+Kind: interface
+
+```ts
+export interface RemotePeerRecords {
+    peerId: string;
+    transport: RouteTransportKind;
+    result: RecordScanResult;
+}
+```
+
+#### `RemoteRecordConflictSource`
+
+Kind: interface
+
+```ts
+export interface RemoteRecordConflictSource {
+    peerId: string;
+    transport: RouteTransportKind;
+    contentHash: string;
+}
+```
+
+#### `RemoteRecordConflict`
+
+Kind: interface
+
+```ts
+export interface RemoteRecordConflict {
+    key: string;
+    winnerPeerId: string;
+    winnerHash: string;
+    sources: RemoteRecordConflictSource[];
+}
+```
+
+#### `RemoteRecordsFanIn`
+
+Kind: interface
+
+```ts
+export interface RemoteRecordsFanIn {
+    requestId: string;
+    records: RemotePeerRecords[];
+    failures: RemotePeerFailure[];
+    merged: RecordScanResult;
+    conflicts: RemoteRecordConflict[];
+}
+```
+
+#### `RemoteFanInWatchEvent`
+
+Kind: type alias
+
+```ts
+export type RemoteFanInWatchEvent = {
+    kind: "update";
+    peerId: string;
+    transport: RouteTransportKind;
+    initial: boolean;
+    sequence: number;
+    result: RemoteResult;
+} | {
+    kind: "failure";
+    peerId: string;
+    transport: RouteTransportKind;
+    message: string;
+    terminal: boolean;
+} | {
+    kind: "closed";
+};
+```
+
 #### `Primadb`
 
 Kind: class
@@ -1160,6 +1516,12 @@ export declare class Primadb {
     getRecord(key: string): RecordEntry | null;
     scanRecords(scan: RecordScan): RecordScanResult;
     watchRecords(scan: RecordScan): RecordWatchSubscription;
+    createVectorCollection(name: string, config: VectorCollectionConfig): void;
+    putVector(collection: string, id: string, vector: number[], metadata?: JsonValue | null): void;
+    deleteVector(collection: string, id: string): void;
+    getVector(collection: string, id: string): VectorEntry | null;
+    searchVectors(collection: string, query: number[], spec: VectorSearchSpec): VectorSearchResult;
+    watchVectorSearch(collection: string, query: number[], spec: VectorSearchSpec): VectorWatchSubscription;
     applyRecordBatch(batch: RecordBatch): RecordBatchReport;
     deleteRecord(key: string): void;
     attachNodeScript(path: RemotePath, script: NodeScript): void;
@@ -1258,6 +1620,18 @@ export declare class RecordWatchSubscription {
 }
 ```
 
+#### `VectorWatchSubscription`
+
+Kind: class
+
+```ts
+export declare class VectorWatchSubscription {
+    next(): Promise<{ done: boolean; value?: VectorSearchResult | null }>;
+    tryNext(): { done: boolean; value?: VectorSearchResult | null };
+    close(): void;
+}
+```
+
 #### `RelayServer`
 
 Kind: class
@@ -1285,6 +1659,32 @@ export declare class RemoteWatch {
 }
 ```
 
+#### `ApplicationRouteSubscription`
+
+Kind: class
+
+```ts
+export declare class ApplicationRouteSubscription {
+    next(): Promise<ApplicationRouteEvent | null>;
+    tryNext(): ApplicationRouteEvent | null;
+    drain(): ApplicationRouteEvent[];
+    close(): void;
+}
+```
+
+#### `RemoteFanInWatch`
+
+Kind: class
+
+```ts
+export declare class RemoteFanInWatch {
+    next(): Promise<RemoteFanInWatchEvent | null>;
+    tryNext(): RemoteFanInWatchEvent | null;
+    drain(): RemoteFanInWatchEvent[];
+    close(): void;
+}
+```
+
 #### `WebSocketSync`
 
 Kind: class
@@ -1296,16 +1696,22 @@ export declare class WebSocketSync {
     inflightCount(): number;
     knownPeerCount(): number;
     recommendedPeers(): JsonValue;
+    publishApplication(message: ApplicationRouteMessage, target?: RouteTarget | null): JsonValue;
+    sendApplication(namespace: string, protocol: string, topic: string | null | undefined, body: JsonValue, metadata?: Record<string, JsonValue> | null, target?: RouteTarget | null): JsonValue;
+    subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
     get(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
     query(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
     lex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
     records(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RecordScanResult>;
+    vectorSearch(collection: string, query: number[], spec: VectorSearchSpec, policy?: RemoteInterestPolicy | null): Promise<VectorSearchResult>;
     node(id: string, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
     snapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
+    recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
     remoteGet(peerId: string, path: RemotePath): Promise<JsonValue | null>;
     remoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<JsonValue>;
     remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
     remoteRecords(peerId: string, scan: RecordScan): Promise<RecordScanResult>;
+    remoteVectorSearch(peerId: string, collection: string, query: number[], spec: VectorSearchSpec): Promise<VectorSearchResult>;
     remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
     remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
     remoteTransaction(peerId: string, scope: string, steps: TransactionStep[], options?: TransactionOptions | null): Promise<TransactionReport>;
@@ -1314,6 +1720,8 @@ export declare class WebSocketSync {
     watchQuery(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchLex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchRecordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteFanInWatch;
+    watchVectorSearch(collection: string, query: number[], spec: VectorSearchSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchNode(id: string, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
@@ -1321,6 +1729,7 @@ export declare class WebSocketSync {
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): RemoteWatch;
     watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): RemoteWatch;
     watchRemoteRecords(peerId: string, scan: RecordScan): RemoteWatch;
+    watchRemoteVectorSearch(peerId: string, collection: string, query: number[], spec: VectorSearchSpec): RemoteWatch;
     watchRemoteNode(peerId: string, id: string): RemoteWatch;
     watchRemoteSnapshot(peerId: string, root?: string | null): RemoteWatch;
     flushPending(): Promise<number>;
@@ -1343,11 +1752,17 @@ export declare class WebRtcMesh {
     openPeerCount(): Promise<number>;
     inflightCount(): Promise<number>;
     recommendedPeers(): Promise<JsonValue>;
+    publishApplication(message: ApplicationRouteMessage, target?: RouteTarget | null): Promise<JsonValue>;
+    sendApplication(namespace: string, protocol: string, topic: string | null | undefined, body: JsonValue, metadata?: Record<string, JsonValue> | null, target?: RouteTarget | null): Promise<JsonValue>;
+    subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
+    recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
     watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchMap(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchQuery(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchLex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchRecordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteFanInWatch>;
+    watchVectorSearch(collection: string, query: number[], spec: VectorSearchSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchNode(id: string, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchRemoteGet(peerId: string, path: RemotePath): Promise<RemoteWatch>;
@@ -1355,6 +1770,7 @@ export declare class WebRtcMesh {
     watchRemoteQuery(peerId: string, path: RemotePath, spec: QuerySpec): Promise<RemoteWatch>;
     watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<RemoteWatch>;
     watchRemoteRecords(peerId: string, scan: RecordScan): Promise<RemoteWatch>;
+    watchRemoteVectorSearch(peerId: string, collection: string, query: number[], spec: VectorSearchSpec): Promise<RemoteWatch>;
     watchRemoteNode(peerId: string, id: string): Promise<RemoteWatch>;
     watchRemoteSnapshot(peerId: string, root?: string | null): Promise<RemoteWatch>;
     flushPending(): Promise<number>;
@@ -1383,6 +1799,187 @@ export interface PrimadbMoqSyncPayload {
 }
 ```
 
+#### `PrimadbRouteTarget`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteTarget = {
+    kind: "broadcast";
+} | {
+    kind: "peer";
+    value: string;
+} | {
+    kind: "topic";
+    value: string;
+};
+```
+
+#### `PrimadbRoutePayload`
+
+Kind: type alias
+
+```ts
+export type PrimadbRoutePayload = {
+    kind: "application";
+    message: PrimadbApplicationRouteMessage;
+} | {
+    kind: "sync";
+    encoding: string;
+    payload: unknown;
+} | {
+    kind: "presence";
+    peer: PrimadbPeerPresence;
+} | {
+    kind: "peer_exchange";
+    peers: PrimadbPeerRecommendation[];
+} | {
+    kind: "batch";
+    items: PrimadbRouteBatchItem[];
+} | {
+    kind: string;
+    [key: string]: unknown;
+};
+```
+
+#### `PrimadbRouteBatchItem`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteBatchItem = {
+    kind: "application";
+    message: PrimadbApplicationRouteMessage;
+} | {
+    kind: "sync";
+    encoding: string;
+    payload: unknown;
+} | {
+    kind: "presence";
+    peer: PrimadbPeerPresence;
+} | {
+    kind: "peer_exchange";
+    peers: PrimadbPeerRecommendation[];
+} | {
+    kind: string;
+    [key: string]: unknown;
+};
+```
+
+#### `PrimadbPeerPresence`
+
+Kind: interface
+
+```ts
+export interface PrimadbPeerPresence {
+    peer_id: string;
+    replica_id: string;
+    transport: string;
+    identity?: unknown;
+    capabilities?: string[];
+    topics?: string[];
+    metadata?: Record<string, string>;
+}
+```
+
+#### `PrimadbPeerRecommendation`
+
+Kind: interface
+
+```ts
+export interface PrimadbPeerRecommendation {
+    peer: PrimadbPeerPresence;
+    relay_urls?: string[];
+    score?: number;
+    discovered_at_millis?: number;
+}
+```
+
+#### `PrimadbRouteEnvelope`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteEnvelope {
+    route_id: string;
+    from: string;
+    channel: string;
+    target: PrimadbRouteTarget;
+    ttl: number;
+    hops: number;
+    issued_at_millis: number;
+    reply_to?: string | null;
+    content_hash?: string | null;
+    seen_by: string[];
+    payload: PrimadbRoutePayload;
+}
+```
+
+#### `PrimadbMoqRoutePayload`
+
+Kind: interface
+
+```ts
+export interface PrimadbMoqRoutePayload {
+    type: "primadb.route.v1";
+    from: string;
+    sentAt: number;
+    route: PrimadbRouteEnvelope;
+}
+```
+
+#### `PrimadbRouteHandler`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteHandler = (route: PrimadbRouteEnvelope) => void;
+```
+
+#### `PrimadbApplicationRouteMessage`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationRouteMessage {
+    namespace: string;
+    protocol: string;
+    topic?: string | null;
+    body: unknown;
+    metadata?: Record<string, unknown>;
+}
+```
+
+#### `PrimadbApplicationRouteEvent`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationRouteEvent {
+    routeId: string;
+    from: string;
+    channel: string;
+    target: PrimadbRouteTarget;
+    issuedAtMillis: number;
+    receivedAtMillis: number;
+    transport: "moq";
+    verifiedIdentity: null;
+    message: PrimadbApplicationRouteMessage;
+}
+```
+
+#### `PrimadbApplicationRouteFilter`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationRouteFilter {
+    namespace?: string | null;
+    protocol?: string | null;
+    topic?: string | null;
+}
+```
+
 #### `PrimadbMoqSessionOptions`
 
 Kind: interface
@@ -1391,7 +1988,11 @@ Kind: interface
 export interface PrimadbMoqSessionOptions {
     path: string;
     track?: string;
+    channel?: string;
+    peerId?: string;
+    target?: PrimadbRouteTarget;
     intervalMs?: number;
+    retryIntervalMs?: number;
     publish?: boolean;
     subscribe?: string[];
     closeConnection?: boolean;
@@ -1409,6 +2010,9 @@ export interface ConnectPrimadbMoqOptions extends PrimadbMoqSessionOptions {
     websocket?: boolean;
     webtransport?: unknown;
     transport?: unknown;
+    nodeWebTransport?: boolean;
+    nodeWebTransportOptions?: unknown;
+    tlsDisableVerify?: boolean;
 }
 ```
 
@@ -1422,6 +2026,7 @@ export interface PrimadbMoqLoopbackOptions {
     subscriberDb: Primadb;
     path: string;
     track?: string;
+    channel?: string;
     intervalMs?: number;
     url?: string | URL;
     protocol?: string;
@@ -1435,6 +2040,7 @@ Kind: function
 ```ts
 export declare function moqRuntimeSupport(): {
   webTransport: boolean;
+  nodeWebTransportProvider: boolean;
   webSocket: boolean;
   websocketFallback: boolean;
 };
@@ -1446,6 +2052,20 @@ Kind: function
 
 ```ts
 export declare function connectPrimadbMoq(db: Primadb, options: ConnectPrimadbMoqOptions): Promise<PrimadbMoqSession>;
+```
+
+#### `PrimadbApplicationRouteSubscription`
+
+Kind: class
+
+```ts
+export declare class PrimadbApplicationRouteSubscription {
+    readonly filter: PrimadbApplicationRouteFilter;
+    next(): Promise<PrimadbApplicationRouteEvent | null>;
+    tryNext(): PrimadbApplicationRouteEvent | null;
+    drain(): PrimadbApplicationRouteEvent[];
+    close(): void;
+}
 ```
 
 #### `PrimadbMoqSession`
@@ -1466,14 +2086,16 @@ export declare class PrimadbMoqSession {
     subscribe(path?: string): unknown;
     startAutoFlush(): void;
     onRoute(handler: PrimadbRouteHandler): () => void;
+    publishApplication(message: PrimadbApplicationRouteMessage, target?: PrimadbRouteTarget): number;
+    sendApplication(namespace: string, protocol: string, topic: string | null | undefined, body: unknown, metadata?: Record<string, unknown>, target?: PrimadbRouteTarget): number;
+    subscribeApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteSubscription;
+    nextApplication(filter?: PrimadbApplicationRouteFilter): Promise<PrimadbApplicationRouteEvent | null>;
+    tryNextApplication(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent | null;
+    drainApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent[];
     addAcceptedPeerId(peerId: string): () => void;
     knownPeers(): PrimadbPeerPresence[];
     recommendedPeers(): PrimadbPeerRecommendation[];
-    createRoute(
-        payload: PrimadbRoutePayload,
-        target?: PrimadbRouteTarget,
-        replyTo?: string | null,
-    ): PrimadbRouteEnvelope;
+    createRoute(payload: PrimadbRoutePayload, target?: PrimadbRouteTarget, replyTo?: string | null): PrimadbRouteEnvelope;
     sendRoute(route: PrimadbRouteEnvelope): number;
     announcePresence(): number;
     flushPending(): Promise<number>;
@@ -1507,6 +2129,34 @@ export declare function createPrimadbMoqLoopback(options: PrimadbMoqLoopbackOpti
 `WebSocketSync.get(...)`, `query(...)`, `lex(...)`, `records(...)`, `node(...)`, and `snapshot(...)` select a connected/recommended peer automatically. Relay and mesh watches are available through `watchGet(...)`, `watchQuery(...)`, `watchRecords(...)`, and the other `watch*` helpers.
 
 Pass `RemoteInterestPolicy` only when needed, for example `{ target: "peer", peerId: "native:ledger", requireCapability: true }`. The explicit `remote*` and `watchRemote*` methods still target a concrete peer id.
+
+## Application routes
+
+Application route APIs carry caller-defined messages inside `RoutePayload::Application` / `{ kind: "application" }` while preserving the surrounding `RouteEnvelope` metadata.
+
+Use `publishApplication(...)` / `publish_application(...)` when the caller has already assembled an application message, or `sendApplication(...)` / `send_application(...)` for the namespace/protocol/topic/body convenience shape.
+
+`subscribeApplications(...)` / `subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, and the application message.
+
+These APIs are RouteEnvelope-level. They do not expose raw WebSocket, WebRTC, WebTransport, or MoQ socket handles.
+
+## Record fan-in
+
+`recordsFanIn(...)` / `records_fan_in(...)` sends a record scan to every currently reachable peer that matches the supplied `RemoteInterestPolicy` instead of selecting one ambient peer.
+
+`watchRecordsFanIn(...)` / `watch_records_fan_in(...)` keeps child watches open across all matching peers and emits source-tagged updates plus partial failures. Closing the returned watch cancels all child watches.
+
+Fan-in results include per-peer records, a deterministic merged result, conflict metadata, and partial failure diagnostics. Per-peer source metadata is preserved so callers can apply their own trust or dedupe policy above the built-in deterministic merge.
+
+## MoQ and WebTransport fallback
+
+`connectPrimadbMoq(...)` uses the JS MoQ stack. In browsers that means `@moq/lite` over WebTransport when available; in Node it uses the configured WebTransport implementation or the package's Node provider.
+
+`@moq/lite`'s WebSocket option is a MoQ transport fallback for compatible MoQ endpoints. It is not the same thing as falling back to PrimaDB's WebSocket relay protocol.
+
+`connectMeshViaMoq(...)` uses MoQ as the WebRTC signaling underlay. Once WebRTC data channels open, mesh data moves over WebRTC. If the MoQ session itself cannot connect, callers should explicitly choose a separate fallback such as normal `connectMesh(...)` with WebSocket relay signaling or local BroadcastChannel signaling.
+
+Current interop evidence: browser/Node JS MoQ passes Cloudflare draft-14 in this workspace; JS draft-07 still fails with WebTransport/session close errors. Native Rust draft-07 uses a separate Cloudflare `moq-rs` backend and passes independently.
 
 ## Strict consistency and transactions
 
