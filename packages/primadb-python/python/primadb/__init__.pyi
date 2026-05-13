@@ -32,6 +32,25 @@ class ApplicationRouteMessage(TypedDict, total=False):
     body: Any
     metadata: dict[str, Any]
 
+ApplicationRouteAuthStatus = Literal[
+    "unknown",
+    "not_required",
+    "unauthenticated",
+    "authenticated",
+    "required_but_missing",
+]
+
+class ApplicationRouteContext(TypedDict, total=False):
+    sourcePeerId: str
+    transport: RouteTransportKind
+    underlayId: Optional[str]
+    direct: bool
+    relayRouted: bool
+    gatewayRouted: bool
+    gatewayPeerId: Optional[str]
+    authStatus: ApplicationRouteAuthStatus
+    provenance: list[str]
+
 ApplicationRouteEvent = TypedDict(
     "ApplicationRouteEvent",
     {
@@ -43,6 +62,7 @@ ApplicationRouteEvent = TypedDict(
         "receivedAtMillis": int,
         "transport": RouteTransportKind,
         "verifiedIdentity": Optional[VerifiedIdentity],
+        "context": ApplicationRouteContext,
         "message": ApplicationRouteMessage,
     },
     total=False,
@@ -679,6 +699,7 @@ class WebSocketSync:
     def recommended_peers(self) -> Any: ...
     def publish_application(self, message: ApplicationRouteMessage | dict[str, Any], target: Optional[RouteTarget] = ...) -> Any: ...
     def send_application(self, namespace: str, protocol: str, topic: Optional[str], body: Any, metadata: Optional[dict[str, Any]] = ..., target: Optional[RouteTarget] = ...) -> Any: ...
+    def send_route_envelope(self, route: dict[str, Any]) -> Any: ...
     def subscribe_applications(self, filter: Optional[ApplicationRouteFilter] = ...) -> ApplicationRouteSubscription: ...
     def get(self, path: Any, policy: Optional[RemoteInterestPolicy] = ...) -> Any: ...
     def query(self, path: Any, spec: Any, policy: Optional[RemoteInterestPolicy] = ...) -> Any: ...
@@ -734,6 +755,7 @@ class WebRtcMesh:
     def recommended_peers(self) -> Any: ...
     def publish_application(self, message: ApplicationRouteMessage | dict[str, Any], target: Optional[RouteTarget] = ...) -> Any: ...
     def send_application(self, namespace: str, protocol: str, topic: Optional[str], body: Any, metadata: Optional[dict[str, Any]] = ..., target: Optional[RouteTarget] = ...) -> Any: ...
+    def send_route_envelope(self, route: dict[str, Any]) -> Any: ...
     def subscribe_applications(self, filter: Optional[ApplicationRouteFilter] = ...) -> ApplicationRouteSubscription: ...
     def records_fan_in(self, scan: RecordScan | dict[str, Any], policy: Optional[RemoteInterestPolicy] = ...) -> RemoteRecordsFanIn: ...
     def watch_get(self, path: Any, policy: Optional[RemoteInterestPolicy] = ...) -> RemoteWatch: ...

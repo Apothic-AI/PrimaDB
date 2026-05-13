@@ -1487,6 +1487,20 @@ impl WebSocketSync {
         to_json(route)
     }
 
+    #[napi(js_name = "sendRouteEnvelope")]
+    pub fn send_route_envelope(&self, route: JsonValue) -> Result<JsonValue> {
+        let route: primadb::RouteEnvelope = from_json(route)?;
+        let route = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .send_route_envelope(route)
+            .map_err(to_napi_error)?;
+        to_json(route)
+    }
+
     #[napi(js_name = "sendApplication")]
     pub fn send_application(
         &self,
@@ -2272,6 +2286,18 @@ impl WebRtcMesh {
             .publish_application(message, target)
             .await
             .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "sendRouteEnvelope")]
+    pub async fn send_route_envelope(&self, route: JsonValue) -> Result<JsonValue> {
+        let route: primadb::RouteEnvelope = from_json(route)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh.send_route_envelope(route).await.map_err(to_napi_error);
         self.inner.lock().unwrap().replace(mesh);
         to_json(result?)
     }

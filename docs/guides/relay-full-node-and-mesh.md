@@ -148,6 +148,40 @@ Strict-scope `remoteTransaction(...)` still targets a concrete authority peer.
 Mesh traversal can fetch missing linked nodes on demand without pulling the entire graph first.
 Prefer `watchTraverse(...)` when a UI should update as those fetched nodes arrive.
 
+## Application Overlay Traffic
+
+Use application routes for caller-defined protocols such as mesh channels, trust proposals, vault
+proposals, or memory coordination. The payload remains inside `RouteEnvelope` and is delivered by
+the same relay/mesh/MoQ routing machinery as sync, pulls, watches, and signaling.
+
+For one transport handle:
+
+```ts
+const sub = sync.subscribeApplications({ namespace: "starla.mesh" });
+
+await sync.sendApplication(
+  "starla.mesh",
+  "channel.v1",
+  "general",
+  { text: "hello" },
+  {},
+  { kind: "broadcast" },
+);
+
+const event = await sub.next();
+console.log(event?.context.sourcePeerId, event?.context.transport);
+```
+
+For a multi-underlay route policy, use the overlay session APIs. Rust exposes
+`RouteOverlaySession`; browser and Node MoQ helpers expose `PrimadbRouteOverlaySession`. Native
+WebSocket, native MoQ, and native WebRTC handles expose route-overlay underlay adapters, so a caller
+can send through a direct-first/fallback policy and receive delivery diagnostics instead of
+manually fanning out through each transport.
+
+Application streams are chunked application-route messages for larger trusted payloads. They carry
+stream id, sequence, chunk, final, close/error, ack/nack, and metadata fields and reassemble into a
+completed stream event on the receiver.
+
 ## When To Use Each Mode
 
 - Use relay-only for predictable deployment and simple firewall behavior.

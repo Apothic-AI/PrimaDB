@@ -25,6 +25,40 @@ Application routes use the same envelope as sync, watch, pull, and signaling tra
 `publish_application(...)` / `send_application(...)` / `subscribe_applications(...)` in Python and
 Rust-oriented surfaces, so applications can route custom payloads without raw transport handles.
 
+Received application events include a sender context with source peer id, transport kind, underlay
+id when available, direct-vs-relay provenance, gateway provenance, auth status, and verified
+identity when the active session can prove it. Generic MoQ relays can fan out route traffic but
+cannot enforce PrimaDB auth by themselves; PrimaDB-aware clients/gateways attach the verified
+context they can prove.
+
+## Overlay Sessions
+
+`RouteOverlaySession` in Rust and `PrimadbRouteOverlaySession` in the JS MoQ helpers let callers
+attach multiple route underlays and send once through a policy instead of manually looping over
+WebRTC, WebSocket, MoQ, and local channels.
+
+Overlay send reports include:
+
+- attempted underlays
+- delivered underlay ids
+- failed underlay ids
+- delivered peer ids for peer-targeted sends
+- fallback reason
+- duplicate-suppression count
+
+The overlay pump accepts raw `RouteEnvelope` traffic or application events from underlays and
+dedupes duplicate deliveries before publishing to application subscriptions.
+
+## Application Streams
+
+Application streams are protocol-neutral chunked messages encoded as application routes. Stream
+frames include stream id, sequence number, frame kind, chunk data, final flags, ack/nack fields,
+close/error fields, and metadata. The receiver reassembles ordered chunks and emits a completed
+stream event with the original namespace/protocol/topic/body.
+
+Use streams when an application has a larger trusted payload or needs reliable ordered app-level
+framing without creating another transport-specific protocol.
+
 ## Relay Mode
 
 `connectRelay(...)` keeps the relay in the data path.

@@ -1449,6 +1449,23 @@ impl WebSocketSync {
         to_py(py, route)
     }
 
+    fn send_route_envelope(
+        &self,
+        py: Python<'_>,
+        route: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let route: primadb::RouteEnvelope = from_py(route)?;
+        let route = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .send_route_envelope(route)
+            .map_err(to_py_err)?;
+        to_py(py, route)
+    }
+
     #[pyo3(signature = (namespace, protocol, topic, body, metadata=None, target=None))]
     fn send_application(
         &self,
@@ -2234,6 +2251,21 @@ impl WebRtcMesh {
             guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
         };
         let result = py.detach(|| runtime().block_on(mesh.publish_application(message, target)));
+        self.inner.lock().unwrap().replace(mesh);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    fn send_route_envelope(
+        &self,
+        py: Python<'_>,
+        route: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let route: primadb::RouteEnvelope = from_py(route)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.send_route_envelope(route)));
         self.inner.lock().unwrap().replace(mesh);
         to_py(py, result.map_err(to_py_err)?)
     }

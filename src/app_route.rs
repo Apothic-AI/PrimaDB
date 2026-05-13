@@ -1,14 +1,11 @@
 use crate::{RouteTarget, RouteTransportKind, VerifiedIdentity};
 use async_channel::Receiver;
-#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 use async_channel::{Sender, bounded};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
-#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 use std::sync::{Arc, Mutex};
 
-#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 const DEFAULT_APPLICATION_QUEUE_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -35,7 +32,40 @@ pub struct ApplicationRouteEvent {
     pub transport: RouteTransportKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_identity: Option<VerifiedIdentity>,
+    #[serde(default)]
+    pub context: ApplicationRouteContext,
     pub message: ApplicationRouteMessage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationRouteAuthStatus {
+    Unknown,
+    NotRequired,
+    Unauthenticated,
+    Authenticated,
+    RequiredButMissing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationRouteContext {
+    pub source_peer_id: String,
+    pub transport: RouteTransportKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underlay_id: Option<String>,
+    #[serde(default)]
+    pub direct: bool,
+    #[serde(default)]
+    pub relay_routed: bool,
+    #[serde(default)]
+    pub gateway_routed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_peer_id: Option<String>,
+    #[serde(default)]
+    pub auth_status: ApplicationRouteAuthStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -54,14 +84,12 @@ pub struct ApplicationRouteSubscription {
 }
 
 #[derive(Debug, Clone)]
-#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 pub(crate) struct ApplicationRouteBus {
     capacity: usize,
     subscribers: Arc<Mutex<Vec<ApplicationRouteSubscriber>>>,
 }
 
 #[derive(Debug)]
-#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 struct ApplicationRouteSubscriber {
     filter: ApplicationRouteFilter,
     sender: Sender<ApplicationRouteEvent>,
@@ -85,6 +113,53 @@ impl ApplicationRouteMessage {
     }
 }
 
+impl Default for ApplicationRouteAuthStatus {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl ApplicationRouteContext {
+    pub fn new(source_peer_id: impl Into<String>, transport: RouteTransportKind) -> Self {
+        Self {
+            source_peer_id: source_peer_id.into(),
+            transport,
+            underlay_id: None,
+            direct: false,
+            relay_routed: false,
+            gateway_routed: false,
+            gateway_peer_id: None,
+            auth_status: ApplicationRouteAuthStatus::Unknown,
+            provenance: Vec::new(),
+        }
+    }
+
+    pub fn with_verified_identity(
+        source_peer_id: impl Into<String>,
+        transport: RouteTransportKind,
+        verified_identity: Option<&VerifiedIdentity>,
+        require_authenticated: bool,
+    ) -> Self {
+        let auth_status = if verified_identity.is_some() {
+            ApplicationRouteAuthStatus::Authenticated
+        } else if require_authenticated {
+            ApplicationRouteAuthStatus::RequiredButMissing
+        } else {
+            ApplicationRouteAuthStatus::NotRequired
+        };
+        Self {
+            auth_status,
+            ..Self::new(source_peer_id, transport)
+        }
+    }
+}
+
+impl Default for ApplicationRouteContext {
+    fn default() -> Self {
+        Self::new("", RouteTransportKind::InMemory)
+    }
+}
+
 impl ApplicationRouteFilter {
     pub fn matches(&self, message: &ApplicationRouteMessage) -> bool {
         self.namespace
@@ -103,14 +178,12 @@ impl ApplicationRouteFilter {
     }
 }
 
-#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 impl Default for ApplicationRouteBus {
     fn default() -> Self {
         Self::new(DEFAULT_APPLICATION_QUEUE_CAPACITY)
     }
 }
 
-#[cfg(any(test, target_arch = "wasm32", feature = "native-websocket"))]
 impl ApplicationRouteBus {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
@@ -173,7 +246,8 @@ impl ApplicationRouteSubscription {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplicationRouteBus, ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
+        ApplicationRouteBus, ApplicationRouteContext, ApplicationRouteEvent,
+        ApplicationRouteFilter, ApplicationRouteMessage,
     };
     use crate::{RouteTarget, RouteTransportKind};
     use serde_json::json;
@@ -189,6 +263,7 @@ mod tests {
             received_at_millis: 2,
             transport: RouteTransportKind::InMemory,
             verified_identity: None,
+            context: ApplicationRouteContext::new("peer-a", RouteTransportKind::InMemory),
             message: ApplicationRouteMessage::new(
                 "starla.mesh",
                 protocol,

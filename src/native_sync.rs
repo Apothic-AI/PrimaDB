@@ -6,13 +6,14 @@ use crate::app_route::ApplicationRouteBus;
 #[cfg(feature = "native-moq")]
 use crate::native_moq::NativeMoqRouteClient;
 use crate::{
-    ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
-    ApplicationRouteSubscription, ChangeSubscription, HookTransport, HybridClock, LexEntry,
-    MapEntry, NodeFetchScheduler, Operation, PeerPresence, PeerRecommendation, Primadb,
-    PrimadbError, RecordEntry, RecordScanResult, RelayClientConfig, RemoteFanInWatch,
-    RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
-    RemotePeerFailure, RemotePeerRecords, RemoteRecordsFanIn, RemoteResult, RemoteWatchMessage,
-    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
+    ApplicationRouteContext, ApplicationRouteEvent, ApplicationRouteFilter,
+    ApplicationRouteMessage, ApplicationRouteSubscription, ChangeSubscription, HookTransport,
+    HybridClock, LexEntry, MapEntry, NodeFetchScheduler, Operation, PeerPresence,
+    PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult, RelayClientConfig,
+    RemoteFanInWatch, RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget,
+    RemotePath, RemotePeerFailure, RemotePeerRecords, RemoteRecordsFanIn, RemoteResult,
+    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
+    RouteOverlayUnderlayHandle, RouteOverlayUnderlayInfo, RoutePayload, RouteTarget,
     RouteTransportKind, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
     WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
     merge_remote_records_fan_in,
@@ -392,6 +393,11 @@ impl NativeWebSocketSync {
         publish_application_state(&self.state, message, target, None)
     }
 
+    pub fn send_route_envelope(&self, route: RouteEnvelope) -> Result<RouteEnvelope> {
+        send_route(&self.state, &route)?;
+        Ok(route)
+    }
+
     pub fn send_application(
         &self,
         namespace: impl Into<String>,
@@ -414,6 +420,28 @@ impl NativeWebSocketSync {
         filter: ApplicationRouteFilter,
     ) -> ApplicationRouteSubscription {
         self.state.applications.subscribe(filter)
+    }
+
+    pub fn route_overlay_underlay(&self, id: impl Into<String>) -> RouteOverlayUnderlayHandle {
+        let state = self.state.clone();
+        let send_state = state.clone();
+        let connected_state = state.clone();
+        let subscription = Arc::new(self.subscribe_applications(ApplicationRouteFilter::default()));
+        RouteOverlayUnderlayHandle::new(
+            RouteOverlayUnderlayInfo {
+                id: id.into(),
+                transport: RouteTransportKind::WebSocket,
+                direct: false,
+                relay_routed: true,
+                connected: self.is_connected(),
+                priority: 0,
+                metadata: BTreeMap::new(),
+            },
+            move |route| send_route(&send_state, &route),
+            Vec::new,
+            move || connected_state.connected.load(Ordering::SeqCst),
+        )
+        .with_application_events(move || subscription.drain())
     }
 
     pub fn watch_get(
@@ -1157,6 +1185,11 @@ impl NativeMoqSync {
         publish_application_state(&self.state, message, target, None)
     }
 
+    pub fn send_route_envelope(&self, route: RouteEnvelope) -> Result<RouteEnvelope> {
+        send_route(&self.state, &route)?;
+        Ok(route)
+    }
+
     pub fn send_application(
         &self,
         namespace: impl Into<String>,
@@ -1179,6 +1212,28 @@ impl NativeMoqSync {
         filter: ApplicationRouteFilter,
     ) -> ApplicationRouteSubscription {
         self.state.applications.subscribe(filter)
+    }
+
+    pub fn route_overlay_underlay(&self, id: impl Into<String>) -> RouteOverlayUnderlayHandle {
+        let state = self.state.clone();
+        let send_state = state.clone();
+        let route_client = self.route_client.clone();
+        let subscription = Arc::new(self.subscribe_applications(ApplicationRouteFilter::default()));
+        RouteOverlayUnderlayHandle::new(
+            RouteOverlayUnderlayInfo {
+                id: id.into(),
+                transport: RouteTransportKind::Moq,
+                direct: false,
+                relay_routed: true,
+                connected: self.is_connected(),
+                priority: 0,
+                metadata: BTreeMap::new(),
+            },
+            move |route| send_route(&send_state, &route),
+            Vec::new,
+            move || route_client.is_connected(),
+        )
+        .with_application_events(move || subscription.drain())
     }
 
     pub fn watch_get(
@@ -1955,6 +2010,13 @@ async fn handle_route_payload(
                 if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
                     continue;
                 }
+                let mut context = ApplicationRouteContext::with_verified_identity(
+                    from.clone(),
+                    state.transport.clone(),
+                    verified_identity.as_ref(),
+                    state.session_auth.require_authenticated_peers,
+                );
+                context.relay_routed = true;
                 state.applications.publish(ApplicationRouteEvent {
                     route_id: route_id.clone(),
                     from: from.clone(),
@@ -1964,6 +2026,7 @@ async fn handle_route_payload(
                     received_at_millis: crate::clock::now_millis(),
                     transport: state.transport.clone(),
                     verified_identity,
+                    context,
                     message,
                 });
             }

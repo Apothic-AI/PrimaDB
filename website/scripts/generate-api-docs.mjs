@@ -379,7 +379,11 @@ const applicationRoutesApiBody = [
   "",
   "Use `publishApplication(...)` / `publish_application(...)` when the caller has already assembled an application message, or `sendApplication(...)` / `send_application(...)` for the namespace/protocol/topic/body convenience shape.",
   "",
-  "`subscribeApplications(...)` / `subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, and the application message.",
+  "`subscribeApplications(...)` / `subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, verified identity when available, and an `ApplicationRouteContext` with underlay/provenance/auth-status metadata.",
+  "",
+  "`RouteOverlaySession` and `PrimadbRouteOverlaySession` own multiple route underlays, apply a send policy, report per-underlay delivery attempts, and dedupe duplicate application events delivered through multiple paths. Native relay/MoQ/WebRTC handles expose route-overlay underlay adapters so callers can send once instead of manually looping over transports.",
+  "",
+  "Application streams use the same route machinery with stream id, sequence number, chunk data, final flags, close/error/ack/nack frame kinds, and ordered reassembly. They are intended for larger trusted app messages that should not require callers to invent another envelope above `RouteEnvelope`.",
   "",
   "These APIs are RouteEnvelope-level. They do not expose raw WebSocket, WebRTC, WebTransport, or MoQ socket handles.",
 ].join("\n");

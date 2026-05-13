@@ -1362,6 +1362,32 @@ export interface ApplicationRouteMessage {
 }
 ```
 
+#### `ApplicationRouteAuthStatus`
+
+Kind: type alias
+
+```ts
+export type ApplicationRouteAuthStatus = "unknown" | "not_required" | "unauthenticated" | "authenticated" | "required_but_missing";
+```
+
+#### `ApplicationRouteContext`
+
+Kind: interface
+
+```ts
+export interface ApplicationRouteContext {
+    sourcePeerId: string;
+    transport: RouteTransportKind;
+    underlayId?: string | null;
+    direct: boolean;
+    relayRouted: boolean;
+    gatewayRouted: boolean;
+    gatewayPeerId?: string | null;
+    authStatus: ApplicationRouteAuthStatus;
+    provenance: string[];
+}
+```
+
 #### `ApplicationRouteEvent`
 
 Kind: interface
@@ -1376,6 +1402,7 @@ export interface ApplicationRouteEvent {
     receivedAtMillis: number;
     transport: RouteTransportKind;
     verifiedIdentity?: VerifiedIdentity | null;
+    context: ApplicationRouteContext;
     message: ApplicationRouteMessage;
 }
 ```
@@ -1698,6 +1725,7 @@ export declare class WebSocketSync {
     recommendedPeers(): JsonValue;
     publishApplication(message: ApplicationRouteMessage, target?: RouteTarget | null): JsonValue;
     sendApplication(namespace: string, protocol: string, topic: string | null | undefined, body: JsonValue, metadata?: Record<string, JsonValue> | null, target?: RouteTarget | null): JsonValue;
+    sendRouteEnvelope(route: JsonValue): JsonValue;
     subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
     get(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
     query(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
@@ -1754,6 +1782,7 @@ export declare class WebRtcMesh {
     recommendedPeers(): Promise<JsonValue>;
     publishApplication(message: ApplicationRouteMessage, target?: RouteTarget | null): Promise<JsonValue>;
     sendApplication(namespace: string, protocol: string, topic: string | null | undefined, body: JsonValue, metadata?: Record<string, JsonValue> | null, target?: RouteTarget | null): Promise<JsonValue>;
+    sendRouteEnvelope(route: JsonValue): Promise<JsonValue>;
     subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
     recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
     watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
@@ -1813,6 +1842,14 @@ export type PrimadbRouteTarget = {
     kind: "topic";
     value: string;
 };
+```
+
+#### `PrimadbRouteTransportKind`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteTransportKind = "web_socket" | "moq" | "web_rtc" | "broadcast_channel" | "in_memory";
 ```
 
 #### `PrimadbRoutePayload`
@@ -1950,6 +1987,32 @@ export interface PrimadbApplicationRouteMessage {
 }
 ```
 
+#### `PrimadbApplicationRouteAuthStatus`
+
+Kind: type alias
+
+```ts
+export type PrimadbApplicationRouteAuthStatus = "unknown" | "not_required" | "unauthenticated" | "authenticated" | "required_but_missing";
+```
+
+#### `PrimadbApplicationRouteContext`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationRouteContext {
+    sourcePeerId: string;
+    transport: PrimadbRouteTransportKind;
+    underlayId?: string | null;
+    direct: boolean;
+    relayRouted: boolean;
+    gatewayRouted: boolean;
+    gatewayPeerId?: string | null;
+    authStatus: PrimadbApplicationRouteAuthStatus;
+    provenance: string[];
+}
+```
+
 #### `PrimadbApplicationRouteEvent`
 
 Kind: interface
@@ -1962,8 +2025,9 @@ export interface PrimadbApplicationRouteEvent {
     target: PrimadbRouteTarget;
     issuedAtMillis: number;
     receivedAtMillis: number;
-    transport: "moq";
+    transport: PrimadbRouteTransportKind;
     verifiedIdentity: null;
+    context: PrimadbApplicationRouteContext;
     message: PrimadbApplicationRouteMessage;
 }
 ```
@@ -1977,6 +2041,173 @@ export interface PrimadbApplicationRouteFilter {
     namespace?: string | null;
     protocol?: string | null;
     topic?: string | null;
+}
+```
+
+#### `PrimadbRouteOverlaySendMode`
+
+Kind: type alias
+
+```ts
+export type PrimadbRouteOverlaySendMode = "first_success" | "fan_out";
+```
+
+#### `PrimadbRouteOverlayPolicy`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteOverlayPolicy {
+    preferredTransports?: PrimadbRouteTransportKind[];
+    sendMode?: PrimadbRouteOverlaySendMode;
+    directFirst?: boolean;
+    allowDirect?: boolean;
+    allowRelay?: boolean;
+    requireDirect?: boolean;
+}
+```
+
+#### `PrimadbRouteOverlayUnderlayInfo`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteOverlayUnderlayInfo {
+    id: string;
+    transport: PrimadbRouteTransportKind;
+    direct?: boolean;
+    relayRouted?: boolean;
+    connected?: boolean;
+    priority?: number;
+    metadata?: Record<string, string>;
+}
+```
+
+#### `PrimadbRouteOverlayUnderlay`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteOverlayUnderlay {
+    info(): PrimadbRouteOverlayUnderlayInfo;
+    sendRoute(route: PrimadbRouteEnvelope): number | Promise<number>;
+    drainRoutes?(): PrimadbRouteEnvelope[];
+    close?(): void;
+}
+```
+
+#### `PrimadbRouteOverlayDeliveryAttempt`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteOverlayDeliveryAttempt {
+    underlay: PrimadbRouteOverlayUnderlayInfo;
+    attemptedAtMillis: number;
+    success: boolean;
+    message?: string | null;
+}
+```
+
+#### `PrimadbRouteOverlaySendReport`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteOverlaySendReport {
+    route: PrimadbRouteEnvelope;
+    attempts: PrimadbRouteOverlayDeliveryAttempt[];
+    deliveredUnderlayIds: string[];
+    failedUnderlayIds: string[];
+    deliveredPeerIds: string[];
+    fallbackReason?: string | null;
+    duplicateSuppressed: number;
+}
+```
+
+#### `PrimadbRouteOverlayPumpReport`
+
+Kind: interface
+
+```ts
+export interface PrimadbRouteOverlayPumpReport {
+    receivedRoutes: number;
+    deliveredApplicationRoutes: number;
+    deliveredStreamEvents: number;
+    duplicateSuppressed: number;
+    underlayIds: string[];
+}
+```
+
+#### `PrimadbApplicationStreamFrameKind`
+
+Kind: type alias
+
+```ts
+export type PrimadbApplicationStreamFrameKind = "open" | "data" | "ack" | "nack" | "close" | "error";
+```
+
+#### `PrimadbApplicationStreamFrame`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationStreamFrame {
+    streamId: string;
+    sequence: number;
+    kind: PrimadbApplicationStreamFrameKind;
+    namespace: string;
+    protocol: string;
+    topic?: string | null;
+    chunk?: string | null;
+    finalChunk?: boolean;
+    ackSequence?: number | null;
+    error?: string | null;
+    metadata?: Record<string, unknown>;
+}
+```
+
+#### `PrimadbApplicationStreamEvent`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationStreamEvent {
+    streamId: string;
+    from: string;
+    transport: PrimadbRouteTransportKind;
+    namespace: string;
+    protocol: string;
+    topic?: string | null;
+    body: unknown;
+    metadata: Record<string, unknown>;
+}
+```
+
+#### `PrimadbApplicationStreamSendOptions`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationStreamSendOptions {
+    namespace: string;
+    protocol: string;
+    topic?: string | null;
+    body: unknown;
+    metadata?: Record<string, unknown>;
+    target?: PrimadbRouteTarget;
+    maxChunkChars?: number;
+}
+```
+
+#### `PrimadbApplicationStreamSendReport`
+
+Kind: interface
+
+```ts
+export interface PrimadbApplicationStreamSendReport {
+    streamId: string;
+    frameReports: PrimadbRouteOverlaySendReport[];
 }
 ```
 
@@ -2068,6 +2299,65 @@ export declare class PrimadbApplicationRouteSubscription {
 }
 ```
 
+#### `PRIMADB_APPLICATION_STREAM_NAMESPACE`
+
+Kind: variable
+
+```ts
+export declare const PRIMADB_APPLICATION_STREAM_NAMESPACE: "primadb.applicationStream";
+```
+
+#### `PRIMADB_APPLICATION_STREAM_PROTOCOL_V1`
+
+Kind: variable
+
+```ts
+export declare const PRIMADB_APPLICATION_STREAM_PROTOCOL_V1: "primadb.applicationStream.v1";
+```
+
+#### `PrimadbRouteOverlaySession`
+
+Kind: class
+
+```ts
+export declare class PrimadbRouteOverlaySession {
+    readonly peerId: string;
+    readonly channel: string;
+    readonly ttl: number;
+    constructor(options: {
+    peerId: string;
+    channel?: string;
+    ttl?: number;
+    policy?: PrimadbRouteOverlayPolicy;
+  });
+    policy(): Required<PrimadbRouteOverlayPolicy>;
+    setPolicy(policy: PrimadbRouteOverlayPolicy): void;
+    addUnderlay(underlay: PrimadbRouteOverlayUnderlay): void;
+    removeUnderlay(id: string): PrimadbRouteOverlayUnderlayInfo | null;
+    underlays(): PrimadbRouteOverlayUnderlayInfo[];
+    createRoute(payload: PrimadbRoutePayload, target?: PrimadbRouteTarget, replyTo?: string | null): PrimadbRouteEnvelope;
+    publishApplication(message: PrimadbApplicationRouteMessage, target?: PrimadbRouteTarget): Promise<PrimadbRouteOverlaySendReport>;
+    sendApplication(namespace: string, protocol: string, topic: string | null | undefined, body: unknown, metadata?: Record<string, unknown>, target?: PrimadbRouteTarget): Promise<PrimadbRouteOverlaySendReport>;
+    sendRoute(route: PrimadbRouteEnvelope): Promise<PrimadbRouteOverlaySendReport>;
+    subscribeApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteSubscription;
+    nextApplication(filter?: PrimadbApplicationRouteFilter): Promise<PrimadbApplicationRouteEvent | null>;
+    tryNextApplication(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent | null;
+    drainApplications(filter?: PrimadbApplicationRouteFilter): PrimadbApplicationRouteEvent[];
+    pump(): PrimadbRouteOverlayPumpReport;
+    sendApplicationStream(options: PrimadbApplicationStreamSendOptions): Promise<PrimadbApplicationStreamSendReport>;
+    drainStreamEvents(): PrimadbApplicationStreamEvent[];
+    close(): void;
+}
+```
+
+#### `primadbMoqOverlayUnderlay`
+
+Kind: function
+
+```ts
+export declare function primadbMoqOverlayUnderlay(id: string, session: PrimadbMoqSession, options?: { priority?: number; maxQueue?: number; metadata?: Record<string, string> }): PrimadbRouteOverlayUnderlay;
+```
+
 #### `PrimadbMoqSession`
 
 Kind: class
@@ -2136,7 +2426,11 @@ Application route APIs carry caller-defined messages inside `RoutePayload::Appli
 
 Use `publishApplication(...)` / `publish_application(...)` when the caller has already assembled an application message, or `sendApplication(...)` / `send_application(...)` for the namespace/protocol/topic/body convenience shape.
 
-`subscribeApplications(...)` / `subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, and the application message.
+`subscribeApplications(...)` / `subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, verified identity when available, and an `ApplicationRouteContext` with underlay/provenance/auth-status metadata.
+
+`RouteOverlaySession` and `PrimadbRouteOverlaySession` own multiple route underlays, apply a send policy, report per-underlay delivery attempts, and dedupe duplicate application events delivered through multiple paths. Native relay/MoQ/WebRTC handles expose route-overlay underlay adapters so callers can send once instead of manually looping over transports.
+
+Application streams use the same route machinery with stream id, sequence number, chunk data, final flags, close/error/ack/nack frame kinds, and ordered reassembly. They are intended for larger trusted app messages that should not require callers to invent another envelope above `RouteEnvelope`.
 
 These APIs are RouteEnvelope-level. They do not expose raw WebSocket, WebRTC, WebTransport, or MoQ socket handles.
 

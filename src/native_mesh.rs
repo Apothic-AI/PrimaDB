@@ -4,15 +4,16 @@ use crate::NativeMoqRouteClient;
 use crate::SecureSyncFrame;
 use crate::app_route::ApplicationRouteBus;
 use crate::{
-    ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
-    ApplicationRouteSubscription, ChangeSubscription, HookTransport, IceServerConfig, MeshConfig,
-    MeshSignal, MeshSignalingMode, NodeFetchScheduler, PeerPresence, PeerRecommendation, Primadb,
-    PrimadbError, RecordEntry, RecordScanResult, RelayEndpointConfig, RemoteFanInWatch,
-    RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePeerFailure,
-    RemotePeerRecords, RemoteRecordsFanIn, RemoteResult, RemoteWatchMessage,
-    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget,
-    RouteTransportKind, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
-    WatchEvent, WatchRequest, WatchRequestKind, error_watch_event, merge_remote_records_fan_in,
+    ApplicationRouteContext, ApplicationRouteEvent, ApplicationRouteFilter,
+    ApplicationRouteMessage, ApplicationRouteSubscription, ChangeSubscription, HookTransport,
+    IceServerConfig, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler, PeerPresence,
+    PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult, RelayEndpointConfig,
+    RemoteFanInWatch, RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget,
+    RemotePeerFailure, RemotePeerRecords, RemoteRecordsFanIn, RemoteResult, RemoteWatchMessage,
+    RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope, RouteOverlayUnderlayHandle,
+    RoutePayload, RouteTarget, RouteTransportKind, Router, RouterConfig, SyncEnvelope, SyncFrame,
+    VerifiedIdentity, WatchEvent, WatchRequest, WatchRequestKind, error_watch_event,
+    merge_remote_records_fan_in,
 };
 use async_channel::{Sender, unbounded};
 use futures_util::stream::SplitSink;
@@ -366,6 +367,11 @@ impl NativeWebRtcMesh {
         publish_mesh_application_state(&self.state, message, target, None).await
     }
 
+    pub async fn send_route_envelope(&self, route: RouteEnvelope) -> Result<RouteEnvelope> {
+        send_route(&self.state, &route).await?;
+        Ok(route)
+    }
+
     pub async fn send_application(
         &self,
         namespace: impl Into<String>,
@@ -389,6 +395,24 @@ impl NativeWebRtcMesh {
         filter: ApplicationRouteFilter,
     ) -> ApplicationRouteSubscription {
         self.state.applications.subscribe(filter)
+    }
+
+    pub fn route_overlay_underlay(&self, id: impl Into<String>) -> RouteOverlayUnderlayHandle {
+        let state = self.state.clone();
+        let send_state = state.clone();
+        let subscription = Arc::new(self.subscribe_applications(ApplicationRouteFilter::default()));
+        RouteOverlayUnderlayHandle::async_sender(
+            id,
+            RouteTransportKind::WebRtc,
+            true,
+            false,
+            move |route| {
+                let send_state = send_state.clone();
+                async move { send_route(&send_state, &route).await }
+            },
+        )
+        .with_connected(move || Arc::strong_count(&state) > 0)
+        .with_application_events(move || subscription.drain())
     }
 
     pub async fn watch_get(
@@ -839,6 +863,14 @@ async fn enqueue_mesh_application_route(
     if state.session_auth.require_authenticated_peers && verified_identity.is_none() {
         return Ok(());
     }
+    let mut context = ApplicationRouteContext::with_verified_identity(
+        from,
+        transport.clone(),
+        verified_identity.as_ref(),
+        state.session_auth.require_authenticated_peers,
+    );
+    context.direct = matches!(transport, RouteTransportKind::WebRtc);
+    context.relay_routed = !context.direct;
     state.applications.publish(ApplicationRouteEvent {
         route_id: route_id.to_owned(),
         from: from.to_owned(),
@@ -848,6 +880,7 @@ async fn enqueue_mesh_application_route(
         received_at_millis: crate::clock::now_millis(),
         transport,
         verified_identity,
+        context,
         message,
     });
     Ok(())

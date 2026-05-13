@@ -6,13 +6,13 @@ use crate::wasm_opfs::{
     load_vector_cache_opfs, replace_segment_transaction_opfs, write_vector_cache_opfs,
 };
 use crate::{
-    ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
-    ApplicationRouteSubscription as CoreApplicationRouteSubscription, BlobRef, BlobStorageBinding,
-    BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext, DurableStorageBinding,
-    DurableStorageConfig, HookTransport, HybridClock, IceServerConfig, LexEntry, LexSpec, MapEntry,
-    MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler, Operation, PeerRecommendation,
-    Primadb, PullRequest, PullRequestKind, PullResponse, PullResponseBody, QuerySpec, RecordBatch,
-    RecordEntry, RecordScan, RecordScanResult,
+    ApplicationRouteContext, ApplicationRouteEvent, ApplicationRouteFilter,
+    ApplicationRouteMessage, ApplicationRouteSubscription as CoreApplicationRouteSubscription,
+    BlobRef, BlobStorageBinding, BlobStorageConfig, Chain, ChangeSubscription, ConnectHookContext,
+    DurableStorageBinding, DurableStorageConfig, HookTransport, HybridClock, IceServerConfig,
+    LexEntry, LexSpec, MapEntry, MeshConfig, MeshSignal, MeshSignalingMode, NodeFetchScheduler,
+    Operation, PeerRecommendation, Primadb, PullRequest, PullRequestKind, PullResponse,
+    PullResponseBody, QuerySpec, RecordBatch, RecordEntry, RecordScan, RecordScanResult,
     RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig, RelayEndpointConfig,
     RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
     RemotePeerFailure, RemotePeerRecords, RemoteResult, RemoteWatchMessage, RoomHookContext,
@@ -2797,6 +2797,14 @@ impl WasmWebSocketSync {
             .and_then(|route| to_js(&route))
     }
 
+    #[wasm_bindgen(js_name = sendRouteEnvelope)]
+    pub fn send_route_envelope(&self, route: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let route: RouteEnvelope = serde_wasm_bindgen::from_value(route)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        send_route_state(&self.state, &route)?;
+        to_js(&route)
+    }
+
     #[wasm_bindgen(js_name = sendApplication)]
     pub fn send_application(
         &self,
@@ -3557,6 +3565,14 @@ impl WasmWebRtcMesh {
         publish_application_mesh_state(&self.state, message, target).and_then(|route| to_js(&route))
     }
 
+    #[wasm_bindgen(js_name = sendRouteEnvelope)]
+    pub fn send_route_envelope(&self, route: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let route: RouteEnvelope = serde_wasm_bindgen::from_value(route)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        send_mesh_application_route_state(&self.state, &route)?;
+        to_js(&route)
+    }
+
     #[wasm_bindgen(js_name = sendApplication)]
     pub fn send_application(
         &self,
@@ -4101,6 +4117,13 @@ fn handle_route_payload(
                 {
                     continue;
                 }
+                let mut context = ApplicationRouteContext::with_verified_identity(
+                    from.clone(),
+                    RouteTransportKind::WebSocket,
+                    verified_identity.as_ref(),
+                    state.borrow().session_auth.require_authenticated_peers,
+                );
+                context.relay_routed = true;
                 let event = ApplicationRouteEvent {
                     route_id: route_id.clone(),
                     from: from.clone(),
@@ -4110,6 +4133,7 @@ fn handle_route_payload(
                     received_at_millis: js_sys::Date::now() as u64,
                     transport: RouteTransportKind::WebSocket,
                     verified_identity,
+                    context,
                     message,
                 };
                 state.borrow().applications.publish(event);
@@ -6823,6 +6847,14 @@ fn handle_mesh_signaling_route(
                 {
                     continue;
                 }
+                let mut context = ApplicationRouteContext::with_verified_identity(
+                    from.clone(),
+                    transport.clone(),
+                    verified_identity.as_ref(),
+                    state.borrow().session_auth.require_authenticated_peers,
+                );
+                context.relay_routed = !matches!(transport, RouteTransportKind::WebRtc);
+                context.direct = matches!(transport, RouteTransportKind::WebRtc);
                 let event = ApplicationRouteEvent {
                     route_id: route_id.clone(),
                     from: from.clone(),
@@ -6832,6 +6864,7 @@ fn handle_mesh_signaling_route(
                     received_at_millis: js_sys::Date::now() as u64,
                     transport: transport.clone(),
                     verified_identity,
+                    context,
                     message,
                 };
                 state.borrow().applications.publish(event);
@@ -7835,6 +7868,13 @@ fn handle_mesh_route_message(
                 {
                     continue;
                 }
+                let mut context = ApplicationRouteContext::with_verified_identity(
+                    from.clone(),
+                    RouteTransportKind::WebRtc,
+                    verified_identity.as_ref(),
+                    state.borrow().session_auth.require_authenticated_peers,
+                );
+                context.direct = true;
                 let event = ApplicationRouteEvent {
                     route_id: route_id.clone(),
                     from: from.clone(),
@@ -7844,6 +7884,7 @@ fn handle_mesh_route_message(
                     received_at_millis: js_sys::Date::now() as u64,
                     transport: RouteTransportKind::WebRtc,
                     verified_identity,
+                    context,
                     message,
                 };
                 state.borrow().applications.publish(event);

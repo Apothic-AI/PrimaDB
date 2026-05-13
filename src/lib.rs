@@ -28,6 +28,7 @@ mod native_relay_server;
 mod native_sync;
 mod net;
 mod operation;
+mod overlay;
 mod parallel;
 mod persistence;
 mod query;
@@ -50,8 +51,8 @@ mod wasm;
 mod wasm_opfs;
 
 pub use app_route::{
-    ApplicationRouteEvent, ApplicationRouteFilter, ApplicationRouteMessage,
-    ApplicationRouteSubscription,
+    ApplicationRouteAuthStatus, ApplicationRouteContext, ApplicationRouteEvent,
+    ApplicationRouteFilter, ApplicationRouteMessage, ApplicationRouteSubscription,
 };
 #[cfg(feature = "crypto")]
 pub use auth::{
@@ -125,6 +126,13 @@ pub use net::{
     MoqRelayClientConfig, RelayClientConfig, RelayEndpointConfig, RelayServerConfig,
 };
 pub use operation::{Operation, OperationAction, OperationValue};
+pub use overlay::{
+    APPLICATION_STREAM_NAMESPACE, APPLICATION_STREAM_PROTOCOL_V1, ApplicationStreamAssembler,
+    ApplicationStreamEvent, ApplicationStreamFrame, ApplicationStreamFrameKind,
+    ApplicationStreamSendOptions, ApplicationStreamSendReport, RouteOverlayDeliveryAttempt,
+    RouteOverlayPolicy, RouteOverlayPumpReport, RouteOverlaySendMode, RouteOverlaySendReport,
+    RouteOverlaySession, RouteOverlayUnderlayHandle, RouteOverlayUnderlayInfo,
+};
 pub use parallel::{parallel_enabled, parallel_thread_count};
 pub use query::{LexEntry, LexSpec, QueryDirection, QueryFilter, QueryOrder, QuerySpec};
 pub use record::{

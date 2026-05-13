@@ -103,7 +103,7 @@ if ((THREADS)); then
   rustup component add rust-src --toolchain "$TOOLCHAIN" >/dev/null
   rustup target add wasm32-unknown-unknown --toolchain "$TOOLCHAIN" >/dev/null
   THREAD_BUILD_STD=1
-  WASM_RUSTFLAGS="${WASM_RUSTFLAGS:+$WASM_RUSTFLAGS }-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
+  WASM_RUSTFLAGS="${WASM_RUSTFLAGS:+$WASM_RUSTFLAGS }-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__heap_base -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
 else
   rustup target add wasm32-unknown-unknown --toolchain "$TOOLCHAIN" >/dev/null
 fi

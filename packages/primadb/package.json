@@ -41,7 +41,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "node ./scripts/smoke.mjs",
     "smoke:moq-mesh-signaling": "node ./scripts/smoke-moq-mesh-signaling.mjs",
-    "pack:check": "pnpm pack --dry-run"
+    "pack:check": "rm -rf /tmp/primadb-pack-check/primadb && mkdir -p /tmp/primadb-pack-check/primadb && pnpm pack --pack-destination /tmp/primadb-pack-check/primadb"
   },
   "dependencies": {
     "@moq/lite": "^0.2.2"

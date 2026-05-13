@@ -69,6 +69,31 @@ class ApplicationRouteMessage(TypedDict, total=False):
     metadata: dict[str, Any]
 ```
 
+## `ApplicationRouteAuthStatus`
+
+Kind: type alias
+
+```py
+ApplicationRouteAuthStatus = Literal[
+```
+
+## `ApplicationRouteContext`
+
+Kind: class
+
+```py
+class ApplicationRouteContext(TypedDict, total=False):
+    sourcePeerId: str
+    transport: RouteTransportKind
+    underlayId: Optional[str]
+    direct: bool
+    relayRouted: bool
+    gatewayRouted: bool
+    gatewayPeerId: Optional[str]
+    authStatus: ApplicationRouteAuthStatus
+    provenance: list[str]
+```
+
 ## `ApplicationRouteEvent`
 
 Kind: type alias
@@ -1311,6 +1336,7 @@ class WebSocketSync:
     def recommended_peers(self) -> Any: ...
     def publish_application(self, message: ApplicationRouteMessage | dict[str, Any], target: Optional[RouteTarget] = ...) -> Any: ...
     def send_application(self, namespace: str, protocol: str, topic: Optional[str], body: Any, metadata: Optional[dict[str, Any]] = ..., target: Optional[RouteTarget] = ...) -> Any: ...
+    def send_route_envelope(self, route: dict[str, Any]) -> Any: ...
     def subscribe_applications(self, filter: Optional[ApplicationRouteFilter] = ...) -> ApplicationRouteSubscription: ...
     def get(self, path: Any, policy: Optional[RemoteInterestPolicy] = ...) -> Any: ...
     def query(self, path: Any, spec: Any, policy: Optional[RemoteInterestPolicy] = ...) -> Any: ...
@@ -1372,6 +1398,7 @@ class WebRtcMesh:
     def recommended_peers(self) -> Any: ...
     def publish_application(self, message: ApplicationRouteMessage | dict[str, Any], target: Optional[RouteTarget] = ...) -> Any: ...
     def send_application(self, namespace: str, protocol: str, topic: Optional[str], body: Any, metadata: Optional[dict[str, Any]] = ..., target: Optional[RouteTarget] = ...) -> Any: ...
+    def send_route_envelope(self, route: dict[str, Any]) -> Any: ...
     def subscribe_applications(self, filter: Optional[ApplicationRouteFilter] = ...) -> ApplicationRouteSubscription: ...
     def records_fan_in(self, scan: RecordScan | dict[str, Any], policy: Optional[RemoteInterestPolicy] = ...) -> RemoteRecordsFanIn: ...
     def watch_get(self, path: Any, policy: Optional[RemoteInterestPolicy] = ...) -> RemoteWatch: ...
@@ -1408,7 +1435,11 @@ Application route APIs carry caller-defined messages inside `RoutePayload::Appli
 
 Use `publish_application(...)` when the caller has already assembled an application message, or `send_application(...)` for the namespace/protocol/topic/body convenience shape.
 
-`subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, and the application message.
+`subscribe_applications(...)` returns a filtered subscription with deterministic `next`/`tryNext`/`drain`/`close` behavior. Received events include route id, source peer, channel, target, receive time, transport kind where available, verified identity when available, and an `ApplicationRouteContext` with underlay/provenance/auth-status metadata.
+
+`RouteOverlaySession` and `PrimadbRouteOverlaySession` own multiple route underlays, apply a send policy, report per-underlay delivery attempts, and dedupe duplicate application events delivered through multiple paths. Native relay/MoQ/WebRTC handles expose route-overlay underlay adapters so callers can send once instead of manually looping over transports.
+
+Application streams use the same route machinery with stream id, sequence number, chunk data, final flags, close/error/ack/nack frame kinds, and ordered reassembly. They are intended for larger trusted app messages that should not require callers to invent another envelope above `RouteEnvelope`.
 
 These APIs are RouteEnvelope-level. They do not expose raw WebSocket, WebRTC, WebTransport, or MoQ socket handles.
 

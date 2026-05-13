@@ -16,6 +16,8 @@ This page covers the public Rust crate surface. The site also serves the full bu
 
 ### `app_route`
 
+- `ApplicationRouteAuthStatus`
+- `ApplicationRouteContext`
 - `ApplicationRouteEvent`
 - `ApplicationRouteFilter`
 - `ApplicationRouteMessage`
@@ -217,6 +219,25 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `Operation`
 - `OperationAction`
 - `OperationValue`
+
+### `overlay`
+
+- `APPLICATION_STREAM_NAMESPACE`
+- `APPLICATION_STREAM_PROTOCOL_V1`
+- `ApplicationStreamAssembler`
+- `ApplicationStreamEvent`
+- `ApplicationStreamFrame`
+- `ApplicationStreamFrameKind`
+- `ApplicationStreamSendOptions`
+- `ApplicationStreamSendReport`
+- `RouteOverlayDeliveryAttempt`
+- `RouteOverlayPolicy`
+- `RouteOverlayPumpReport`
+- `RouteOverlaySendMode`
+- `RouteOverlaySendReport`
+- `RouteOverlaySession`
+- `RouteOverlayUnderlayHandle`
+- `RouteOverlayUnderlayInfo`
 
 ### `parallel`
 

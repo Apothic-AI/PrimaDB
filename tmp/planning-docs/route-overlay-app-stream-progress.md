@@ -1,0 +1,71 @@
+# Route Overlay And Application Stream Progress
+
+## 2026-05-13
+
+- Created sprint plan and progress docs.
+- Initial evidence pass:
+  - PrimaDB path is the active work area.
+  - Existing route/application/fan-in APIs are already public.
+  - Existing in-memory route hub, native WebSocket/MoQ/WebRTC, WASM WebSocket, browser/Node MoQ route helpers all carry `RouteEnvelope`.
+  - Starla remains outside scope for this sprint.
+- Added shared `ApplicationRouteContext` and `ApplicationRouteAuthStatus` so received app route events carry source peer, transport, underlay, direct/relay/gateway provenance, auth status, and verified identity when available.
+- Added shared route overlay core in `src/overlay.rs`:
+  - `RouteOverlaySession`
+  - `RouteOverlayUnderlayHandle`
+  - `RouteOverlayPolicy`
+  - delivery attempt/send/pump reports
+  - sync and async route sends
+  - application event pumping from raw routes or existing app subscriptions
+  - fan-out duplicate suppression
+- Added application stream primitives:
+  - stream frame kinds open/data/ack/nack/close/error
+  - stream send options/report
+  - ordered stream reassembly
+  - stream event drain API
+- Added native route-envelope sends and route-overlay underlay adapters:
+  - `NativeWebSocketSync::send_route_envelope`
+  - `NativeWebSocketSync::route_overlay_underlay`
+  - `NativeMoqSync::send_route_envelope`
+  - `NativeMoqSync::route_overlay_underlay`
+  - `NativeWebRtcMesh::send_route_envelope`
+  - `NativeWebRtcMesh::route_overlay_underlay`
+- Added WASM `sendRouteEnvelope` for browser WebSocket sync and WebRTC mesh.
+- Added browser and Node MoQ overlay helpers:
+  - `PrimadbRouteOverlaySession`
+  - `primadbMoqOverlayUnderlay`
+  - application stream constants/types
+  - app route context on MoQ application events
+- Updated Node and Python declarations for app route context and route-envelope send methods.
+- Updated README, routing/mesh docs, relay/full-node/mesh guide, and API-doc generation text.
+- Checks run:
+  - `cargo check --lib`
+  - `cargo check --features native-websocket --lib`
+  - `cargo check --features "native-websocket native-webrtc native-moq" --lib`
+  - `cargo check --no-default-features --features crypto --lib`
+  - `cargo check --manifest-path packages/primadb-python/Cargo.toml`
+  - `cargo test overlay --lib`
+  - `cargo test --lib`
+  - `cargo test --lib --features "native-websocket native-webrtc native-moq"`
+  - `pnpm --dir packages/primadb typecheck`
+  - `node --check packages/primadb-node/moq.js`
+  - Node one-off overlay application route smoke
+  - Node one-off overlay application stream smoke
+  - `python -m py_compile packages/primadb-python/python/primadb/__init__.pyi`
+  - `pnpm --dir website run generate:api`
+  - `pnpm --dir packages/primadb-node run build`
+  - `pnpm --dir packages/primadb run build`
+  - `pnpm --dir packages/primadb smoke`
+  - `pnpm --dir packages/primadb-node run smoke:core`
+  - `pnpm --dir packages/primadb-node run smoke:relay-server`
+  - `pnpm --dir packages/primadb-node run smoke:relay`
+  - `pnpm --dir packages/primadb-node run smoke:mesh`
+  - `pnpm --dir packages/primadb-node run smoke:moq`
+  - `pnpm --dir website run build`
+  - `pnpm --dir packages/primadb pack:check`
+  - `pnpm --dir packages/primadb-node pack:check`
+- Build fix:
+  - Threaded WASM package build initially failed in `wasm-bindgen` with `failed to find __heap_base for injecting thread id`.
+  - Updated the threaded WASM build flags to export `__heap_base`, then rebuilt browser package artifacts successfully.
+- pnpm compatibility fix:
+  - pnpm 10.18.0 no longer supports `pnpm pack --dry-run`.
+  - Updated package `pack:check` scripts to create tarballs under `/tmp/primadb-pack-check/...`.

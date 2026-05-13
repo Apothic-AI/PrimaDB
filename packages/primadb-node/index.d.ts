@@ -634,6 +634,25 @@ export interface ApplicationRouteMessage {
   metadata?: Record<string, JsonValue>;
 }
 
+export type ApplicationRouteAuthStatus =
+  | "unknown"
+  | "not_required"
+  | "unauthenticated"
+  | "authenticated"
+  | "required_but_missing";
+
+export interface ApplicationRouteContext {
+  sourcePeerId: string;
+  transport: RouteTransportKind;
+  underlayId?: string | null;
+  direct: boolean;
+  relayRouted: boolean;
+  gatewayRouted: boolean;
+  gatewayPeerId?: string | null;
+  authStatus: ApplicationRouteAuthStatus;
+  provenance: string[];
+}
+
 export interface ApplicationRouteEvent {
   routeId: string;
   from: string;
@@ -643,6 +662,7 @@ export interface ApplicationRouteEvent {
   receivedAtMillis: number;
   transport: RouteTransportKind;
   verifiedIdentity?: VerifiedIdentity | null;
+  context: ApplicationRouteContext;
   message: ApplicationRouteMessage;
 }
 
@@ -863,6 +883,7 @@ export declare class WebSocketSync {
     metadata?: Record<string, JsonValue> | null,
     target?: RouteTarget | null,
   ): JsonValue;
+  sendRouteEnvelope(route: JsonValue): JsonValue;
   subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
   get(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
   query(
@@ -953,6 +974,7 @@ export declare class WebRtcMesh {
     metadata?: Record<string, JsonValue> | null,
     target?: RouteTarget | null,
   ): Promise<JsonValue>;
+  sendRouteEnvelope(route: JsonValue): Promise<JsonValue>;
   subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
   recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
   watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
