@@ -17,8 +17,10 @@ use primadb::{
     RemoteWatchSubscription as CoreRemoteWatch, RecordWatchSubscription as CoreRecordWatchSubscription,
     RoomHookContext, RouteTarget, SecretBoxKey, ServeRequestContext, ServeResultContext,
     Scope as CoreScope, ScopePolicy, ScriptExecutionOptions, Subscription as CoreSubscription,
-    TransactionOptions, TransactionStep, TraversalSubscription as CoreTraversalSubscription,
-    TraversalSpec, UserGrant, VectorCollectionConfig, VectorSearchSpec,
+    TextCollectionConfig, TextDocument, TextSearchSource, TextSearchSpec,
+    TextWatchSubscription as CoreTextWatchSubscription, TransactionOptions, TransactionStep,
+    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    VectorCollectionConfig, VectorSearchSpec,
     VectorWatchSubscription as CoreVectorWatchSubscription,
     derive_password_key as core_derive_password_key, parse_request_hook_json, parse_result_hook_json,
     parse_void_hook_json,
@@ -49,6 +51,13 @@ fn remote_policy(value: Option<JsonValue>) -> Result<RemoteInterestPolicy> {
     match value {
         Some(value) => from_json(value),
         None => Ok(RemoteInterestPolicy::default()),
+    }
+}
+
+fn text_source(value: JsonValue) -> Result<TextSearchSource> {
+    match value {
+        JsonValue::String(collection) => Ok(TextSearchSource::Collection { collection }),
+        other => from_json(other),
     }
 }
 
@@ -135,6 +144,9 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         CoreRemoteResult::VectorSearch { result } => {
             serde_json::to_value(result).unwrap_or(JsonValue::Null)
         }
+        CoreRemoteResult::TextSearch { result } => {
+            serde_json::to_value(result).unwrap_or(JsonValue::Null)
+        }
         CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Transaction { report } => serde_json::to_value(report).unwrap_or(JsonValue::Null),
@@ -149,6 +161,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Lex { .. } => "lex",
         CoreRemoteResult::Records { .. } => "records",
         CoreRemoteResult::VectorSearch { .. } => "vector_search",
+        CoreRemoteResult::TextSearch { .. } => "text_search",
         CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
         CoreRemoteResult::Transaction { .. } => "transaction",
@@ -370,6 +383,11 @@ pub struct RecordWatchSubscription {
 #[napi]
 pub struct VectorWatchSubscription {
     inner: Arc<Mutex<Option<CoreVectorWatchSubscription>>>,
+}
+
+#[napi]
+pub struct TextWatchSubscription {
+    inner: Arc<Mutex<Option<CoreTextWatchSubscription>>>,
 }
 
 #[napi]
@@ -676,6 +694,77 @@ impl Primadb {
         Ok(VectorWatchSubscription {
             inner: Arc::new(Mutex::new(Some(subscription))),
         })
+    }
+
+    #[napi(js_name = "createTextCollection")]
+    pub fn create_text_collection(&self, name: String, config: JsonValue) -> Result<()> {
+        let config: TextCollectionConfig = from_json(config)?;
+        self.inner
+            .create_text_collection(name, config)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "putTextDocument")]
+    pub fn put_text_document(&self, collection: String, document: JsonValue) -> Result<()> {
+        let document: TextDocument = from_json(document)?;
+        self.inner
+            .put_text_document(collection, document)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "deleteTextDocument")]
+    pub fn delete_text_document(&self, collection: String, id: String) -> Result<()> {
+        self.inner
+            .delete_text_document(collection, id)
+            .map_err(to_napi_error)
+    }
+
+    #[napi(js_name = "getTextDocument")]
+    pub fn get_text_document(&self, collection: String, id: String) -> Result<JsonValue> {
+        to_json(
+            self.inner
+                .get_text_document(collection, id)
+                .map_err(to_napi_error)?,
+        )
+    }
+
+    #[napi(js_name = "textSearch")]
+    pub fn text_search(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+    ) -> Result<JsonValue> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        to_json(
+            self.inner
+                .text_search(source, query, spec)
+                .map_err(to_napi_error)?,
+        )
+    }
+
+    #[napi(js_name = "watchTextSearch")]
+    pub fn watch_text_search(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+    ) -> Result<TextWatchSubscription> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let subscription = self
+            .inner
+            .watch_text_search(source, query, spec)
+            .map_err(to_napi_error)?;
+        Ok(TextWatchSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
+    }
+
+    #[napi(js_name = "textIndexStats")]
+    pub fn text_index_stats(&self, collection: String) -> Result<JsonValue> {
+        to_json(self.inner.text_index_stats(collection).map_err(to_napi_error)?)
     }
 
     #[napi(js_name = "applyRecordBatch")]
@@ -1208,6 +1297,61 @@ impl VectorWatchSubscription {
 }
 
 #[napi]
+impl TextWatchSubscription {
+    #[napi]
+    pub async fn next(&self) -> Result<JsonValue> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("text watch subscription"))?
+        };
+
+        let message = match subscription.recv().await {
+            Some(value) => {
+                self.inner.lock().unwrap().replace(subscription);
+                json!({
+                    "done": false,
+                    "value": value,
+                })
+            }
+            None => json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }),
+        };
+
+        Ok(message)
+    }
+
+    #[napi(js_name = "tryNext")]
+    pub fn try_next(&self) -> Result<JsonValue> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return Ok(json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }));
+        };
+        match subscription.try_recv() {
+            Some(value) => Ok(json!({
+                "done": false,
+                "value": value,
+            })),
+            None => Ok(json!({
+                "done": false,
+                "value": JsonValue::Null,
+            })),
+        }
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[napi]
 impl RelayServer {
     #[napi(factory, js_name = "listen")]
     pub async fn listen(config: JsonValue) -> Result<RelayServer> {
@@ -1654,6 +1798,52 @@ impl WebSocketSync {
         to_json(result?)
     }
 
+    #[napi(js_name = "textSearch")]
+    pub async fn text_search(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_text_search_with_policy(source, query, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "textSearchFanIn")]
+    pub async fn text_search_fan_in(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .text_search_fan_in(source, query, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
     #[napi(js_name = "node")]
     pub async fn node(&self, id: String, policy: Option<JsonValue>) -> Result<JsonValue> {
         let policy = remote_policy(policy)?;
@@ -1773,6 +1963,28 @@ impl WebSocketSync {
         };
         let result = sync
             .remote_vector_search(peer_id, collection, query, spec)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(sync);
+        to_json(result?)
+    }
+
+    #[napi(js_name = "remoteTextSearch")]
+    pub async fn remote_text_search(
+        &self,
+        peer_id: String,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+    ) -> Result<JsonValue> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = sync
+            .remote_text_search(peer_id, source, query, spec)
             .await
             .map_err(to_napi_error);
         self.inner.lock().unwrap().replace(sync);
@@ -1947,6 +2159,29 @@ impl WebSocketSync {
         })
     }
 
+    #[napi(js_name = "watchRemoteTextSearch")]
+    pub fn watch_remote_text_search(
+        &self,
+        peer_id: String,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+    ) -> Result<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_text_search(peer_id, source, query, spec)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
     #[napi(js_name = "watchRemoteNode")]
     pub fn watch_remote_node(&self, peer_id: String, id: String) -> Result<RemoteWatch> {
         let watch = self
@@ -2115,6 +2350,54 @@ impl WebSocketSync {
             .watch_vector_search_with_policy(collection, query, spec, policy)
             .map_err(to_napi_error)?;
         Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchTextSearch")]
+    pub fn watch_text_search(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_text_search_with_policy(source, query, spec, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[napi(js_name = "watchTextSearchFanIn")]
+    pub fn watch_text_search_fan_in(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteFanInWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_text_search_fan_in(source, query, spec, policy)
+            .map_err(to_napi_error)?;
+        Ok(RemoteFanInWatch {
             inner: Arc::new(Mutex::new(Some(watch))),
         })
     }
@@ -2357,6 +2640,29 @@ impl WebRtcMesh {
         to_json(result?)
     }
 
+    #[napi(js_name = "textSearchFanIn")]
+    pub async fn text_search_fan_in(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<JsonValue> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .text_search_fan_in(source, query, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        to_json(result?)
+    }
+
     #[napi(js_name = "watchRemoteGet")]
     pub async fn watch_remote_get(&self, peer_id: String, path: JsonValue) -> Result<RemoteWatch> {
         let path: RemotePath = from_json(path)?;
@@ -2462,6 +2768,30 @@ impl WebRtcMesh {
         };
         let result = mesh
             .watch_vector_search(peer_id, collection, query, spec)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchRemoteTextSearch")]
+    pub async fn watch_remote_text_search(
+        &self,
+        peer_id: String,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+    ) -> Result<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_text_search(peer_id, source, query, spec)
             .await
             .map_err(to_napi_error);
         self.inner.lock().unwrap().replace(mesh);
@@ -2649,6 +2979,56 @@ impl WebRtcMesh {
             .map_err(to_napi_error);
         self.inner.lock().unwrap().replace(mesh);
         Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchTextSearch")]
+    pub async fn watch_text_search(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_text_search_with_policy(source, query, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result?))),
+        })
+    }
+
+    #[napi(js_name = "watchTextSearchFanIn")]
+    pub async fn watch_text_search_fan_in(
+        &self,
+        source: JsonValue,
+        query: String,
+        spec: JsonValue,
+        policy: Option<JsonValue>,
+    ) -> Result<RemoteFanInWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_json(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = mesh
+            .watch_text_search_fan_in(source, query, spec, policy)
+            .await
+            .map_err(to_napi_error);
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteFanInWatch {
             inner: Arc::new(Mutex::new(Some(result?))),
         })
     }

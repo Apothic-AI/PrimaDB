@@ -11,12 +11,13 @@ use crate::{
     HybridClock, LexEntry, MapEntry, NodeFetchScheduler, Operation, PeerPresence,
     PeerRecommendation, Primadb, PrimadbError, RecordEntry, RecordScanResult, RelayClientConfig,
     RemoteFanInWatch, RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget,
-    RemotePath, RemotePeerFailure, RemotePeerRecords, RemoteRecordsFanIn, RemoteResult,
-    RemoteWatchMessage, RemoteWatchSubscription, Result, RouteBatchItem, RouteEnvelope,
-    RouteOverlayUnderlayHandle, RouteOverlayUnderlayInfo, RoutePayload, RouteTarget,
-    RouteTransportKind, Router, RouterConfig, SyncEnvelope, SyncFrame, VerifiedIdentity,
-    WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
-    merge_remote_records_fan_in,
+    RemotePath, RemotePeerFailure, RemotePeerRecords, RemotePeerTextSearch, RemoteRecordsFanIn,
+    RemoteResult, RemoteTextSearchFanIn, RemoteWatchMessage, RemoteWatchSubscription, Result,
+    RouteBatchItem, RouteEnvelope, RouteOverlayUnderlayHandle, RouteOverlayUnderlayInfo,
+    RoutePayload, RouteTarget, RouteTransportKind, Router, RouterConfig, SyncEnvelope, SyncFrame,
+    TextSearchResult, TextSearchSource, TextSearchSpec, VerifiedIdentity, WatchEvent, WatchRequest,
+    WatchRequestKind, error_pull_response, error_watch_event, merge_remote_records_fan_in,
+    merge_remote_text_search_fan_in,
 };
 use async_channel::{Sender, bounded, unbounded};
 use futures_util::{SinkExt, StreamExt};
@@ -94,6 +95,9 @@ enum PullAccumulator {
     },
     VectorSearch {
         result: Option<crate::VectorSearchResult>,
+    },
+    TextSearch {
+        result: Option<TextSearchResult>,
     },
     Node {
         node: Option<crate::NodeState>,
@@ -524,6 +528,24 @@ impl NativeWebSocketSync {
         )
     }
 
+    pub fn watch_text_search(
+        &self,
+        peer_id: impl Into<String>,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
+                spec,
+            },
+        )
+    }
+
     pub fn watch_node(
         &self,
         peer_id: impl Into<String>,
@@ -615,6 +637,24 @@ impl NativeWebSocketSync {
             crate::PullRequestKind::VectorSearch {
                 collection: collection.into(),
                 query,
+                spec,
+            },
+        )
+    }
+
+    pub fn watch_text_search_with_policy(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
                 spec,
             },
         )
@@ -743,6 +783,31 @@ impl NativeWebSocketSync {
             RemoteResult::VectorSearch { result } => Ok(result),
             other => Err(PrimadbError::Message(format!(
                 "expected vector_search result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_text_search(
+        &self,
+        peer_id: impl Into<String>,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+    ) -> Result<TextSearchResult> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::TextSearch { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected text_search result, received {other:?}"
             ))),
         }
     }
@@ -902,6 +967,51 @@ impl NativeWebSocketSync {
                 "expected vector_search result, received {other:?}"
             ))),
         }
+    }
+
+    pub async fn remote_text_search_with_policy(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<TextSearchResult> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::TextSearch { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected text_search result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn text_search_fan_in(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteTextSearchFanIn> {
+        text_search_fan_in_state(&self.state, source, query.into(), spec, policy).await
+    }
+
+    pub fn watch_text_search_fan_in(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteFanInWatch> {
+        watch_text_search_fan_in_state(&self.state, source, query.into(), spec, policy)
     }
 
     pub async fn remote_node_with_policy(
@@ -1332,6 +1442,56 @@ impl NativeMoqSync {
         }
     }
 
+    pub async fn remote_text_search(
+        &self,
+        peer_id: impl Into<String>,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+    ) -> Result<TextSearchResult> {
+        match request_remote_result(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::TextSearch { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected text_search result, received {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn remote_text_search_with_policy(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<TextSearchResult> {
+        match request_remote_result_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::TextSearch { result } => Ok(result),
+            other => Err(PrimadbError::Message(format!(
+                "expected text_search result, received {other:?}"
+            ))),
+        }
+    }
+
     pub fn watch_records(
         &self,
         peer_id: impl Into<String>,
@@ -1356,6 +1516,42 @@ impl NativeMoqSync {
         )
     }
 
+    pub fn watch_text_search(
+        &self,
+        peer_id: impl Into<String>,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch(
+            &self.state,
+            peer_id.into(),
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
+                spec,
+            },
+        )
+    }
+
+    pub fn watch_text_search_with_policy(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteWatchSubscription> {
+        start_remote_watch_with_policy(
+            &self.state,
+            policy,
+            crate::PullRequestKind::TextSearch {
+                source,
+                query: query.into(),
+                spec,
+            },
+        )
+    }
+
     pub async fn records_fan_in(
         &self,
         scan: crate::RecordScan,
@@ -1370,6 +1566,26 @@ impl NativeMoqSync {
         policy: RemoteInterestPolicy,
     ) -> Result<RemoteFanInWatch> {
         watch_records_fan_in_state(&self.state, scan, policy)
+    }
+
+    pub async fn text_search_fan_in(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteTextSearchFanIn> {
+        text_search_fan_in_state(&self.state, source, query.into(), spec, policy).await
+    }
+
+    pub fn watch_text_search_fan_in(
+        &self,
+        source: TextSearchSource,
+        query: impl Into<String>,
+        spec: TextSearchSpec,
+        policy: RemoteInterestPolicy,
+    ) -> Result<RemoteFanInWatch> {
+        watch_text_search_fan_in_state(&self.state, source, query.into(), spec, policy)
     }
 
     pub async fn remote_transaction(
@@ -1553,6 +1769,73 @@ async fn records_fan_in_state(
     Ok(merge_remote_records_fan_in(request_id, records, failures))
 }
 
+async fn text_search_fan_in_state(
+    state: &Arc<NativeWebSocketSyncState>,
+    source: TextSearchSource,
+    query: String,
+    spec: TextSearchSpec,
+    policy: RemoteInterestPolicy,
+) -> Result<RemoteTextSearchFanIn> {
+    let request_kind = crate::PullRequestKind::TextSearch {
+        source: source.clone(),
+        query: query.clone(),
+        spec: spec.clone(),
+    };
+    let peers = resolve_relay_peers_for_policy(
+        state,
+        &policy,
+        pull_capability_for_request(&request_kind),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(PrimadbError::Message(
+            "remote interest policy did not select any peers".to_owned(),
+        ));
+    }
+
+    let request_id = format!(
+        "{}/text-search-fan-in/{:x}",
+        state.db.replica_id(),
+        state.next_message_seq.fetch_add(1, Ordering::SeqCst) + 1
+    );
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer, &state.transport);
+        match request_remote_result(
+            state,
+            peer.peer_id.clone(),
+            crate::PullRequestKind::TextSearch {
+                source: source.clone(),
+                query: query.clone(),
+                spec: spec.clone(),
+            },
+        )
+        .await
+        {
+            Ok(RemoteResult::TextSearch { result }) => results.push(RemotePeerTextSearch {
+                peer_id: peer.peer_id,
+                transport,
+                result,
+            }),
+            Ok(other) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: format!("expected text_search result, received {other:?}"),
+            }),
+            Err(error) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    Ok(merge_remote_text_search_fan_in(
+        request_id, results, failures,
+    ))
+}
+
 fn watch_records_fan_in_state(
     state: &Arc<NativeWebSocketSyncState>,
     scan: crate::RecordScan,
@@ -1581,6 +1864,105 @@ fn watch_records_fan_in_state(
             state,
             peer.peer_id.clone(),
             crate::PullRequestKind::Records { scan: scan.clone() },
+        ) {
+            Ok(watch) => {
+                let child_receiver = watch.receiver();
+                watches.lock().unwrap().push(watch);
+                let child_sender = sender.clone();
+                let peer_id = peer.peer_id.clone();
+                let task = tokio::spawn(async move {
+                    let mut sequence = 0_u64;
+                    while let Ok(message) = child_receiver.recv().await {
+                        match message {
+                            Ok(message) => {
+                                sequence = sequence.saturating_add(1);
+                                let _ = child_sender
+                                    .send(RemoteFanInWatchEvent::Update {
+                                        peer_id: peer_id.clone(),
+                                        transport: transport.clone(),
+                                        initial: message.initial,
+                                        sequence,
+                                        result: message.result,
+                                    })
+                                    .await;
+                            }
+                            Err(message) => {
+                                let _ = child_sender
+                                    .send(RemoteFanInWatchEvent::Failure {
+                                        peer_id: peer_id.clone(),
+                                        transport: transport.clone(),
+                                        message,
+                                        terminal: true,
+                                    })
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+                });
+                tasks.lock().unwrap().push(task);
+            }
+            Err(error) => {
+                let _ = sender.try_send(RemoteFanInWatchEvent::Failure {
+                    peer_id: peer.peer_id,
+                    transport,
+                    message: error.to_string(),
+                    terminal: true,
+                });
+            }
+        }
+    }
+
+    let cancel_watches = watches.clone();
+    let cancel_tasks = tasks.clone();
+    Ok(RemoteFanInWatch::new(receiver, move || {
+        for watch in cancel_watches.lock().unwrap().drain(..) {
+            watch.close();
+        }
+        for task in cancel_tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+    }))
+}
+
+fn watch_text_search_fan_in_state(
+    state: &Arc<NativeWebSocketSyncState>,
+    source: TextSearchSource,
+    query: String,
+    spec: TextSearchSpec,
+    policy: RemoteInterestPolicy,
+) -> Result<RemoteFanInWatch> {
+    let request_kind = crate::PullRequestKind::TextSearch {
+        source: source.clone(),
+        query: query.clone(),
+        spec: spec.clone(),
+    };
+    let peers = resolve_relay_peers_for_policy(
+        state,
+        &policy,
+        Some(&watch_capability_for_request(&request_kind)),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(PrimadbError::Message(
+            "remote interest policy did not select any peers".to_owned(),
+        ));
+    }
+
+    let (sender, receiver) = unbounded();
+    let watches = Arc::new(Mutex::new(Vec::<RemoteWatchSubscription>::new()));
+    let tasks = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
+
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer, &state.transport);
+        match start_remote_watch(
+            state,
+            peer.peer_id.clone(),
+            crate::PullRequestKind::TextSearch {
+                source: source.clone(),
+                query: query.clone(),
+                spec: spec.clone(),
+            },
         ) {
             Ok(watch) => {
                 let child_receiver = watch.receiver();
@@ -1854,7 +2236,7 @@ fn peer_supports_request(
     if !peer_supports_capability(peer, capability) {
         return false;
     }
-    vector_request_hint_score(peer, request) != Some(0)
+    request_hint_score(peer, request) != Some(0)
 }
 
 fn prefer_vector_request_candidates(
@@ -1862,10 +2244,17 @@ fn prefer_vector_request_candidates(
     request: Option<&crate::PullRequestKind>,
 ) {
     candidates.sort_by(|left, right| {
-        vector_request_hint_score(right, request)
+        request_hint_score(right, request)
             .unwrap_or(1)
-            .cmp(&vector_request_hint_score(left, request).unwrap_or(1))
+            .cmp(&request_hint_score(left, request).unwrap_or(1))
     });
+}
+
+fn request_hint_score(
+    peer: &crate::PeerPresence,
+    request: Option<&crate::PullRequestKind>,
+) -> Option<u8> {
+    vector_request_hint_score(peer, request).or_else(|| text_request_hint_score(peer, request))
 }
 
 fn vector_request_hint_score(
@@ -1903,6 +2292,44 @@ fn vector_request_hint_score(
     )
 }
 
+fn text_request_hint_score(
+    peer: &crate::PeerPresence,
+    request: Option<&crate::PullRequestKind>,
+) -> Option<u8> {
+    let Some(crate::PullRequestKind::TextSearch { source, spec, .. }) = request else {
+        return None;
+    };
+    let crate::TextSearchSource::Collection { collection } = source else {
+        return Some(
+            peer.capabilities
+                .iter()
+                .any(|item| item == "pull_text_search")
+                .then_some(1)
+                .unwrap_or(0),
+        );
+    };
+    let prefix = format!("text_collection:{}:", crate::encode_component(collection));
+    let hints = peer
+        .capabilities
+        .iter()
+        .filter(|item| item.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    if hints.is_empty() {
+        return None;
+    }
+    Some(
+        hints
+            .iter()
+            .any(|hint| {
+                let parts = hint.split(':').collect::<Vec<_>>();
+                parts.len() >= 5
+                    && (spec.stale_policy == crate::SearchStalePolicy::Allow || parts[2] == "ready")
+            })
+            .then_some(2)
+            .unwrap_or(0),
+    )
+}
+
 fn pull_capability_for_request(request: &crate::PullRequestKind) -> Option<&'static str> {
     match request {
         crate::PullRequestKind::Get { .. } => Some("pull_get"),
@@ -1910,6 +2337,7 @@ fn pull_capability_for_request(request: &crate::PullRequestKind) -> Option<&'sta
         crate::PullRequestKind::Lex { .. } => Some("pull_lex"),
         crate::PullRequestKind::Records { .. } => Some("pull_records"),
         crate::PullRequestKind::VectorSearch { .. } => Some("pull_vector_search"),
+        crate::PullRequestKind::TextSearch { .. } => Some("pull_text_search"),
         crate::PullRequestKind::Snapshot { .. } => Some("snapshot"),
         crate::PullRequestKind::Node { .. } => Some("pull_node"),
         crate::PullRequestKind::Map { .. } => Some("pull_map"),
@@ -2495,6 +2923,7 @@ fn build_relay_presence_route(
         "pull_lex".to_owned(),
         "pull_records".to_owned(),
         "pull_vector_search".to_owned(),
+        "pull_text_search".to_owned(),
         "pull_node".to_owned(),
         "watch_get".to_owned(),
         "watch_map".to_owned(),
@@ -2502,11 +2931,13 @@ fn build_relay_presence_route(
         "watch_lex".to_owned(),
         "watch_records".to_owned(),
         "watch_vector_search".to_owned(),
+        "watch_text_search".to_owned(),
         "watch_node".to_owned(),
         "watch_snapshot".to_owned(),
         "peer_exchange".to_owned(),
     ];
     capabilities.extend(state.db.vector_presence_capabilities());
+    capabilities.extend(state.db.text_presence_capabilities());
     let mut presence = state.router.presence(
         state.db.replica_id(),
         transport,
@@ -3010,6 +3441,12 @@ fn apply_response_body(
             };
             None
         }
+        crate::PullResponseBody::TextSearch { result } => {
+            *accumulator = PullAccumulator::TextSearch {
+                result: Some(result.clone()),
+            };
+            None
+        }
         crate::PullResponseBody::Node { node } => {
             *accumulator = PullAccumulator::Node { node: node.clone() };
             None
@@ -3141,6 +3578,7 @@ impl PullAccumulator {
                 next_cursor: None,
             },
             crate::PullRequestKind::VectorSearch { .. } => Self::VectorSearch { result: None },
+            crate::PullRequestKind::TextSearch { .. } => Self::TextSearch { result: None },
             crate::PullRequestKind::Node { .. } => Self::Node { node: None },
             crate::PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -3171,6 +3609,13 @@ impl PullAccumulator {
                 result: result.ok_or_else(|| {
                     PrimadbError::Message(
                         "vector search response completed without a result".to_owned(),
+                    )
+                })?,
+            }),
+            Self::TextSearch { result } => Ok(RemoteResult::TextSearch {
+                result: result.ok_or_else(|| {
+                    PrimadbError::Message(
+                        "text search response completed without a result".to_owned(),
                     )
                 })?,
             }),

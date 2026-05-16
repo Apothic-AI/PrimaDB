@@ -3,7 +3,8 @@ use crate::SecureSyncFrame;
 use crate::app_route::ApplicationRouteBus;
 use crate::wasm_opfs::{
     apply_segment_transaction_opfs, estimate_segment_namespace_opfs, load_segment_snapshot_opfs,
-    load_vector_cache_opfs, replace_segment_transaction_opfs, write_vector_cache_opfs,
+    load_text_cache_opfs, load_vector_cache_opfs, replace_segment_transaction_opfs,
+    write_text_cache_opfs, write_vector_cache_opfs,
 };
 use crate::{
     ApplicationRouteContext, ApplicationRouteEvent, ApplicationRouteFilter,
@@ -15,14 +16,16 @@ use crate::{
     PullResponseBody, QuerySpec, RecordBatch, RecordEntry, RecordScan, RecordScanResult,
     RecordWatchSubscription as CoreRecordWatchSubscription, RelayClientConfig, RelayEndpointConfig,
     RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
-    RemotePeerFailure, RemotePeerRecords, RemoteResult, RemoteWatchMessage, RoomHookContext,
-    RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, RouteTransportKind, Router,
-    RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext, Subscription,
-    SyncEnvelope, SyncFrame, TransactionOptions, TransactionStep, TraversalSpec,
+    RemotePeerFailure, RemotePeerRecords, RemotePeerTextSearch, RemoteResult, RemoteWatchMessage,
+    RoomHookContext, RouteBatchItem, RouteEnvelope, RoutePayload, RouteTarget, RouteTransportKind,
+    Router, RouterConfig, Scope, ScopePolicy, ServeRequestContext, ServeResultContext,
+    Subscription, SyncEnvelope, SyncFrame, TextCollectionConfig, TextDocument, TextSearchResult,
+    TextSearchSource, TextSearchSpec, TextWatchSubscription as CoreTextWatchSubscription,
+    TransactionOptions, TransactionStep, TraversalSpec,
     TraversalSubscription as CoreTraversalSubscription, VectorCollectionConfig, VectorSearchSpec,
     VectorWatchSubscription as CoreVectorWatchSubscription, VerifiedIdentity, WatchEvent,
     WatchRequest, WatchRequestKind, encode_component, error_pull_response, error_watch_event,
-    merge_remote_records_fan_in,
+    merge_remote_records_fan_in, merge_remote_text_search_fan_in,
 };
 #[cfg(feature = "scripting")]
 use crate::{NodeScript, ScriptExecutionOptions};
@@ -88,6 +91,11 @@ pub struct WasmRecordWatchSubscription {
 #[wasm_bindgen(js_name = VectorWatchSubscription)]
 pub struct WasmVectorWatchSubscription {
     inner: Option<CoreVectorWatchSubscription>,
+}
+
+#[wasm_bindgen(js_name = TextWatchSubscription)]
+pub struct WasmTextWatchSubscription {
+    inner: Option<CoreTextWatchSubscription>,
 }
 
 #[wasm_bindgen(js_name = RemoteWatch)]
@@ -329,6 +337,9 @@ enum PullAccumulator {
     },
     VectorSearch {
         result: Option<crate::VectorSearchResult>,
+    },
+    TextSearch {
+        result: Option<TextSearchResult>,
     },
     Node {
         node: Option<crate::NodeState>,
@@ -1103,6 +1114,115 @@ impl WasmPrimadb {
         })
     }
 
+    #[wasm_bindgen(js_name = createTextCollection)]
+    pub fn create_text_collection(
+        &self,
+        name: String,
+        config: JsValue,
+    ) -> std::result::Result<(), JsValue> {
+        let config: TextCollectionConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.inner
+            .create_text_collection(name, config)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = putTextDocument)]
+    pub fn put_text_document(
+        &self,
+        collection: String,
+        document: JsValue,
+    ) -> std::result::Result<(), JsValue> {
+        let document: TextDocument = serde_wasm_bindgen::from_value(document)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.inner
+            .put_text_document(collection, document)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = deleteTextDocument)]
+    pub fn delete_text_document(
+        &self,
+        collection: String,
+        id: String,
+    ) -> std::result::Result<(), JsValue> {
+        self.inner
+            .delete_text_document(collection, id)
+            .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = getTextDocument)]
+    pub fn get_text_document(
+        &self,
+        collection: String,
+        id: String,
+    ) -> std::result::Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .inner
+                .get_text_document(collection, id)
+                .map_err(to_js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = textSearch)]
+    pub fn text_search(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        to_js(
+            &self
+                .inner
+                .text_search(source, query, spec)
+                .map_err(to_js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchTextSearch)]
+    pub fn watch_text_search(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        callback: js_sys::Function,
+    ) -> std::result::Result<WasmTextWatchSubscription, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let subscription = self
+            .inner
+            .watch_text_search(source, query, spec)
+            .map_err(to_js_error)?;
+        let receiver = subscription.receiver();
+        let callback = callback.clone();
+
+        spawn_local(async move {
+            while let Ok(result) = receiver.recv().await {
+                let js_value = to_js(&result).unwrap_or(JsValue::NULL);
+                let _ = callback.call1(&JsValue::NULL, &js_value);
+            }
+        });
+
+        Ok(WasmTextWatchSubscription {
+            inner: Some(subscription),
+        })
+    }
+
+    #[wasm_bindgen(js_name = textIndexStats)]
+    pub fn text_index_stats(&self, collection: String) -> std::result::Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .inner
+                .text_index_stats(collection)
+                .map_err(to_js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = saveVectorCacheOpfs)]
     pub async fn save_vector_cache_opfs(
         &self,
@@ -1130,6 +1250,37 @@ impl WasmPrimadb {
         };
         self.inner
             .import_vector_cache_files(&collection, files)
+            .map_err(to_js_error)?;
+        Ok(true)
+    }
+
+    #[wasm_bindgen(js_name = saveTextCacheOpfs)]
+    pub async fn save_text_cache_opfs(
+        &self,
+        directory: String,
+        namespace: String,
+        collection: String,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let files = self
+            .inner
+            .export_text_cache_files(&collection)
+            .map_err(to_js_error)?;
+        let summary = write_text_cache_opfs(&directory, &namespace, &collection, &files).await?;
+        to_js(&summary)
+    }
+
+    #[wasm_bindgen(js_name = loadTextCacheOpfs)]
+    pub async fn load_text_cache_opfs(
+        &self,
+        directory: String,
+        namespace: String,
+        collection: String,
+    ) -> std::result::Result<bool, JsValue> {
+        let Some(files) = load_text_cache_opfs(&directory, &namespace, &collection).await? else {
+            return Ok(false);
+        };
+        self.inner
+            .import_text_cache_files(&collection, files)
             .map_err(to_js_error)?;
         Ok(true)
     }
@@ -1783,6 +1934,7 @@ impl WasmPrimadb {
                     "pull_lex".to_owned(),
                     "pull_records".to_owned(),
                     "pull_vector_search".to_owned(),
+                    "pull_text_search".to_owned(),
                     "pull_node".to_owned(),
                     "watch_get".to_owned(),
                     "watch_map".to_owned(),
@@ -1790,12 +1942,14 @@ impl WasmPrimadb {
                     "watch_lex".to_owned(),
                     "watch_records".to_owned(),
                     "watch_vector_search".to_owned(),
+                    "watch_text_search".to_owned(),
                     "watch_node".to_owned(),
                     "watch_snapshot".to_owned(),
                     "peer_exchange".to_owned(),
                     "application_routes".to_owned(),
                 ];
                 capabilities.extend(borrowed.db.vector_presence_capabilities());
+                capabilities.extend(borrowed.db.text_presence_capabilities());
                 borrowed.router.presence(
                     borrowed.db.replica_id(),
                     "websocket",
@@ -2379,6 +2533,13 @@ impl WasmVectorWatchSubscription {
     }
 }
 
+#[wasm_bindgen(js_class = TextWatchSubscription)]
+impl WasmTextWatchSubscription {
+    pub fn cancel(&mut self) {
+        self.inner.take();
+    }
+}
+
 fn remote_result_kind(result: &RemoteResult) -> &'static str {
     match result {
         RemoteResult::Get { .. } => "get",
@@ -2387,6 +2548,7 @@ fn remote_result_kind(result: &RemoteResult) -> &'static str {
         RemoteResult::Lex { .. } => "lex",
         RemoteResult::Records { .. } => "records",
         RemoteResult::VectorSearch { .. } => "vector_search",
+        RemoteResult::TextSearch { .. } => "text_search",
         RemoteResult::Node { .. } => "node",
         RemoteResult::Snapshot { .. } => "snapshot",
         RemoteResult::Transaction { .. } => "transaction",
@@ -2405,6 +2567,7 @@ fn remote_result_to_js(result: &RemoteResult) -> std::result::Result<JsValue, Js
         RemoteResult::Lex { entries } => lex_entries_to_js(entries),
         RemoteResult::Records { result } => to_js(result),
         RemoteResult::VectorSearch { result } => to_js(result),
+        RemoteResult::TextSearch { result } => to_js(result),
         RemoteResult::Node { node } => to_js(node),
         RemoteResult::Snapshot { snapshot } => to_js(snapshot),
         RemoteResult::Transaction { report } => to_js(report),
@@ -2982,6 +3145,53 @@ impl WasmWebSocketSync {
         }
     }
 
+    #[wasm_bindgen(js_name = textSearch)]
+    pub async fn text_search(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        match request_remote_result_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::TextSearch {
+                source,
+                query,
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::TextSearch { result } => to_js(&result),
+            other => Err(JsValue::from_str(&format!(
+                "expected text_search result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = textSearchFanIn)]
+    pub async fn text_search_fan_in(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        let result =
+            text_search_fan_in_relay_state(&self.state, source, query, spec, policy).await?;
+        to_js(&result)
+    }
+
     pub async fn node(
         &self,
         id: String,
@@ -3132,6 +3342,44 @@ impl WasmWebSocketSync {
         )
     }
 
+    #[wasm_bindgen(js_name = watchTextSearch)]
+    pub fn watch_text_search(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::TextSearch {
+                source,
+                query,
+                spec,
+            },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchTextSearchFanIn)]
+    pub fn watch_text_search_fan_in(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        watch_text_search_fan_in_relay_state(&self.state, source, query, spec, policy)
+    }
+
     #[wasm_bindgen(js_name = watchNode)]
     pub fn watch_node(
         &self,
@@ -3234,6 +3482,28 @@ impl WasmWebSocketSync {
             peer_id,
             PullRequestKind::VectorSearch {
                 collection,
+                query,
+                spec,
+            },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchRemoteTextSearch)]
+    pub fn watch_remote_text_search(
+        &self,
+        peer_id: String,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        start_remote_watch_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::TextSearch {
+                source,
                 query,
                 spec,
             },
@@ -3369,6 +3639,35 @@ impl WasmWebSocketSync {
             RemoteResult::VectorSearch { result } => to_js(&result),
             other => Err(JsValue::from_str(&format!(
                 "expected vector_search result, received {other:?}"
+            ))),
+        }
+    }
+
+    #[wasm_bindgen(js_name = remoteTextSearch)]
+    pub async fn remote_text_search(
+        &self,
+        peer_id: String,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        match request_remote_result_state(
+            &self.state,
+            peer_id,
+            PullRequestKind::TextSearch {
+                source,
+                query,
+                spec,
+            },
+        )
+        .await?
+        {
+            RemoteResult::TextSearch { result } => to_js(&result),
+            other => Err(JsValue::from_str(&format!(
+                "expected text_search result, received {other:?}"
             ))),
         }
     }
@@ -3622,6 +3921,23 @@ impl WasmWebRtcMesh {
         to_js(&result)
     }
 
+    #[wasm_bindgen(js_name = textSearchFanIn)]
+    pub async fn text_search_fan_in(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        let result =
+            text_search_fan_in_mesh_state(&self.state, source, query, spec, policy).await?;
+        to_js(&result)
+    }
+
     #[wasm_bindgen(js_name = watchGet)]
     pub fn watch_get(
         &self,
@@ -3742,6 +4058,44 @@ impl WasmWebRtcMesh {
                 spec,
             },
         )
+    }
+
+    #[wasm_bindgen(js_name = watchTextSearch)]
+    pub fn watch_text_search(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteWatch, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        start_mesh_remote_watch_with_policy_state(
+            &self.state,
+            policy,
+            PullRequestKind::TextSearch {
+                source,
+                query,
+                spec,
+            },
+        )
+    }
+
+    #[wasm_bindgen(js_name = watchTextSearchFanIn)]
+    pub fn watch_text_search_fan_in(
+        &self,
+        source: JsValue,
+        query: String,
+        spec: JsValue,
+        policy: Option<JsValue>,
+    ) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+        let source = text_source_from_js(source)?;
+        let spec: TextSearchSpec = serde_wasm_bindgen::from_value(spec)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let policy = remote_policy_from_js(policy)?;
+        watch_text_search_fan_in_mesh_state(&self.state, source, query, spec, policy)
     }
 
     #[wasm_bindgen(js_name = watchNode)]
@@ -4665,6 +5019,67 @@ async fn records_fan_in_relay_state(
     Ok(merge_remote_records_fan_in(request_id, records, failures))
 }
 
+async fn text_search_fan_in_relay_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    source: TextSearchSource,
+    query: String,
+    spec: TextSearchSpec,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<crate::RemoteTextSearchFanIn, JsValue> {
+    let request_kind = PullRequestKind::TextSearch {
+        source: source.clone(),
+        query: query.clone(),
+        spec: spec.clone(),
+    };
+    let peers = resolve_relay_peers_for_policy_state(
+        state,
+        &policy,
+        pull_capability_for_request(&request_kind),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+    let request_id = next_route_request_id_state(state, "text-search-fan-in");
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match request_remote_result_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::TextSearch {
+                source: source.clone(),
+                query: query.clone(),
+                spec: spec.clone(),
+            },
+        )
+        .await
+        {
+            Ok(RemoteResult::TextSearch { result }) => results.push(RemotePeerTextSearch {
+                peer_id: peer.peer_id,
+                transport,
+                result,
+            }),
+            Ok(other) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: format!("expected text_search result, received {other:?}"),
+            }),
+            Err(error) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+            }),
+        }
+    }
+    Ok(merge_remote_text_search_fan_in(
+        request_id, results, failures,
+    ))
+}
+
 fn watch_records_fan_in_relay_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
     scan: RecordScan,
@@ -4691,6 +5106,102 @@ fn watch_records_fan_in_relay_state(
             state,
             peer.peer_id.clone(),
             PullRequestKind::Records { scan: scan.clone() },
+        ) {
+            Ok(watch) => {
+                let Some(child_receiver) = watch.inner.as_ref().map(|inner| inner.receiver.clone())
+                else {
+                    continue;
+                };
+                watches.borrow_mut().push(watch);
+                let child_sender = sender.clone();
+                let peer_id = peer.peer_id;
+                spawn_local(async move {
+                    let mut sequence = 0_u64;
+                    while let Ok(message) = child_receiver.recv().await {
+                        let event = match message {
+                            Ok(message) => {
+                                sequence = sequence.saturating_add(1);
+                                RemoteFanInWatchEvent::Update {
+                                    peer_id: peer_id.clone(),
+                                    transport: transport.clone(),
+                                    initial: message.initial,
+                                    sequence,
+                                    result: message.result,
+                                }
+                            }
+                            Err(message) => RemoteFanInWatchEvent::Failure {
+                                peer_id: peer_id.clone(),
+                                transport: transport.clone(),
+                                message,
+                                terminal: false,
+                            },
+                        };
+                        if child_sender.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                let _ = sender.try_send(RemoteFanInWatchEvent::Failure {
+                    peer_id: peer.peer_id,
+                    transport,
+                    message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+                    terminal: true,
+                });
+            }
+        }
+    }
+    let close_sender = sender.clone();
+    Ok(WasmRemoteFanInWatch {
+        inner: Some(WasmRemoteFanInWatchInner {
+            receiver,
+            close: Box::new(move || {
+                for watch in watches.borrow_mut().iter_mut() {
+                    watch.cancel();
+                }
+                close_sender.close();
+            }),
+        }),
+    })
+}
+
+fn watch_text_search_fan_in_relay_state(
+    state: &Rc<RefCell<WebSocketSyncState>>,
+    source: TextSearchSource,
+    query: String,
+    spec: TextSearchSpec,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+    let request_kind = PullRequestKind::TextSearch {
+        source: source.clone(),
+        query: query.clone(),
+        spec: spec.clone(),
+    };
+    let peers = resolve_relay_peers_for_policy_state(
+        state,
+        &policy,
+        Some("watch_text_search"),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+
+    let (sender, receiver) = unbounded();
+    let watches = Rc::new(RefCell::new(Vec::<WasmRemoteWatch>::new()));
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match start_remote_watch_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::TextSearch {
+                source: source.clone(),
+                query: query.clone(),
+                spec: spec.clone(),
+            },
         ) {
             Ok(watch) => {
                 let Some(child_receiver) = watch.inner.as_ref().map(|inner| inner.receiver.clone())
@@ -4869,6 +5380,92 @@ async fn records_fan_in_mesh_state(
     Ok(merge_remote_records_fan_in(request_id, records, failures))
 }
 
+async fn text_search_fan_in_mesh_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    source: TextSearchSource,
+    query: String,
+    spec: TextSearchSpec,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<crate::RemoteTextSearchFanIn, JsValue> {
+    let request_kind = PullRequestKind::TextSearch {
+        source: source.clone(),
+        query: query.clone(),
+        spec: spec.clone(),
+    };
+    let peers = resolve_mesh_peers_for_policy_state(
+        state,
+        &policy,
+        Some("watch_text_search"),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+
+    let request_id = next_mesh_request_id_state(state, "text-search-fan-in");
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match start_mesh_remote_watch_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::TextSearch {
+                source: source.clone(),
+                query: query.clone(),
+                spec: spec.clone(),
+            },
+        ) {
+            Ok(mut watch) => {
+                let child_receiver = watch.inner.as_ref().map(|inner| inner.receiver.clone());
+                let message = match child_receiver {
+                    Some(receiver) => receiver.recv().await.ok(),
+                    None => None,
+                };
+                watch.cancel();
+                match message {
+                    Some(Ok(RemoteWatchMessage {
+                        result: RemoteResult::TextSearch { result },
+                        ..
+                    })) => results.push(RemotePeerTextSearch {
+                        peer_id: peer.peer_id,
+                        transport,
+                        result,
+                    }),
+                    Some(Ok(message)) => failures.push(RemotePeerFailure {
+                        peer_id: peer.peer_id,
+                        transport,
+                        message: format!(
+                            "expected text_search result, received {:?}",
+                            message.result
+                        ),
+                    }),
+                    Some(Err(message)) => failures.push(RemotePeerFailure {
+                        peer_id: peer.peer_id,
+                        transport,
+                        message,
+                    }),
+                    None => failures.push(RemotePeerFailure {
+                        peer_id: peer.peer_id,
+                        transport,
+                        message: "watch closed before text_search result".to_owned(),
+                    }),
+                }
+            }
+            Err(error) => failures.push(RemotePeerFailure {
+                peer_id: peer.peer_id,
+                transport,
+                message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+            }),
+        }
+    }
+    Ok(merge_remote_text_search_fan_in(
+        request_id, results, failures,
+    ))
+}
+
 fn watch_records_fan_in_mesh_state(
     state: &Rc<RefCell<WebRtcMeshState>>,
     scan: RecordScan,
@@ -4895,6 +5492,102 @@ fn watch_records_fan_in_mesh_state(
             state,
             peer.peer_id.clone(),
             PullRequestKind::Records { scan: scan.clone() },
+        ) {
+            Ok(watch) => {
+                let Some(child_receiver) = watch.inner.as_ref().map(|inner| inner.receiver.clone())
+                else {
+                    continue;
+                };
+                watches.borrow_mut().push(watch);
+                let child_sender = sender.clone();
+                let peer_id = peer.peer_id;
+                spawn_local(async move {
+                    let mut sequence = 0_u64;
+                    while let Ok(message) = child_receiver.recv().await {
+                        let event = match message {
+                            Ok(message) => {
+                                sequence = sequence.saturating_add(1);
+                                RemoteFanInWatchEvent::Update {
+                                    peer_id: peer_id.clone(),
+                                    transport: transport.clone(),
+                                    initial: message.initial,
+                                    sequence,
+                                    result: message.result,
+                                }
+                            }
+                            Err(message) => RemoteFanInWatchEvent::Failure {
+                                peer_id: peer_id.clone(),
+                                transport: transport.clone(),
+                                message,
+                                terminal: false,
+                            },
+                        };
+                        if child_sender.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                let _ = sender.try_send(RemoteFanInWatchEvent::Failure {
+                    peer_id: peer.peer_id,
+                    transport,
+                    message: error.as_string().unwrap_or_else(|| format!("{error:?}")),
+                    terminal: true,
+                });
+            }
+        }
+    }
+    let close_sender = sender.clone();
+    Ok(WasmRemoteFanInWatch {
+        inner: Some(WasmRemoteFanInWatchInner {
+            receiver,
+            close: Box::new(move || {
+                for watch in watches.borrow_mut().iter_mut() {
+                    watch.cancel();
+                }
+                close_sender.close();
+            }),
+        }),
+    })
+}
+
+fn watch_text_search_fan_in_mesh_state(
+    state: &Rc<RefCell<WebRtcMeshState>>,
+    source: TextSearchSource,
+    query: String,
+    spec: TextSearchSpec,
+    policy: RemoteInterestPolicy,
+) -> std::result::Result<WasmRemoteFanInWatch, JsValue> {
+    let request_kind = PullRequestKind::TextSearch {
+        source: source.clone(),
+        query: query.clone(),
+        spec: spec.clone(),
+    };
+    let peers = resolve_mesh_peers_for_policy_state(
+        state,
+        &policy,
+        Some("watch_text_search"),
+        Some(&request_kind),
+    )?;
+    if peers.is_empty() {
+        return Err(JsValue::from_str(
+            "remote interest policy did not select any peers",
+        ));
+    }
+
+    let (sender, receiver) = unbounded();
+    let watches = Rc::new(RefCell::new(Vec::<WasmRemoteWatch>::new()));
+    for peer in peers {
+        let transport = route_transport_for_peer(&peer);
+        match start_mesh_remote_watch_state(
+            state,
+            peer.peer_id.clone(),
+            PullRequestKind::TextSearch {
+                source: source.clone(),
+                query: query.clone(),
+                spec: spec.clone(),
+            },
         ) {
             Ok(watch) => {
                 let Some(child_receiver) = watch.inner.as_ref().map(|inner| inner.receiver.clone())
@@ -5109,6 +5802,13 @@ fn remote_policy_from_js(
     }
 }
 
+fn text_source_from_js(source: JsValue) -> std::result::Result<TextSearchSource, JsValue> {
+    if let Some(collection) = source.as_string() {
+        return Ok(TextSearchSource::Collection { collection });
+    }
+    serde_wasm_bindgen::from_value(source).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
 fn select_relay_peer_for_policy_state(
     state: &Rc<RefCell<WebSocketSyncState>>,
     policy: &RemoteInterestPolicy,
@@ -5280,7 +5980,7 @@ fn peer_supports_request(
     if !peer_supports_capability(peer, capability) {
         return false;
     }
-    vector_request_hint_score(peer, request) != Some(0)
+    request_hint_score(peer, request) != Some(0)
 }
 
 fn prefer_vector_request_candidates(
@@ -5288,10 +5988,14 @@ fn prefer_vector_request_candidates(
     request: Option<&PullRequestKind>,
 ) {
     candidates.sort_by(|left, right| {
-        vector_request_hint_score(right, request)
+        request_hint_score(right, request)
             .unwrap_or(1)
-            .cmp(&vector_request_hint_score(left, request).unwrap_or(1))
+            .cmp(&request_hint_score(left, request).unwrap_or(1))
     });
+}
+
+fn request_hint_score(peer: &crate::PeerPresence, request: Option<&PullRequestKind>) -> Option<u8> {
+    vector_request_hint_score(peer, request).or_else(|| text_request_hint_score(peer, request))
 }
 
 fn vector_request_hint_score(
@@ -5329,6 +6033,44 @@ fn vector_request_hint_score(
     )
 }
 
+fn text_request_hint_score(
+    peer: &crate::PeerPresence,
+    request: Option<&PullRequestKind>,
+) -> Option<u8> {
+    let Some(PullRequestKind::TextSearch { source, spec, .. }) = request else {
+        return None;
+    };
+    let TextSearchSource::Collection { collection } = source else {
+        return Some(
+            peer.capabilities
+                .iter()
+                .any(|item| item == "pull_text_search" || item == "watch_text_search")
+                .then_some(1)
+                .unwrap_or(0),
+        );
+    };
+    let prefix = format!("text_collection:{}:", crate::encode_component(collection));
+    let hints = peer
+        .capabilities
+        .iter()
+        .filter(|item| item.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    if hints.is_empty() {
+        return None;
+    }
+    Some(
+        hints
+            .iter()
+            .any(|hint| {
+                let parts = hint.split(':').collect::<Vec<_>>();
+                parts.len() >= 5
+                    && (spec.stale_policy == crate::SearchStalePolicy::Allow || parts[2] == "ready")
+            })
+            .then_some(2)
+            .unwrap_or(0),
+    )
+}
+
 fn pull_capability_for_request(request: &PullRequestKind) -> Option<&'static str> {
     match request {
         PullRequestKind::Get { .. } => Some("pull_get"),
@@ -5336,6 +6078,7 @@ fn pull_capability_for_request(request: &PullRequestKind) -> Option<&'static str
         PullRequestKind::Lex { .. } => Some("pull_lex"),
         PullRequestKind::Records { .. } => Some("pull_records"),
         PullRequestKind::VectorSearch { .. } => Some("pull_vector_search"),
+        PullRequestKind::TextSearch { .. } => Some("pull_text_search"),
         PullRequestKind::Snapshot { .. } => Some("snapshot"),
         PullRequestKind::Node { .. } => Some("pull_node"),
         PullRequestKind::Map { .. } => Some("pull_map"),
@@ -6349,6 +7092,12 @@ fn apply_response_body_state(
             };
             None
         }
+        PullResponseBody::TextSearch { result } => {
+            *accumulator = PullAccumulator::TextSearch {
+                result: Some(result.clone()),
+            };
+            None
+        }
         PullResponseBody::Node { node } => {
             *accumulator = PullAccumulator::Node { node: node.clone() };
             None
@@ -6403,6 +7152,7 @@ impl PullAccumulator {
                 next_cursor: None,
             },
             PullRequestKind::VectorSearch { .. } => Self::VectorSearch { result: None },
+            PullRequestKind::TextSearch { .. } => Self::TextSearch { result: None },
             PullRequestKind::Node { .. } => Self::Node { node: None },
             PullRequestKind::Snapshot { .. } => Self::Snapshot {
                 clock: None,
@@ -6433,6 +7183,13 @@ impl PullAccumulator {
                 result: result.ok_or_else(|| {
                     crate::PrimadbError::Message(
                         "vector search response completed without a result".to_owned(),
+                    )
+                })?,
+            }),
+            Self::TextSearch { result } => Ok(RemoteResult::TextSearch {
+                result: result.ok_or_else(|| {
+                    crate::PrimadbError::Message(
+                        "text search response completed without a result".to_owned(),
                     )
                 })?,
             }),
@@ -6706,11 +7463,13 @@ fn send_mesh_presence_state(
             "watch_lex".to_owned(),
             "watch_records".to_owned(),
             "watch_vector_search".to_owned(),
+            "watch_text_search".to_owned(),
             "watch_node".to_owned(),
             "watch_snapshot".to_owned(),
             "application_routes".to_owned(),
         ];
         capabilities.extend(borrowed.db.vector_presence_capabilities());
+        capabilities.extend(borrowed.db.text_presence_capabilities());
         let mut route = borrowed.router.presence(
             borrowed.db.replica_id(),
             transport,

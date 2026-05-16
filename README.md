@@ -44,6 +44,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - First-class small/medium binary fields via `put_bytes()` / `putBytes(...)` and `{"$bytes": "..."}` markers.
 - Separate content-addressed blob storage for larger binary payloads, with blob refs stored in-graph via `{"$blob": {...}}`.
 - Graph-native keyed record APIs for point reads/writes, prefix/range scans, local scan watches, byte/blob records, and conditional atomic record batches.
+- BM25 text search over declared text collections plus explicit graph-query and record-scan candidate sets, with local watches, persistent derived caches, ambient relay/mesh remote search, and multi-peer text fan-in.
 - Reactive subscriptions.
 - Local atomic transactions with preconditions, revision checks, and increment steps.
 - Strict scope policies for local-transactional and single-authority coordinated graph roots.
@@ -59,7 +60,7 @@ The earlier planning notes were moved out of `docs/` and are temporarily parked 
 - Browser WebSocket sync helper with ack/retry/requeue behavior.
 - Routed transport envelopes with presence, signaling, application payloads, remote pull requests/responses, batch payloads, chunked replies, reply correlation, content hashes, seen-by hints, TTL, and dedupe.
 - Unified route overlay sessions with WebSocket/MoQ/WebRTC/local underlay handles, direct-first or relay-first policy, fallback delivery diagnostics, duplicate suppression, verified sender context, and route-level application streams.
-- Remote live watches for `get` / `map` / `query` / `lex` / `records` / `node` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
+- Remote live watches for `get` / `map` / `query` / `lex` / `records` / `text_search` / `node` / `snapshot` over relay and mesh transports, with initial snapshots, streamed updates, chunked watch events, and active-interest replay when peers appear.
 - Multi-peer `records_fan_in(...)` / `watch_records_fan_in(...)` APIs with source peer metadata, partial failures, deterministic merged records, and conflict reports.
 - Narrow watch invalidation based on touched logical paths, plus burst coalescing in relay/mesh watch refresh loops so unrelated writes do not fan out through every active watch.
 - Browser WebRTC mesh sync with both local `BroadcastChannel` signaling and relay-backed signaling for cross-browser peers.
@@ -784,7 +785,7 @@ Primadb now routes transport messages through `RouteEnvelope` with:
 - routed sync payloads
 - routed pull request/response payloads
 - routed application payloads for caller-defined protocols
-- multi-peer record fan-in requests and watch events
+- multi-peer record/text-search fan-in requests and watch events
 - batch payloads for grouped route delivery
 - signaling payloads
 - snapshot request/response

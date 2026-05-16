@@ -26,6 +26,7 @@ Relay and mesh transports support remote live interests for:
 - `query`
 - `lex`
 - `records`
+- `text_search`
 - `node`
 - `snapshot`
 
@@ -42,6 +43,15 @@ Record watches intentionally use the same `PullRequestKind::Records { scan }` re
 local serving, relay pulls, and relay/mesh watches. That keeps the model close to Gun's single
 interest pipeline: transport adapters move the same interest/result messages rather than defining
 separate local and remote query semantics.
+
+Text search watches follow the same path through
+`PullRequestKind::TextSearch { source, query, spec }`. Collection search uses collection-scoped
+BM25 statistics; graph-query and record-scan sources rank the materialized candidate set and expose
+candidate/truncation metadata so paginated sources are not mistaken for global top-k search.
+Use `textSearchFanIn(...)` / `text_search_fan_in(...)` and
+`watchTextSearchFanIn(...)` / `watch_text_search_fan_in(...)` when a caller needs source-tagged
+text results from every policy-matching peer. Fan-in merged text results report `scoreScope =
+"peer_local"` because BM25 scores from different peers are diagnostic, not a single global corpus.
 
 Strict-scope `remoteTransaction(...)` / `remote_transaction(...)` calls are request/response pull
 operations, not live watches.

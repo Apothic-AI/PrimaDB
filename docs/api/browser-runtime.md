@@ -113,8 +113,17 @@ class Primadb {
   getVector(collection: string, id: string): any;
   searchVectors(collection: string, query: any, spec: any): any;
   watchVectorSearch(collection: string, query: any, spec: any, callback: Function): VectorWatchSubscription;
+  createTextCollection(name: string, config: any): void;
+  putTextDocument(collection: string, document: any): void;
+  deleteTextDocument(collection: string, id: string): void;
+  getTextDocument(collection: string, id: string): any;
+  textSearch(source: any, query: string, spec: any): any;
+  watchTextSearch(source: any, query: string, spec: any, callback: Function): TextWatchSubscription;
+  textIndexStats(collection: string): any;
   saveVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<any>;
   loadVectorCacheOpfs(directory: string, namespace: string, collection: string): Promise<boolean>;
+  saveTextCacheOpfs(directory: string, namespace: string, collection: string): Promise<any>;
+  loadTextCacheOpfs(directory: string, namespace: string, collection: string): Promise<boolean>;
   applyRecordBatch(batch: any): any;
   deleteRecord(key: string): void;
   syncStorage(): any;
@@ -204,6 +213,14 @@ class RecordWatchSubscription {
 
 ```ts
 class VectorWatchSubscription {
+  cancel(): void;
+}
+```
+
+### `TextWatchSubscription`
+
+```ts
+class TextWatchSubscription {
   cancel(): void;
 }
 ```
@@ -312,6 +329,8 @@ class WebSocketSync {
   records(scan: any, policy: any | null): Promise<any>;
   recordsFanIn(scan: any, policy: any | null): Promise<any>;
   vectorSearch(collection: string, query: any, spec: any, policy: any | null): Promise<any>;
+  textSearch(source: any, query: string, spec: any, policy: any | null): Promise<any>;
+  textSearchFanIn(source: any, query: string, spec: any, policy: any | null): Promise<any>;
   node(id: string, policy: any | null): Promise<any>;
   snapshot(root: string | null, policy: any | null): Promise<any>;
   watchGet(path: any, policy: any | null): RemoteWatch;
@@ -321,6 +340,8 @@ class WebSocketSync {
   watchRecords(scan: any, policy: any | null): RemoteWatch;
   watchRecordsFanIn(scan: any, policy: any | null): RemoteFanInWatch;
   watchVectorSearch(collection: string, query: any, spec: any, policy: any | null): RemoteWatch;
+  watchTextSearch(source: any, query: string, spec: any, policy: any | null): RemoteWatch;
+  watchTextSearchFanIn(source: any, query: string, spec: any, policy: any | null): RemoteFanInWatch;
   watchNode(id: string, policy: any | null): RemoteWatch;
   watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
   watchRemoteGet(peer_id: string, path: any): RemoteWatch;
@@ -329,6 +350,7 @@ class WebSocketSync {
   watchRemoteLex(peer_id: string, path: any, spec: any): RemoteWatch;
   watchRemoteRecords(peer_id: string, scan: any): RemoteWatch;
   watchRemoteVectorSearch(peer_id: string, collection: string, query: any, spec: any): RemoteWatch;
+  watchRemoteTextSearch(peer_id: string, source: any, query: string, spec: any): RemoteWatch;
   watchRemoteNode(peer_id: string, id: string): RemoteWatch;
   watchRemoteSnapshot(peer_id: string, root: string | null): RemoteWatch;
   remoteGet(peer_id: string, path: any): Promise<any>;
@@ -336,6 +358,7 @@ class WebSocketSync {
   remoteLex(peer_id: string, path: any, spec: any): Promise<any>;
   remoteRecords(peer_id: string, scan: any): Promise<any>;
   remoteVectorSearch(peer_id: string, collection: string, query: any, spec: any): Promise<any>;
+  remoteTextSearch(peer_id: string, source: any, query: string, spec: any): Promise<any>;
   remoteNode(peer_id: string, id: string): Promise<any>;
   remoteSnapshot(peer_id: string, root: string | null): Promise<any>;
   remoteTransaction(peer_id: string, scope: string, steps: any, options: any): Promise<any>;
@@ -363,6 +386,7 @@ class WebRtcMesh {
   sendApplication(namespace: string, protocol: string, topic: string | null, body: any, metadata: any | null, target: any | null): any;
   subscribeApplications(filter: any | null): ApplicationRouteSubscription;
   recordsFanIn(scan: any, policy: any | null): Promise<any>;
+  textSearchFanIn(source: any, query: string, spec: any, policy: any | null): Promise<any>;
   watchGet(path: any, policy: any | null): RemoteWatch;
   watchMap(path: any, policy: any | null): RemoteWatch;
   watchQuery(path: any, spec: any, policy: any | null): RemoteWatch;
@@ -370,6 +394,8 @@ class WebRtcMesh {
   watchRecords(scan: any, policy: any | null): RemoteWatch;
   watchRecordsFanIn(scan: any, policy: any | null): RemoteFanInWatch;
   watchVectorSearch(collection: string, query: any, spec: any, policy: any | null): RemoteWatch;
+  watchTextSearch(source: any, query: string, spec: any, policy: any | null): RemoteWatch;
+  watchTextSearchFanIn(source: any, query: string, spec: any, policy: any | null): RemoteFanInWatch;
   watchNode(id: string, policy: any | null): RemoteWatch;
   watchSnapshot(root: string | null, policy: any | null): RemoteWatch;
   watchRemoteGet(peer_id: string, path: any): RemoteWatch;

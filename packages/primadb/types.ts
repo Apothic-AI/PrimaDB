@@ -90,6 +90,34 @@ export interface RecordScanResult {
   nextCursor?: string | null;
 }
 
+export interface RemotePath {
+  anchor: string;
+  segments?: string[];
+}
+
+export interface QueryOrder {
+  path: string;
+  direction?: "asc" | "desc";
+}
+
+export type QueryFilter =
+  | { kind: "eq"; path: string; value: JsonValue }
+  | { kind: "ne"; path: string; value: JsonValue }
+  | { kind: "gt"; path: string; value: JsonValue }
+  | { kind: "gte"; path: string; value: JsonValue }
+  | { kind: "lt"; path: string; value: JsonValue }
+  | { kind: "lte"; path: string; value: JsonValue }
+  | { kind: "prefix"; path: string; value: string }
+  | { kind: "contains"; path: string; value: string }
+  | { kind: "exists"; path: string };
+
+export interface QuerySpec {
+  filters?: QueryFilter[];
+  order?: QueryOrder | null;
+  limit?: number | null;
+  offset?: number;
+}
+
 export type RemoteInterestTarget = "any" | "peer" | "peers";
 
 export interface RemoteInterestPolicy {
@@ -98,6 +126,14 @@ export interface RemoteInterestPolicy {
   peers?: string[];
   requireCapability?: boolean;
 }
+
+export type RouteTransportKind =
+  | "web_socket"
+  | "moq"
+  | "web_rtc"
+  | "broadcast_channel"
+  | "memory"
+  | "unknown";
 
 export type RecordMutation =
   | { kind: "put"; key: string; value: RecordValue }
@@ -190,6 +226,120 @@ export interface VectorSearchResult {
   state: VectorManagerState;
   stale: boolean;
   approximateReason?: string | null;
+}
+
+export interface TextFieldConfig {
+  name: string;
+  weight?: number;
+  indexed?: boolean;
+  stored?: boolean;
+}
+
+export interface TextAnalyzerConfig {
+  kind?: "simple";
+  lowercase?: boolean;
+  unicodeNormalization?: string | null;
+  stopwords?: string | null;
+  stemming?: string | null;
+  version?: number;
+}
+
+export interface TextCollectionConfig {
+  fields?: TextFieldConfig[];
+  analyzer?: TextAnalyzerConfig;
+  k1?: number;
+  b?: number;
+  metadata?: Record<string, JsonValue>;
+}
+
+export interface TextDocument {
+  id: string;
+  fields?: Record<string, string>;
+  metadata?: Record<string, JsonValue>;
+}
+
+export type TextSearchSource =
+  | string
+  | { kind: "collection"; collection: string }
+  | { kind: "query"; path: RemotePath; spec: QuerySpec }
+  | { kind: "records"; scan: RecordScan };
+
+export interface TextSearchSpec {
+  limit?: number | null;
+  offset?: number | null;
+  fields?: string[] | null;
+  includeMetadata?: boolean;
+  includeSnippets?: boolean;
+  explain?: boolean;
+  exact?: boolean;
+  stalePolicy?: "allow" | "refresh" | "reject";
+  candidateLimit?: number | null;
+  candidatePolicy?: "reject_paginated_query" | "allow_preselected_candidates";
+}
+
+export interface TextSearchMatch {
+  id: string;
+  score: number;
+  fieldHits: Array<{ field: string; terms: string[]; score: number }>;
+  metadata?: Record<string, JsonValue> | null;
+  snippets?: Array<{ field: string; text: string }> | null;
+  explanation?: string | null;
+}
+
+export interface TextSearchResult {
+  source: JsonValue;
+  query: string;
+  matches: TextSearchMatch[];
+  backend: "exact";
+  exact: boolean;
+  stale: boolean;
+  candidateCount: number;
+  searchedCount: number;
+  truncatedCandidates: boolean;
+  scoreScope: "collection" | "candidate_set" | "peer_local";
+}
+
+export interface TextIndexStats {
+  documentCount: number;
+  deletedCount: number;
+  termCount: number;
+  totalTerms: number;
+  averageFieldLength: number;
+  state: "ready" | "rebuilding" | "stale" | "failed";
+  sourceHash: string;
+}
+
+export interface RemotePeerFailure {
+  peerId: string;
+  transport: RouteTransportKind;
+  message: string;
+}
+
+export interface RemotePeerRecords {
+  peerId: string;
+  transport: RouteTransportKind;
+  result: RecordScanResult;
+}
+
+export interface RemotePeerTextSearch {
+  peerId: string;
+  transport: RouteTransportKind;
+  result: TextSearchResult;
+}
+
+export interface RemoteRecordsFanIn {
+  requestId: string;
+  records: RemotePeerRecords[];
+  failures: RemotePeerFailure[];
+  merged: RecordScanResult;
+  conflicts: Array<Record<string, JsonValue>>;
+}
+
+export interface RemoteTextSearchFanIn {
+  requestId: string;
+  results: RemotePeerTextSearch[];
+  failures: RemotePeerFailure[];
+  merged: TextSearchResult;
 }
 
 export interface StorageSyncReport {

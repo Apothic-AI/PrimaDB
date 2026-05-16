@@ -2,7 +2,8 @@ use crate::RouteTransportKind;
 use crate::value::{NodeId, NodeState};
 use crate::{
     DatabaseSnapshot, HybridClock, LexEntry, LexSpec, MapEntry, Operation, QuerySpec, RecordEntry,
-    RecordScan, RecordScanResult, ScopePolicy, TransactionOptions, TransactionReport,
+    RecordScan, RecordScanResult, ScopePolicy, TextSearchResult, TextSearchSource,
+    TextSearchSourceSummary, TextSearchSpec, TransactionOptions, TransactionReport,
     TransactionStep, VectorSearchResult, VectorSearchSpec,
 };
 use async_channel::Receiver;
@@ -81,6 +82,11 @@ pub enum PullRequestKind {
         query: Vec<f32>,
         spec: VectorSearchSpec,
     },
+    TextSearch {
+        source: TextSearchSource,
+        query: String,
+        spec: TextSearchSpec,
+    },
     Node {
         id: NodeId,
     },
@@ -153,6 +159,9 @@ pub enum PullResponseBody {
     VectorSearch {
         result: VectorSearchResult,
     },
+    TextSearch {
+        result: TextSearchResult,
+    },
     Node {
         node: Option<NodeState>,
     },
@@ -214,6 +223,7 @@ pub enum RemoteResult {
     Lex { entries: Vec<LexEntry> },
     Records { result: RecordScanResult },
     VectorSearch { result: VectorSearchResult },
+    TextSearch { result: TextSearchResult },
     Node { node: Option<NodeState> },
     Snapshot { snapshot: DatabaseSnapshot },
     Transaction { report: TransactionReport },
@@ -243,6 +253,14 @@ pub struct RemotePeerRecords {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct RemotePeerTextSearch {
+    pub peer_id: String,
+    pub transport: RouteTransportKind,
+    pub result: TextSearchResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteRecordConflictSource {
     pub peer_id: String,
     pub transport: RouteTransportKind,
@@ -266,6 +284,15 @@ pub struct RemoteRecordsFanIn {
     pub failures: Vec<RemotePeerFailure>,
     pub merged: RecordScanResult,
     pub conflicts: Vec<RemoteRecordConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTextSearchFanIn {
+    pub request_id: String,
+    pub results: Vec<RemotePeerTextSearch>,
+    pub failures: Vec<RemotePeerFailure>,
+    pub merged: TextSearchResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -314,6 +341,7 @@ impl PullRequestKind {
             Self::Lex { .. } => "lex",
             Self::Records { .. } => "records",
             Self::VectorSearch { .. } => "vector_search",
+            Self::TextSearch { .. } => "text_search",
             Self::Node { .. } => "node",
             Self::Snapshot { .. } => "snapshot",
             Self::Transaction { .. } => "transaction",
@@ -330,6 +358,16 @@ impl PullRequestKind {
             Self::VectorSearch { collection, .. } => {
                 Some(format!("__primadb_vectors/{collection}"))
             }
+            Self::TextSearch { source, .. } => Some(match source {
+                TextSearchSource::Collection { collection } => {
+                    format!("__primadb_text/{collection}")
+                }
+                TextSearchSource::GraphQuery { path, .. } => path.path(),
+                TextSearchSource::Records { scan } => scan
+                    .prefix
+                    .clone()
+                    .unwrap_or_else(|| "__primadb_records".to_owned()),
+            }),
             Self::Node { id } => Some(id.clone()),
             Self::Snapshot { root } => root.clone(),
             Self::Transaction { scope, .. } => Some(scope.clone()),
@@ -541,6 +579,62 @@ pub fn merge_remote_records_fan_in(
     }
 }
 
+pub fn merge_remote_text_search_fan_in(
+    request_id: impl Into<String>,
+    results: Vec<RemotePeerTextSearch>,
+    failures: Vec<RemotePeerFailure>,
+) -> RemoteTextSearchFanIn {
+    let mut matches = Vec::new();
+    let mut candidate_count = 0_usize;
+    let mut searched_count = 0_usize;
+    let mut truncated_candidates = false;
+    let mut source = TextSearchSourceSummary::Records { prefix: None };
+    let mut query = String::new();
+    for peer_result in &results {
+        if query.is_empty() {
+            query = peer_result.result.query.clone();
+            source = peer_result.result.source.clone();
+        }
+        candidate_count = candidate_count.saturating_add(peer_result.result.candidate_count);
+        searched_count = searched_count.saturating_add(peer_result.result.searched_count);
+        truncated_candidates |= peer_result.result.truncated_candidates;
+        for mut item in peer_result.result.matches.clone() {
+            item.metadata.get_or_insert_with(BTreeMap::new).insert(
+                "__primadb_source_peer".to_owned(),
+                JsonValue::String(peer_result.peer_id.clone()),
+            );
+            item.metadata.as_mut().unwrap().insert(
+                "__primadb_source_transport".to_owned(),
+                serde_json::to_value(&peer_result.transport).unwrap_or(JsonValue::Null),
+            );
+            matches.push(item);
+        }
+    }
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    RemoteTextSearchFanIn {
+        request_id: request_id.into(),
+        results,
+        failures,
+        merged: TextSearchResult {
+            source,
+            query,
+            matches,
+            backend: crate::TextSearchBackend::Exact,
+            exact: true,
+            stale: false,
+            candidate_count,
+            searched_count,
+            truncated_candidates,
+            score_scope: crate::TextScoreScope::PeerLocal,
+        },
+    }
+}
+
 pub fn stable_content_hash<T>(value: &T) -> Option<String>
 where
     T: Serialize,
@@ -552,9 +646,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        RemotePeerFailure, RemotePeerRecords, merge_remote_records_fan_in, stable_content_hash,
+        RemotePeerFailure, RemotePeerRecords, RemotePeerTextSearch, merge_remote_records_fan_in,
+        merge_remote_text_search_fan_in, stable_content_hash,
     };
-    use crate::{RecordEntry, RecordScanResult, RecordValue, RouteTransportKind};
+    use crate::{
+        RecordEntry, RecordScanResult, RecordValue, RouteTransportKind, TextScoreScope,
+        TextSearchBackend, TextSearchMatch, TextSearchResult, TextSearchSourceSummary,
+    };
     use serde_json::json;
 
     #[test]
@@ -620,6 +718,77 @@ mod tests {
                 .next_cursor
                 .as_deref()
                 .is_some_and(|cursor| cursor.contains("peer-a"))
+        );
+    }
+
+    #[test]
+    fn text_search_fan_in_merge_tags_sources_and_peer_local_scope() {
+        let peer_a = RemotePeerTextSearch {
+            peer_id: "peer-a".to_owned(),
+            transport: RouteTransportKind::WebSocket,
+            result: TextSearchResult {
+                source: TextSearchSourceSummary::Collection {
+                    collection: "notes".to_owned(),
+                },
+                query: "secure mesh".to_owned(),
+                matches: vec![TextSearchMatch {
+                    id: "a".to_owned(),
+                    score: 2.0,
+                    field_hits: Vec::new(),
+                    metadata: None,
+                    snippets: None,
+                    explanation: None,
+                }],
+                backend: TextSearchBackend::Exact,
+                exact: true,
+                stale: false,
+                candidate_count: 2,
+                searched_count: 2,
+                truncated_candidates: false,
+                score_scope: TextScoreScope::Collection,
+            },
+        };
+        let peer_b = RemotePeerTextSearch {
+            peer_id: "peer-b".to_owned(),
+            transport: RouteTransportKind::Moq,
+            result: TextSearchResult {
+                source: TextSearchSourceSummary::Collection {
+                    collection: "notes".to_owned(),
+                },
+                query: "secure mesh".to_owned(),
+                matches: vec![TextSearchMatch {
+                    id: "b".to_owned(),
+                    score: 4.0,
+                    field_hits: Vec::new(),
+                    metadata: None,
+                    snippets: None,
+                    explanation: None,
+                }],
+                backend: TextSearchBackend::Exact,
+                exact: true,
+                stale: false,
+                candidate_count: 3,
+                searched_count: 1,
+                truncated_candidates: true,
+                score_scope: TextScoreScope::Collection,
+            },
+        };
+
+        let fan_in = merge_remote_text_search_fan_in("request-2", vec![peer_a, peer_b], vec![]);
+
+        assert_eq!(fan_in.request_id, "request-2");
+        assert_eq!(fan_in.merged.matches[0].id, "b");
+        assert_eq!(fan_in.merged.matches[1].id, "a");
+        assert_eq!(fan_in.merged.candidate_count, 5);
+        assert_eq!(fan_in.merged.searched_count, 3);
+        assert!(fan_in.merged.truncated_candidates);
+        assert_eq!(fan_in.merged.score_scope, TextScoreScope::PeerLocal);
+        assert_eq!(
+            fan_in.merged.matches[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("__primadb_source_peer")),
+            Some(&json!("peer-b"))
         );
     }
 }

@@ -12,8 +12,9 @@ use primadb::{
     RemoteWatchSubscription as CoreRemoteWatch, RecordWatchSubscription as CoreRecordWatchSubscription,
     RoomHookContext, RouteTarget, Scope as CoreScope, ScopePolicy, SecretBoxKey,
     ServeRequestContext, ServeResultContext, ScriptExecutionOptions,
-    Subscription as CoreSubscription, TransactionOptions, TransactionStep,
-    TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
+    Subscription as CoreSubscription, TextCollectionConfig, TextDocument, TextSearchSource,
+    TextSearchSpec, TextWatchSubscription as CoreTextWatchSubscription, TransactionOptions,
+    TransactionStep, TraversalSubscription as CoreTraversalSubscription, TraversalSpec, UserGrant,
     VectorCollectionConfig, VectorSearchSpec,
     VectorWatchSubscription as CoreVectorWatchSubscription,
     derive_password_key as core_derive_password_key, parse_request_hook_json,
@@ -64,6 +65,13 @@ fn remote_policy(value: Option<&Bound<'_, PyAny>>) -> PyResult<RemoteInterestPol
         Some(value) if !value.is_none() => from_py(value),
         _ => Ok(RemoteInterestPolicy::default()),
     }
+}
+
+fn text_source(value: &Bound<'_, PyAny>) -> PyResult<TextSearchSource> {
+    if let Ok(collection) = value.extract::<String>() {
+        return Ok(TextSearchSource::Collection { collection });
+    }
+    from_py(value)
 }
 
 fn application_filter(value: Option<&Bound<'_, PyAny>>) -> PyResult<ApplicationRouteFilter> {
@@ -129,6 +137,7 @@ fn remote_result_to_json_value(value: CoreRemoteResult) -> JsonValue {
         CoreRemoteResult::Lex { entries } => serde_json::to_value(entries).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Records { result } => serde_json::to_value(result).unwrap_or(JsonValue::Null),
         CoreRemoteResult::VectorSearch { result } => serde_json::to_value(result).unwrap_or(JsonValue::Null),
+        CoreRemoteResult::TextSearch { result } => serde_json::to_value(result).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Node { node } => serde_json::to_value(node).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Snapshot { snapshot } => serde_json::to_value(snapshot).unwrap_or(JsonValue::Null),
         CoreRemoteResult::Transaction { report } => serde_json::to_value(report).unwrap_or(JsonValue::Null),
@@ -143,6 +152,7 @@ fn watch_message_to_json(message: CoreRemoteWatchMessage) -> JsonValue {
         CoreRemoteResult::Lex { .. } => "lex",
         CoreRemoteResult::Records { .. } => "records",
         CoreRemoteResult::VectorSearch { .. } => "vector_search",
+        CoreRemoteResult::TextSearch { .. } => "text_search",
         CoreRemoteResult::Node { .. } => "node",
         CoreRemoteResult::Snapshot { .. } => "snapshot",
         CoreRemoteResult::Transaction { .. } => "transaction",
@@ -341,6 +351,11 @@ struct RecordWatchSubscription {
 #[pyclass(module = "primadb._native")]
 struct VectorWatchSubscription {
     inner: Arc<Mutex<Option<CoreVectorWatchSubscription>>>,
+}
+
+#[pyclass(module = "primadb._native")]
+struct TextWatchSubscription {
+    inner: Arc<Mutex<Option<CoreTextWatchSubscription>>>,
 }
 
 #[pyclass(module = "primadb._native")]
@@ -630,6 +645,89 @@ impl Primadb {
         Ok(VectorWatchSubscription {
             inner: Arc::new(Mutex::new(Some(subscription))),
         })
+    }
+
+    fn create_text_collection(
+        &self,
+        name: String,
+        config: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let config: TextCollectionConfig = from_py(config)?;
+        self.inner
+            .create_text_collection(name, config)
+            .map_err(to_py_err)
+    }
+
+    fn put_text_document(
+        &self,
+        collection: String,
+        document: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let document: TextDocument = from_py(document)?;
+        self.inner
+            .put_text_document(collection, document)
+            .map_err(to_py_err)
+    }
+
+    fn delete_text_document(&self, collection: String, id: String) -> PyResult<()> {
+        self.inner
+            .delete_text_document(collection, id)
+            .map_err(to_py_err)
+    }
+
+    fn get_text_document(
+        &self,
+        py: Python<'_>,
+        collection: String,
+        id: String,
+    ) -> PyResult<Py<PyAny>> {
+        to_py(
+            py,
+            self.inner
+                .get_text_document(collection, id)
+                .map_err(to_py_err)?,
+        )
+    }
+
+    fn text_search(
+        &self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        to_py(
+            py,
+            self.inner
+                .text_search(source, query, spec)
+                .map_err(to_py_err)?,
+        )
+    }
+
+    fn watch_text_search(
+        &self,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<TextWatchSubscription> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let subscription = self
+            .inner
+            .watch_text_search(source, query, spec)
+            .map_err(to_py_err)?;
+        Ok(TextWatchSubscription {
+            inner: Arc::new(Mutex::new(Some(subscription))),
+        })
+    }
+
+    fn text_index_stats(&self, py: Python<'_>, collection: String) -> PyResult<Py<PyAny>> {
+        to_py(
+            py,
+            self.inner.text_index_stats(collection).map_err(to_py_err)?,
+        )
     }
 
     fn apply_record_batch(&self, py: Python<'_>, batch: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -1175,6 +1273,64 @@ impl VectorWatchSubscription {
 }
 
 #[pymethods]
+impl TextWatchSubscription {
+    fn next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let subscription = {
+            let mut guard = self.inner.lock().unwrap();
+            guard
+                .take()
+                .ok_or_else(|| closed_error("text watch subscription"))?
+        };
+
+        let message = py.detach(|| runtime().block_on(subscription.recv()));
+        let response = match message {
+            Some(value) => {
+                self.inner.lock().unwrap().replace(subscription);
+                json!({
+                    "done": false,
+                    "value": value,
+                })
+            }
+            None => json!({
+                "done": true,
+                "value": JsonValue::Null,
+            }),
+        };
+
+        to_py(py, response)
+    }
+
+    fn try_next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(subscription) = guard.as_ref() else {
+            return to_py(
+                py,
+                json!({
+                    "done": true,
+                    "value": JsonValue::Null,
+                }),
+            );
+        };
+
+        let message = match subscription.try_recv() {
+            Some(value) => json!({
+                "done": false,
+                "value": value,
+            }),
+            None => json!({
+                "done": false,
+                "value": JsonValue::Null,
+            }),
+        };
+        to_py(py, message)
+    }
+
+    fn close(&self) {
+        let _ = self.inner.lock().unwrap().take();
+    }
+}
+
+#[pymethods]
 impl RelayServer {
     #[staticmethod]
     fn listen(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<RelayServer> {
@@ -1624,6 +1780,48 @@ impl WebSocketSync {
         to_py(py, result.map_err(to_py_err)?)
     }
 
+    #[pyo3(signature = (source, query, spec, policy=None))]
+    fn text_search(
+        &self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.remote_text_search_with_policy(source, query, spec, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (source, query, spec, policy=None))]
+    fn text_search_fan_in(
+        &self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result = py.detach(|| runtime().block_on(sync.text_search_fan_in(source, query, spec, policy)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
     #[pyo3(signature = (id, policy=None))]
     fn node(
         &self,
@@ -1741,6 +1939,26 @@ impl WebSocketSync {
         };
         let result =
             py.detach(|| runtime().block_on(sync.remote_vector_search(peer_id, collection, query, spec)));
+        self.inner.lock().unwrap().replace(sync);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
+    fn remote_text_search(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let sync = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("websocket sync"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(sync.remote_text_search(peer_id, source, query, spec)));
         self.inner.lock().unwrap().replace(sync);
         to_py(py, result.map_err(to_py_err)?)
     }
@@ -1906,6 +2124,28 @@ impl WebSocketSync {
             .as_ref()
             .ok_or_else(|| closed_error("websocket sync"))?
             .watch_vector_search(peer_id, collection, query, spec)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    fn watch_remote_text_search(
+        &self,
+        peer_id: String,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_text_search(peer_id, source, query, spec)
             .map_err(to_py_err)?;
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(watch))),
@@ -2090,6 +2330,54 @@ impl WebSocketSync {
             .watch_vector_search_with_policy(collection, query, spec, policy)
             .map_err(to_py_err)?;
         Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (source, query, spec, policy=None))]
+    fn watch_text_search(
+        &self,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_text_search_with_policy(source, query, spec, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(watch))),
+        })
+    }
+
+    #[pyo3(signature = (source, query, spec, policy=None))]
+    fn watch_text_search_fan_in(
+        &self,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteFanInWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let watch = self
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| closed_error("websocket sync"))?
+            .watch_text_search_fan_in(source, query, spec, policy)
+            .map_err(to_py_err)?;
+        Ok(RemoteFanInWatch {
             inner: Arc::new(Mutex::new(Some(watch))),
         })
     }
@@ -2331,6 +2619,27 @@ impl WebRtcMesh {
         to_py(py, result.map_err(to_py_err)?)
     }
 
+    #[pyo3(signature = (source, query, spec, policy=None))]
+    fn text_search_fan_in(
+        &self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.text_search_fan_in(source, query, spec, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        to_py(py, result.map_err(to_py_err)?)
+    }
+
     fn watch_remote_get(
         &self,
         py: Python<'_>,
@@ -2440,6 +2749,28 @@ impl WebRtcMesh {
         };
         let result =
             py.detach(|| runtime().block_on(mesh.watch_vector_search(peer_id, collection, query, spec)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    fn watch_remote_text_search(
+        &self,
+        py: Python<'_>,
+        peer_id: String,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(mesh.watch_text_search(peer_id, source, query, spec)));
         self.inner.lock().unwrap().replace(mesh);
         Ok(RemoteWatch {
             inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
@@ -2628,6 +2959,53 @@ impl WebRtcMesh {
         })
     }
 
+    #[pyo3(signature = (source, query, spec, policy=None))]
+    fn watch_text_search(
+        &self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result =
+            py.detach(|| runtime().block_on(mesh.watch_text_search_with_policy(source, query, spec, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
+    #[pyo3(signature = (source, query, spec, policy=None))]
+    fn watch_text_search_fan_in(
+        &self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        query: String,
+        spec: &Bound<'_, PyAny>,
+        policy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RemoteFanInWatch> {
+        let source = text_source(source)?;
+        let spec: TextSearchSpec = from_py(spec)?;
+        let policy = remote_policy(policy)?;
+        let mesh = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take().ok_or_else(|| closed_error("webrtc mesh"))?
+        };
+        let result = py.detach(|| runtime().block_on(mesh.watch_text_search_fan_in(source, query, spec, policy)));
+        self.inner.lock().unwrap().replace(mesh);
+        Ok(RemoteFanInWatch {
+            inner: Arc::new(Mutex::new(Some(result.map_err(to_py_err)?))),
+        })
+    }
+
     #[pyo3(signature = (id, policy=None))]
     fn watch_node(
         &self,
@@ -2730,6 +3108,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<TraversalSubscription>()?;
     module.add_class::<RecordWatchSubscription>()?;
     module.add_class::<VectorWatchSubscription>()?;
+    module.add_class::<TextWatchSubscription>()?;
     module.add_class::<RelayServer>()?;
     module.add_class::<RemoteWatch>()?;
     module.add_class::<ApplicationRouteSubscription>()?;

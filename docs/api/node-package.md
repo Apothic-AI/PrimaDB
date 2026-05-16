@@ -659,6 +659,154 @@ export interface VectorSearchResult {
 }
 ```
 
+#### `TextFieldConfig`
+
+Kind: interface
+
+```ts
+export interface TextFieldConfig {
+    name: string;
+    weight?: number;
+    indexed?: boolean;
+    stored?: boolean;
+}
+```
+
+#### `TextAnalyzerConfig`
+
+Kind: interface
+
+```ts
+export interface TextAnalyzerConfig {
+    kind?: "simple";
+    lowercase?: boolean;
+    unicodeNormalization?: string | null;
+    stopwords?: string | null;
+    stemming?: string | null;
+    version?: number;
+}
+```
+
+#### `TextCollectionConfig`
+
+Kind: interface
+
+```ts
+export interface TextCollectionConfig {
+    fields?: TextFieldConfig[];
+    analyzer?: TextAnalyzerConfig;
+    k1?: number;
+    b?: number;
+    metadata?: Record<string, JsonValue>;
+}
+```
+
+#### `TextDocument`
+
+Kind: interface
+
+```ts
+export interface TextDocument {
+    id: string;
+    fields?: Record<string, string>;
+    metadata?: Record<string, JsonValue>;
+}
+```
+
+#### `TextSearchSource`
+
+Kind: type alias
+
+```ts
+export type TextSearchSource = string | {
+    kind: "collection";
+    collection: string;
+} | {
+    kind: "query";
+    path: RemotePath;
+    spec: QuerySpec;
+} | {
+    kind: "records";
+    scan: RecordScan;
+};
+```
+
+#### `TextSearchSpec`
+
+Kind: interface
+
+```ts
+export interface TextSearchSpec {
+    limit?: number | null;
+    offset?: number | null;
+    fields?: string[] | null;
+    includeMetadata?: boolean;
+    includeSnippets?: boolean;
+    explain?: boolean;
+    exact?: boolean;
+    stalePolicy?: "allow" | "refresh" | "reject";
+    candidateLimit?: number | null;
+    candidatePolicy?: "reject_paginated_query" | "allow_preselected_candidates";
+}
+```
+
+#### `TextSearchMatch`
+
+Kind: interface
+
+```ts
+export interface TextSearchMatch {
+    id: string;
+    score: number;
+    fieldHits: Array<{
+        field: string;
+        terms: string[];
+        score: number;
+    }>;
+    metadata?: Record<string, JsonValue> | null;
+    snippets?: Array<{
+        field: string;
+        text: string;
+    }> | null;
+    explanation?: string | null;
+}
+```
+
+#### `TextSearchResult`
+
+Kind: interface
+
+```ts
+export interface TextSearchResult {
+    source: JsonValue;
+    query: string;
+    matches: TextSearchMatch[];
+    backend: "exact";
+    exact: boolean;
+    stale: boolean;
+    candidateCount: number;
+    searchedCount: number;
+    truncatedCandidates: boolean;
+    scoreScope: "collection" | "candidate_set" | "peer_local";
+}
+```
+
+#### `TextIndexStats`
+
+Kind: interface
+
+```ts
+export interface TextIndexStats {
+    documentCount: number;
+    deletedCount: number;
+    termCount: number;
+    totalTerms: number;
+    averageFieldLength: number;
+    state: "ready" | "rebuilding" | "stale" | "failed";
+    sourceHash: string;
+}
+```
+
 #### `StorageSyncReport`
 
 Kind: interface
@@ -1443,6 +1591,18 @@ export interface RemotePeerRecords {
 }
 ```
 
+#### `RemotePeerTextSearch`
+
+Kind: interface
+
+```ts
+export interface RemotePeerTextSearch {
+    peerId: string;
+    transport: RouteTransportKind;
+    result: TextSearchResult;
+}
+```
+
 #### `RemoteRecordConflictSource`
 
 Kind: interface
@@ -1479,6 +1639,19 @@ export interface RemoteRecordsFanIn {
     failures: RemotePeerFailure[];
     merged: RecordScanResult;
     conflicts: RemoteRecordConflict[];
+}
+```
+
+#### `RemoteTextSearchFanIn`
+
+Kind: interface
+
+```ts
+export interface RemoteTextSearchFanIn {
+    requestId: string;
+    results: RemotePeerTextSearch[];
+    failures: RemotePeerFailure[];
+    merged: TextSearchResult;
 }
 ```
 
@@ -1549,6 +1722,13 @@ export declare class Primadb {
     getVector(collection: string, id: string): VectorEntry | null;
     searchVectors(collection: string, query: number[], spec: VectorSearchSpec): VectorSearchResult;
     watchVectorSearch(collection: string, query: number[], spec: VectorSearchSpec): VectorWatchSubscription;
+    createTextCollection(name: string, config: TextCollectionConfig): void;
+    putTextDocument(collection: string, document: TextDocument): void;
+    deleteTextDocument(collection: string, id: string): void;
+    getTextDocument(collection: string, id: string): TextDocument | null;
+    textSearch(source: TextSearchSource, query: string, spec: TextSearchSpec): TextSearchResult;
+    watchTextSearch(source: TextSearchSource, query: string, spec: TextSearchSpec): TextWatchSubscription;
+    textIndexStats(collection: string): TextIndexStats;
     applyRecordBatch(batch: RecordBatch): RecordBatchReport;
     deleteRecord(key: string): void;
     attachNodeScript(path: RemotePath, script: NodeScript): void;
@@ -1659,6 +1839,18 @@ export declare class VectorWatchSubscription {
 }
 ```
 
+#### `TextWatchSubscription`
+
+Kind: class
+
+```ts
+export declare class TextWatchSubscription {
+    next(): Promise<{ done: boolean; value?: TextSearchResult | null }>;
+    tryNext(): { done: boolean; value?: TextSearchResult | null };
+    close(): void;
+}
+```
+
 #### `RelayServer`
 
 Kind: class
@@ -1732,6 +1924,8 @@ export declare class WebSocketSync {
     lex(path: RemotePath, spec: LexSpec, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
     records(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RecordScanResult>;
     vectorSearch(collection: string, query: number[], spec: VectorSearchSpec, policy?: RemoteInterestPolicy | null): Promise<VectorSearchResult>;
+    textSearch(source: TextSearchSource, query: string, spec: TextSearchSpec, policy?: RemoteInterestPolicy | null): Promise<TextSearchResult>;
+    textSearchFanIn(source: TextSearchSource, query: string, spec: TextSearchSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteTextSearchFanIn>;
     node(id: string, policy?: RemoteInterestPolicy | null): Promise<JsonValue | null>;
     snapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<JsonValue>;
     recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
@@ -1740,6 +1934,7 @@ export declare class WebSocketSync {
     remoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<JsonValue>;
     remoteRecords(peerId: string, scan: RecordScan): Promise<RecordScanResult>;
     remoteVectorSearch(peerId: string, collection: string, query: number[], spec: VectorSearchSpec): Promise<VectorSearchResult>;
+    remoteTextSearch(peerId: string, source: TextSearchSource, query: string, spec: TextSearchSpec): Promise<TextSearchResult>;
     remoteNode(peerId: string, id: string): Promise<JsonValue | null>;
     remoteSnapshot(peerId: string, root?: string | null): Promise<JsonValue>;
     remoteTransaction(peerId: string, scope: string, steps: TransactionStep[], options?: TransactionOptions | null): Promise<TransactionReport>;
@@ -1750,6 +1945,9 @@ export declare class WebSocketSync {
     watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchRecordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): RemoteFanInWatch;
     watchVectorSearch(collection: string, query: number[], spec: VectorSearchSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchTextSearch(source: TextSearchSource, query: string, spec: TextSearchSpec, policy?: RemoteInterestPolicy | null): RemoteWatch;
+    watchTextSearchFanIn(source: TextSearchSource, query: string, spec: TextSearchSpec, policy?: RemoteInterestPolicy | null): RemoteFanInWatch;
+    watchRemoteTextSearch(peerId: string, source: TextSearchSource, query: string, spec: TextSearchSpec): RemoteWatch;
     watchNode(id: string, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): RemoteWatch;
     watchRemoteGet(peerId: string, path: RemotePath): RemoteWatch;
@@ -1785,6 +1983,7 @@ export declare class WebRtcMesh {
     sendRouteEnvelope(route: JsonValue): Promise<JsonValue>;
     subscribeApplications(filter?: ApplicationRouteFilter | null): ApplicationRouteSubscription;
     recordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteRecordsFanIn>;
+    textSearchFanIn(source: TextSearchSource, query: string, spec: TextSearchSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteTextSearchFanIn>;
     watchGet(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchMap(path: RemotePath, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchQuery(path: RemotePath, spec: QuerySpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
@@ -1792,6 +1991,8 @@ export declare class WebRtcMesh {
     watchRecords(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchRecordsFanIn(scan: RecordScan, policy?: RemoteInterestPolicy | null): Promise<RemoteFanInWatch>;
     watchVectorSearch(collection: string, query: number[], spec: VectorSearchSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchTextSearch(source: TextSearchSource, query: string, spec: TextSearchSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
+    watchTextSearchFanIn(source: TextSearchSource, query: string, spec: TextSearchSpec, policy?: RemoteInterestPolicy | null): Promise<RemoteFanInWatch>;
     watchNode(id: string, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchSnapshot(root?: string | null, policy?: RemoteInterestPolicy | null): Promise<RemoteWatch>;
     watchRemoteGet(peerId: string, path: RemotePath): Promise<RemoteWatch>;
@@ -1800,6 +2001,7 @@ export declare class WebRtcMesh {
     watchRemoteLex(peerId: string, path: RemotePath, spec: LexSpec): Promise<RemoteWatch>;
     watchRemoteRecords(peerId: string, scan: RecordScan): Promise<RemoteWatch>;
     watchRemoteVectorSearch(peerId: string, collection: string, query: number[], spec: VectorSearchSpec): Promise<RemoteWatch>;
+    watchRemoteTextSearch(peerId: string, source: TextSearchSource, query: string, spec: TextSearchSpec): Promise<RemoteWatch>;
     watchRemoteNode(peerId: string, id: string): Promise<RemoteWatch>;
     watchRemoteSnapshot(peerId: string, root?: string | null): Promise<RemoteWatch>;
     flushPending(): Promise<number>;

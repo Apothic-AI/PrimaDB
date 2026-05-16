@@ -1,4 +1,5 @@
 use crate::engine::decode_component;
+use crate::text_search::{TextCacheFiles, TextCacheManifest};
 use crate::vector::{VectorCacheFiles, VectorCacheManifest};
 use crate::wasm::{WasmSegmentStorageEstimate, WasmSegmentWriteSummary};
 use crate::{DatabaseSnapshot, NodeState, StorageMetadata, StorageTransaction, encode_component};
@@ -13,6 +14,7 @@ const NODES_DIR: &str = "nodes";
 const AUTH_DIR: &str = "auth";
 const SEGMENTS_DIR: &str = "segments";
 const VECTOR_CACHE_DIR: &str = "vector-cache";
+const TEXT_CACHE_DIR: &str = "text-cache";
 
 pub(crate) async fn write_vector_cache_opfs(
     directory: &str,
@@ -91,6 +93,86 @@ pub(crate) async fn load_vector_cache_opfs(
         keys_bin,
         metadata_bin,
         backend_edgevec,
+    }))
+}
+
+pub(crate) async fn write_text_cache_opfs(
+    directory: &str,
+    namespace: &str,
+    collection: &str,
+    files: &TextCacheFiles,
+) -> std::result::Result<WasmSegmentWriteSummary, JsValue> {
+    validate_opfs_path(directory, namespace)?;
+    let cache_dir = opfs_text_cache_dir(directory, namespace, collection, true).await?;
+    let mut summary = WasmSegmentWriteSummary::default();
+
+    write_file(&cache_dir, "terms.bin", &files.terms_bin).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(files.terms_bin.len() as u64);
+
+    write_file(&cache_dir, "postings.bin", &files.postings_bin).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(files.postings_bin.len() as u64);
+
+    write_file(&cache_dir, "docs.bin", &files.docs_bin).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(files.docs_bin.len() as u64);
+
+    write_file(&cache_dir, "metadata.bin", &files.metadata_bin).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(files.metadata_bin.len() as u64);
+
+    let manifest_bytes = serde_json::to_vec_pretty(&files.manifest).map_err(error_to_js)?;
+    write_file(&cache_dir, "manifest.json", &manifest_bytes).await?;
+    summary.entries_written = summary.entries_written.saturating_add(1);
+    summary.estimated_bytes_written = summary
+        .estimated_bytes_written
+        .saturating_add(manifest_bytes.len() as u64);
+
+    Ok(summary)
+}
+
+pub(crate) async fn load_text_cache_opfs(
+    directory: &str,
+    namespace: &str,
+    collection: &str,
+) -> std::result::Result<Option<TextCacheFiles>, JsValue> {
+    validate_opfs_path(directory, namespace)?;
+    let cache_dir = match opfs_text_cache_dir(directory, namespace, collection, false).await {
+        Ok(dir) => dir,
+        Err(error) if is_not_found_error(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(manifest) = read_json_file::<TextCacheManifest>(&cache_dir, "manifest.json").await?
+    else {
+        return Ok(None);
+    };
+    let Some(terms_bin) = read_file(&cache_dir, "terms.bin").await? else {
+        return Ok(None);
+    };
+    let Some(postings_bin) = read_file(&cache_dir, "postings.bin").await? else {
+        return Ok(None);
+    };
+    let Some(docs_bin) = read_file(&cache_dir, "docs.bin").await? else {
+        return Ok(None);
+    };
+    let Some(metadata_bin) = read_file(&cache_dir, "metadata.bin").await? else {
+        return Ok(None);
+    };
+    Ok(Some(TextCacheFiles {
+        manifest,
+        terms_bin,
+        postings_bin,
+        docs_bin,
+        metadata_bin,
     }))
 }
 
@@ -293,6 +375,21 @@ async fn opfs_vector_cache_dir(
         current = get_child_directory(&current, &component, create).await?;
     }
     current = get_child_directory(&current, VECTOR_CACHE_DIR, create).await?;
+    current = get_child_directory(&current, &encode_component(namespace), create).await?;
+    get_child_directory(&current, &encode_component(collection), create).await
+}
+
+async fn opfs_text_cache_dir(
+    directory: &str,
+    namespace: &str,
+    collection: &str,
+    create: bool,
+) -> std::result::Result<web_sys::FileSystemDirectoryHandle, JsValue> {
+    let mut current = opfs_root_dir().await?;
+    for component in directory_components(directory)? {
+        current = get_child_directory(&current, &component, create).await?;
+    }
+    current = get_child_directory(&current, TEXT_CACHE_DIR, create).await?;
     current = get_child_directory(&current, &encode_component(namespace), create).await?;
     get_child_directory(&current, &encode_component(collection), create).await
 }

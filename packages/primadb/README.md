@@ -39,7 +39,9 @@ Relay and mesh handles also expose RouteEnvelope-level application traffic throu
 `publishApplication(...)`, `sendApplication(...)`, and `subscribeApplications(...)`. Use these for
 trusted application protocols without reaching into WebSocket, WebRTC, or MoQ internals. Use
 `recordsFanIn(...)` and `watchRecordsFanIn(...)` when a caller needs source-tagged record results
-from all policy-matching reachable peers instead of single-peer ambient selection.
+from all policy-matching reachable peers instead of single-peer ambient selection. BM25 text search
+uses the same route pipeline through `textSearch(...)`, `watchTextSearch(...)`,
+`textSearchFanIn(...)`, and `watchTextSearchFanIn(...)`.
 
 The browser bindings also expose `db.scope(...)`, `db.transaction(...)`, and
 `scope.transaction(...)` for step-based local transactions and strict-scope proposal workflows.

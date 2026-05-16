@@ -40,6 +40,7 @@ mod session_auth;
 mod snapshot;
 mod storage;
 mod sync;
+mod text_search;
 mod transport;
 mod traversal;
 mod value;
@@ -82,8 +83,8 @@ pub use crypto::{
 };
 pub use db::{
     Chain, ChangeEvent, ChangeSubscription, LexBuilder, MapEntry, NodeFetchScheduler, Primadb,
-    QueryBuilder, RecordWatchSubscription, Scope, Subscription, Transaction, TransactionChain,
-    TraversalSubscription, VacuumReport, VectorWatchSubscription,
+    QueryBuilder, RecordWatchSubscription, Scope, Subscription, TextWatchSubscription, Transaction,
+    TransactionChain, TraversalSubscription, VacuumReport, VectorWatchSubscription,
 };
 pub use durable::{
     DurableStorageBinding, DurableStorageConfig, SegmentDurability, SegmentFileStoreOptions,
@@ -159,10 +160,18 @@ pub use storage::{SnapshotFileAdapter, SnapshotLogFileAdapter};
 pub use sync::{
     PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemoteFanInWatch,
     RemoteFanInWatchEvent, RemoteInterestPolicy, RemoteInterestTarget, RemotePath,
-    RemotePeerFailure, RemotePeerRecords, RemoteRecordConflict, RemoteRecordConflictSource,
-    RemoteRecordsFanIn, RemoteResult, RemoteWatchMessage, RemoteWatchSubscription, SyncEnvelope,
-    SyncFrame, WatchEvent, WatchRequest, WatchRequestKind, error_pull_response, error_watch_event,
-    merge_remote_records_fan_in, stable_content_hash,
+    RemotePeerFailure, RemotePeerRecords, RemotePeerTextSearch, RemoteRecordConflict,
+    RemoteRecordConflictSource, RemoteRecordsFanIn, RemoteResult, RemoteTextSearchFanIn,
+    RemoteWatchMessage, RemoteWatchSubscription, SyncEnvelope, SyncFrame, WatchEvent, WatchRequest,
+    WatchRequestKind, error_pull_response, error_watch_event, merge_remote_records_fan_in,
+    merge_remote_text_search_fan_in, stable_content_hash,
+};
+pub use text_search::{
+    SearchStalePolicy, TextAnalyzerConfig, TextAnalyzerKind, TextCacheFiles, TextCacheManifest,
+    TextCandidatePolicy, TextCollectionConfig, TextDocument, TextFieldConfig, TextFieldHit,
+    TextIndexState, TextIndexStats, TextScoreScope, TextSearchBackend, TextSearchMatch,
+    TextSearchMode, TextSearchResult, TextSearchSource, TextSearchSourceSummary, TextSearchSpec,
+    TextSnippet,
 };
 pub use transport::{
     InMemoryRouteHub, InMemoryRouteSession, RouteRelayCore, RouteRelayForward, RouteSessionInfo,

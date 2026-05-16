@@ -39,6 +39,16 @@ use crate::sync::{
     PullChunk, PullRequest, PullRequestKind, PullResponse, PullResponseBody, RemotePath,
     RemoteResult, SyncEnvelope, SyncFrame,
 };
+use crate::text_search::{
+    SearchStalePolicy, TextCacheFiles, TextCollectionCache, TextCollectionConfig, TextDocument,
+    TextIndexStats, TextScoreScope, TextSearchResult, TextSearchSource, TextSearchSourceSummary,
+    TextSearchSpec, collection_cache_from_text_cache_files,
+    collection_config_from_record as text_collection_config_from_record, search_text_candidates,
+    search_text_collection, text_cache_files, text_candidates_from_map_entries,
+    text_candidates_from_record_entries, text_collection_config_key, text_collection_docs_prefix,
+    text_collection_from_record_key, text_document_from_record, text_document_id_from_record_key,
+    text_document_key, validate_text_collection_config,
+};
 use crate::traversal::{
     TraversalDirection, TraversalEdge, TraversalEdgeKind, TraversalEntry, TraversalResult,
     TraversalSpec, TraversalStrategy,
@@ -133,6 +143,10 @@ pub struct VectorWatchSubscription {
     inner: Arc<VectorWatchSubscriptionInner>,
 }
 
+pub struct TextWatchSubscription {
+    inner: Arc<TextWatchSubscriptionInner>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Scope {
     db: Primadb,
@@ -210,6 +224,12 @@ struct VectorWatchSubscriptionInner {
     receiver: Receiver<VectorSearchResult>,
 }
 
+struct TextWatchSubscriptionInner {
+    id: u64,
+    db: Weak<Mutex<Inner>>,
+    receiver: Receiver<TextSearchResult>,
+}
+
 struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
@@ -219,11 +239,13 @@ struct Inner {
     traversal_subscriptions: std::collections::BTreeMap<u64, TraversalWatcher>,
     record_subscriptions: std::collections::BTreeMap<u64, RecordWatcher>,
     vector_subscriptions: std::collections::BTreeMap<u64, VectorWatcher>,
+    text_subscriptions: std::collections::BTreeMap<u64, TextWatcher>,
     change_subscriptions: std::collections::BTreeMap<u64, ChangeWatcher>,
     next_subscription_id: u64,
     next_traversal_subscription_id: u64,
     next_record_subscription_id: u64,
     next_vector_subscription_id: u64,
+    next_text_subscription_id: u64,
     next_change_subscription_id: u64,
     change_revision: u64,
     persistence: Option<PersistenceTarget>,
@@ -244,8 +266,11 @@ struct Inner {
     limits: PrimadbLimits,
     network_hooks: Option<Arc<dyn NetworkHooks>>,
     vector_collections: BTreeMap<String, VectorCollectionCache>,
+    text_collections: BTreeMap<String, TextCollectionCache>,
     #[cfg(not(target_arch = "wasm32"))]
     vector_cache_root: Option<std::path::PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    text_cache_root: Option<std::path::PathBuf>,
     #[cfg(feature = "crypto")]
     security: SecurityState,
 }
@@ -332,6 +357,15 @@ struct VectorWatcher {
     spec: VectorSearchSpec,
     last_hash: Option<String>,
     sender: Sender<VectorSearchResult>,
+}
+
+#[derive(Debug, Clone)]
+struct TextWatcher {
+    source: TextSearchSource,
+    query: String,
+    spec: TextSearchSpec,
+    last_hash: Option<String>,
+    sender: Sender<TextSearchResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -499,11 +533,13 @@ impl Primadb {
                 traversal_subscriptions: Default::default(),
                 record_subscriptions: Default::default(),
                 vector_subscriptions: Default::default(),
+                text_subscriptions: Default::default(),
                 change_subscriptions: Default::default(),
                 next_subscription_id: 0,
                 next_traversal_subscription_id: 0,
                 next_record_subscription_id: 0,
                 next_vector_subscription_id: 0,
+                next_text_subscription_id: 0,
                 next_change_subscription_id: 0,
                 change_revision: 0,
                 persistence: None,
@@ -524,8 +560,11 @@ impl Primadb {
                 limits: PrimadbLimits::default(),
                 network_hooks: None,
                 vector_collections: BTreeMap::new(),
+                text_collections: BTreeMap::new(),
                 #[cfg(not(target_arch = "wasm32"))]
                 vector_cache_root: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                text_cache_root: None,
                 #[cfg(feature = "crypto")]
                 security: SecurityState::default(),
             })),
@@ -949,6 +988,175 @@ impl Primadb {
                 vector_metric_capability_name(config.metric),
                 vector_manager_state_capability_name(state),
                 vector_backend_capability_name(backend)
+            ));
+        }
+        capabilities.sort();
+        capabilities.dedup();
+        capabilities
+    }
+
+    pub fn create_text_collection(
+        &self,
+        name: impl AsRef<str>,
+        config: TextCollectionConfig,
+    ) -> Result<()> {
+        validate_text_collection_config(&config)?;
+        self.put_record_value(text_collection_config_key(name.as_ref()), config)
+    }
+
+    pub fn text_collection_config(&self, collection: &str) -> Result<TextCollectionConfig> {
+        let Some(entry) = self.get_record(&text_collection_config_key(collection))? else {
+            return Err(PrimadbError::Message(format!(
+                "text collection `{collection}` does not exist"
+            )));
+        };
+        text_collection_config_from_record(&entry)
+    }
+
+    pub fn put_text_document(
+        &self,
+        collection: impl AsRef<str>,
+        document: TextDocument,
+    ) -> Result<()> {
+        let collection = collection.as_ref();
+        self.text_collection_config(collection)?;
+        if document.id.trim().is_empty() {
+            return Err(PrimadbError::Message(
+                "text document id must not be empty".to_owned(),
+            ));
+        }
+        self.put_record_value(text_document_key(collection, &document.id), document)
+    }
+
+    pub fn delete_text_document(
+        &self,
+        collection: impl AsRef<str>,
+        id: impl AsRef<str>,
+    ) -> Result<()> {
+        self.delete_record(text_document_key(collection.as_ref(), id.as_ref()))
+    }
+
+    pub fn get_text_document(
+        &self,
+        collection: impl AsRef<str>,
+        id: impl AsRef<str>,
+    ) -> Result<Option<TextDocument>> {
+        let collection = collection.as_ref();
+        let id = id.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        ensure_text_collection_ready_locked(&mut inner, collection)?;
+        Ok(inner
+            .text_collections
+            .get(collection)
+            .and_then(|cache| cache.documents.get(id))
+            .cloned())
+    }
+
+    pub fn text_search(
+        &self,
+        source: impl Into<TextSearchSource>,
+        query: impl AsRef<str>,
+        spec: TextSearchSpec,
+    ) -> Result<TextSearchResult> {
+        self.execute_text_search(source.into(), query.as_ref(), spec)
+    }
+
+    pub fn watch_text_search(
+        &self,
+        source: impl Into<TextSearchSource>,
+        query: impl AsRef<str>,
+        spec: TextSearchSpec,
+    ) -> Result<TextWatchSubscription> {
+        self.subscribe_to_text_search(source.into(), query.as_ref().to_owned(), spec)
+    }
+
+    pub fn text_index_stats(&self, collection: impl AsRef<str>) -> Result<TextIndexStats> {
+        let collection = collection.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        ensure_text_collection_ready_locked(&mut inner, collection)?;
+        inner
+            .text_collections
+            .get(collection)
+            .map(TextCollectionCache::stats)
+            .ok_or_else(|| {
+                PrimadbError::Message(format!("text collection `{collection}` is not loaded"))
+            })
+    }
+
+    // Persistent text cache import/export is exposed to native storage paths first.
+    #[allow(dead_code)]
+    pub(crate) fn export_text_cache_files(
+        &self,
+        collection: impl AsRef<str>,
+    ) -> Result<TextCacheFiles> {
+        let collection = collection.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        ensure_text_collection_ready_locked(&mut inner, collection)?;
+        let cache = inner.text_collections.get(collection).ok_or_else(|| {
+            PrimadbError::Message(format!("text collection `{collection}` is not loaded"))
+        })?;
+        text_cache_files(collection, cache, now_millis().to_string())
+    }
+
+    // Persistent text cache import/export is exposed to native storage paths first.
+    #[allow(dead_code)]
+    pub(crate) fn import_text_cache_files(
+        &self,
+        collection: impl AsRef<str>,
+        files: TextCacheFiles,
+    ) -> Result<()> {
+        let collection = collection.as_ref();
+        let mut inner = self.inner.lock().unwrap();
+        let (config, source_hash) =
+            text_collection_config_and_source_hash_locked(&mut inner, collection)?;
+        if files.manifest.collection != collection
+            || files.manifest.record_prefix != text_collection_docs_prefix(collection)
+        {
+            return Err(PrimadbError::Message(
+                "text cache manifest belongs to another collection".to_owned(),
+            ));
+        }
+        let cache = collection_cache_from_text_cache_files(config, files, &source_hash)?;
+        inner.text_collections.insert(collection.to_owned(), cache);
+        Ok(())
+    }
+
+    pub fn text_presence_capabilities(&self) -> Vec<String> {
+        let mut capabilities = vec![
+            "pull_text_search".to_owned(),
+            "watch_text_search".to_owned(),
+            "text_bm25_exact".to_owned(),
+        ];
+
+        let mut inner = self.inner.lock().unwrap();
+        let scan = RecordScan {
+            prefix: Some(format!("{}/", crate::text_search::TEXT_RECORD_PREFIX)),
+            ..RecordScan::default()
+        };
+        let Ok(entries) = collect_record_entries_for_scan_locked(&mut inner, &scan) else {
+            return capabilities;
+        };
+        for entry in entries {
+            if !entry.key.ends_with("/config") {
+                continue;
+            }
+            let Some(collection) = text_collection_from_record_key(&entry.key) else {
+                continue;
+            };
+            let Ok(config) = text_collection_config_from_record(&entry) else {
+                continue;
+            };
+            let state = inner
+                .text_collections
+                .get(&collection)
+                .map(|cache| cache.state)
+                .unwrap_or_default();
+            capabilities.push(format!(
+                "text_collection:{}:{}:{}:{}",
+                crate::encode_component(&collection),
+                text_manager_state_capability_name(state),
+                "exact",
+                config.analyzer.version
             ));
         }
         capabilities.sort();
@@ -1765,6 +1973,13 @@ impl Primadb {
             } => Ok(RemoteResult::VectorSearch {
                 result: self.search_vectors(collection, query, spec.clone())?,
             }),
+            PullRequestKind::TextSearch {
+                source,
+                query,
+                spec,
+            } => Ok(RemoteResult::TextSearch {
+                result: self.text_search(source.clone(), query, spec.clone())?,
+            }),
             PullRequestKind::Node { id } => Ok(RemoteResult::Node {
                 node: self.node_state(id)?,
             }),
@@ -2043,7 +2258,11 @@ impl Primadb {
     ) -> Result<bool> {
         let directory = directory.into();
         let store = crate::SegmentFileStore::new(directory.clone(), journal_retention)?;
-        self.inner.lock().unwrap().vector_cache_root = Some(directory.join("vector-cache"));
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.vector_cache_root = Some(directory.join("vector-cache"));
+            inner.text_cache_root = Some(directory.join("text-cache"));
+        }
         self.attach_incremental_store(Arc::new(store))
     }
 
@@ -2076,7 +2295,9 @@ impl Primadb {
                 durability,
                 lock_mode,
             } => {
-                let cache_root = std::path::PathBuf::from(&directory).join("vector-cache");
+                let directory_path = std::path::PathBuf::from(&directory);
+                let vector_cache_root = directory_path.join("vector-cache");
+                let text_cache_root = directory_path.join("text-cache");
                 let store = crate::SegmentFileStore::with_options(
                     directory,
                     journal_retention,
@@ -2086,7 +2307,11 @@ impl Primadb {
                     },
                 )?;
                 let loaded = self.attach_incremental_store(Arc::new(store))?;
-                self.inner.lock().unwrap().vector_cache_root = Some(cache_root);
+                {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.vector_cache_root = Some(vector_cache_root);
+                    inner.text_cache_root = Some(text_cache_root);
+                }
                 Ok(DurableStorageBinding {
                     backend: "segment_file".to_owned(),
                     incremental: true,
@@ -2466,10 +2691,12 @@ impl Primadb {
         self.persist_if_needed()?;
         if event.data_changed {
             self.mark_vector_collections_dirty(&event);
+            self.mark_text_collections_dirty(&event);
             self.notify_subscribers(&event)?;
             self.notify_traversal_subscribers(&event)?;
             self.notify_record_subscribers(&event)?;
             self.notify_vector_subscribers(&event)?;
+            self.notify_text_subscribers(&event)?;
         }
         self.notify_change_subscribers(event)?;
         Ok(())
@@ -2502,6 +2729,29 @@ impl Primadb {
             if let Some(cache) = inner.vector_collections.get_mut(&collection) {
                 cache.dirty = true;
                 cache.state = VectorManagerState::Stale;
+            }
+        }
+    }
+
+    fn mark_text_collections_dirty(&self, event: &ChangeEvent) {
+        if !event.full_refresh && !event.records_changed {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if event.full_refresh || event.touched_record_keys.is_empty() {
+            for cache in inner.text_collections.values_mut() {
+                cache.dirty = true;
+                cache.state = crate::TextIndexState::Stale;
+            }
+            return;
+        }
+        for key in &event.touched_record_keys {
+            let Some(collection) = text_collection_from_record_key(key) else {
+                continue;
+            };
+            if let Some(cache) = inner.text_collections.get_mut(&collection) {
+                cache.dirty = true;
+                cache.state = crate::TextIndexState::Stale;
             }
         }
     }
@@ -2938,6 +3188,113 @@ impl Primadb {
         })
     }
 
+    fn subscribe_to_text_search(
+        &self,
+        source: TextSearchSource,
+        query: String,
+        spec: TextSearchSpec,
+    ) -> Result<TextWatchSubscription> {
+        let result = self.execute_text_search(source.clone(), &query, spec.clone())?;
+        let last_hash = crate::stable_content_hash(&result);
+
+        let (sender, receiver) = async_channel::unbounded();
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_text_subscription_id = inner.next_text_subscription_id.saturating_add(1);
+            let id = inner.next_text_subscription_id;
+            inner.text_subscriptions.insert(
+                id,
+                TextWatcher {
+                    source,
+                    query,
+                    spec,
+                    last_hash,
+                    sender: sender.clone(),
+                },
+            );
+            id
+        };
+        let _ = sender.try_send(result);
+
+        Ok(TextWatchSubscription {
+            inner: Arc::new(TextWatchSubscriptionInner {
+                id,
+                db: Arc::downgrade(&self.inner),
+                receiver,
+            }),
+        })
+    }
+
+    fn execute_text_search(
+        &self,
+        source: TextSearchSource,
+        query: &str,
+        spec: TextSearchSpec,
+    ) -> Result<TextSearchResult> {
+        match source {
+            TextSearchSource::Collection { collection } => {
+                let mut inner = self.inner.lock().unwrap();
+                ensure_text_collection_ready_locked(&mut inner, &collection)?;
+                let cache = inner.text_collections.get(&collection).ok_or_else(|| {
+                    PrimadbError::Message(format!("text collection `{collection}` is not loaded"))
+                })?;
+                if spec.stale_policy == SearchStalePolicy::Reject
+                    && (cache.state != crate::TextIndexState::Ready || cache.dirty)
+                {
+                    return Err(PrimadbError::Message(format!(
+                        "text collection `{collection}` is {:?}",
+                        cache.state
+                    )));
+                }
+                search_text_collection(&collection, cache, query, &spec)
+            }
+            TextSearchSource::GraphQuery {
+                path,
+                spec: query_spec,
+            } => {
+                if spec.candidate_policy == crate::TextCandidatePolicy::RejectPaginatedQuery
+                    && (query_spec.order.is_some()
+                        || query_spec.limit.is_some()
+                        || query_spec.offset > 0)
+                {
+                    return Err(PrimadbError::Message(
+                        "query-scoped text search rejects ordered, limited, or offset queries by default; set candidatePolicy to allow_preselected_candidates to rank the preselected candidate set".to_owned(),
+                    ));
+                }
+                let truncated = query_spec.order.is_some()
+                    || query_spec.limit.is_some()
+                    || query_spec.offset > 0;
+                let entries = self.query_path(&path, &query_spec)?;
+                let candidates = text_candidates_from_map_entries(&entries, spec.fields.as_deref());
+                search_text_candidates(
+                    TextSearchSourceSummary::GraphQuery { path },
+                    query,
+                    &spec,
+                    candidates,
+                    truncated,
+                    TextScoreScope::CandidateSet,
+                )
+            }
+            TextSearchSource::Records { scan } => {
+                let result = self.scan_records(scan.clone())?;
+                let truncated =
+                    scan.limit.is_some() || scan.cursor.is_some() || result.next_cursor.is_some();
+                let candidates =
+                    text_candidates_from_record_entries(&result.entries, spec.fields.as_deref());
+                search_text_candidates(
+                    TextSearchSourceSummary::Records {
+                        prefix: scan.prefix.clone(),
+                    },
+                    query,
+                    &spec,
+                    candidates,
+                    truncated,
+                    TextScoreScope::CandidateSet,
+                )
+            }
+        }
+    }
+
     fn notify_subscribers(&self, event: &ChangeEvent) -> Result<()> {
         let watchers: Vec<(u64, Watcher)> = {
             let inner = self.inner.lock().unwrap();
@@ -3064,6 +3421,53 @@ impl Primadb {
             }
             for id in stale {
                 inner.vector_subscriptions.remove(&id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn notify_text_subscribers(&self, event: &ChangeEvent) -> Result<()> {
+        let watchers: Vec<(u64, TextWatcher)> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .text_subscriptions
+                .iter()
+                .map(|(id, watcher)| (*id, watcher.clone()))
+                .collect()
+        };
+
+        let mut stale = Vec::new();
+        let mut hash_updates = Vec::new();
+        for (id, watcher) in watchers {
+            if !text_watch_change_overlaps(&watcher.source, event) {
+                continue;
+            }
+            let result = self.execute_text_search(
+                watcher.source.clone(),
+                &watcher.query,
+                watcher.spec.clone(),
+            )?;
+            let result_hash = crate::stable_content_hash(&result);
+            if result_hash == watcher.last_hash {
+                continue;
+            }
+            if watcher.sender.try_send(result).is_err() {
+                stale.push(id);
+            } else {
+                hash_updates.push((id, result_hash));
+            }
+        }
+
+        if !stale.is_empty() || !hash_updates.is_empty() {
+            let mut inner = self.inner.lock().unwrap();
+            for (id, hash) in hash_updates {
+                if let Some(watcher) = inner.text_subscriptions.get_mut(&id) {
+                    watcher.last_hash = hash;
+                }
+            }
+            for id in stale {
+                inner.text_subscriptions.remove(&id);
             }
         }
 
@@ -3629,6 +4033,101 @@ fn assemble_complete_vector_item(
     })
 }
 
+fn ensure_text_collection_ready_locked(inner: &mut Inner, collection: &str) -> Result<()> {
+    let needs_rebuild = inner
+        .text_collections
+        .get(collection)
+        .map(|cache| cache.dirty || cache.state != crate::TextIndexState::Ready)
+        .unwrap_or(true);
+    if !needs_rebuild {
+        return Ok(());
+    }
+    rebuild_text_collection_locked(inner, collection)
+}
+
+fn rebuild_text_collection_locked(inner: &mut Inner, collection: &str) -> Result<()> {
+    if let Some(cache) = inner.text_collections.get_mut(collection) {
+        cache.state = crate::TextIndexState::Rebuilding;
+    }
+    let (config, record_entries, source_hash) =
+        text_collection_records_and_source_hash_locked(inner, collection)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(root) = &inner.text_cache_root
+        && let Ok(Some(cache)) =
+            read_native_text_cache(root, collection, config.clone(), &source_hash)
+    {
+        inner.text_collections.insert(collection.to_owned(), cache);
+        return Ok(());
+    }
+    let cache = assemble_text_collection_cache(collection, config, &record_entries, source_hash)?;
+    inner
+        .text_collections
+        .insert(collection.to_owned(), cache.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(root) = &inner.text_cache_root {
+        let _ = write_native_text_cache(root, collection, &cache);
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn text_collection_config_and_source_hash_locked(
+    inner: &mut Inner,
+    collection: &str,
+) -> Result<(TextCollectionConfig, String)> {
+    let (config, _records, source_hash) =
+        text_collection_records_and_source_hash_locked(inner, collection)?;
+    Ok((config, source_hash))
+}
+
+fn text_collection_records_and_source_hash_locked(
+    inner: &mut Inner,
+    collection: &str,
+) -> Result<(TextCollectionConfig, Vec<RecordEntry>, String)> {
+    let config_key = text_collection_config_key(collection);
+    let Some(config_entry) = record_entry_from_inner(inner, &config_key)? else {
+        inner.text_collections.remove(collection);
+        return Err(PrimadbError::Message(format!(
+            "text collection `{collection}` does not exist"
+        )));
+    };
+    let config = text_collection_config_from_record(&config_entry)?;
+    let scan = RecordScan {
+        prefix: Some(text_collection_docs_prefix(collection)),
+        ..RecordScan::default()
+    };
+    let mut record_entries = collect_record_entries_for_scan_locked(inner, &scan)?;
+    record_entries.push(config_entry);
+    let source_hash = records_source_hash(&record_entries);
+    Ok((config, record_entries, source_hash))
+}
+
+fn assemble_text_collection_cache(
+    collection: &str,
+    config: TextCollectionConfig,
+    records: &[RecordEntry],
+    source_hash: String,
+) -> Result<TextCollectionCache> {
+    let mut documents = BTreeMap::new();
+    let mut deleted_count = 0_usize;
+    for entry in records {
+        let Some(path_id) = text_document_id_from_record_key(collection, &entry.key) else {
+            continue;
+        };
+        match text_document_from_record(entry) {
+            Ok(document) if document.id == path_id => {
+                documents.insert(document.id.clone(), document);
+            }
+            Ok(_) | Err(_) => {
+                deleted_count = deleted_count.saturating_add(1);
+            }
+        }
+    }
+    let mut cache = TextCollectionCache::from_documents(config, documents, source_hash)?;
+    cache.deleted_count = deleted_count;
+    Ok(cache)
+}
+
 fn vector_watch_change_overlaps(collection: &str, event: &ChangeEvent) -> bool {
     if event.full_refresh {
         return true;
@@ -3641,6 +4140,39 @@ fn vector_watch_change_overlaps(collection: &str, event: &ChangeEvent) -> bool {
             .touched_record_keys
             .iter()
             .any(|key| vector_collection_from_record_key(key).as_deref() == Some(collection))
+}
+
+fn text_watch_change_overlaps(source: &TextSearchSource, event: &ChangeEvent) -> bool {
+    match source {
+        TextSearchSource::Collection { collection } => {
+            text_collection_watch_overlaps(collection, event)
+        }
+        TextSearchSource::GraphQuery { path, .. } => watch_change_overlaps(&path.path(), event),
+        TextSearchSource::Records { scan } => record_watch_change_overlaps(scan, event),
+    }
+}
+
+fn text_collection_watch_overlaps(collection: &str, event: &ChangeEvent) -> bool {
+    if event.full_refresh {
+        return true;
+    }
+    if !event.records_changed {
+        return false;
+    }
+    event.touched_record_keys.is_empty()
+        || event
+            .touched_record_keys
+            .iter()
+            .any(|key| text_collection_from_record_key(key).as_deref() == Some(collection))
+}
+
+fn text_manager_state_capability_name(state: crate::TextIndexState) -> &'static str {
+    match state {
+        crate::TextIndexState::Ready => "ready",
+        crate::TextIndexState::Rebuilding => "rebuilding",
+        crate::TextIndexState::Stale => "stale",
+        crate::TextIndexState::Failed => "failed",
+    }
 }
 
 fn vector_metric_capability_name(metric: VectorMetric) -> &'static str {
@@ -3763,6 +4295,80 @@ fn write_native_vector_cache(
             Err(error) => return Err(error.into()),
         }
     }
+    std::fs::rename(
+        collection_dir.join("manifest.json.tmp"),
+        collection_dir.join("manifest.json"),
+    )?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_native_text_cache(
+    root: &std::path::Path,
+    collection: &str,
+    config: TextCollectionConfig,
+    source_hash: &str,
+) -> Result<Option<TextCollectionCache>> {
+    let collection_dir = root.join(crate::encode_component(collection));
+    let manifest_path = collection_dir.join("manifest.json");
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let manifest = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    let terms_bin = read_native_vector_cache_file(&collection_dir.join("terms.bin"))?;
+    let postings_bin = read_native_vector_cache_file(&collection_dir.join("postings.bin"))?;
+    let docs_bin = read_native_vector_cache_file(&collection_dir.join("docs.bin"))?;
+    let metadata_bin = read_native_vector_cache_file(&collection_dir.join("metadata.bin"))?;
+    let files = TextCacheFiles {
+        manifest,
+        terms_bin,
+        postings_bin,
+        docs_bin,
+        metadata_bin,
+    };
+    if files.manifest.collection != collection
+        || files.manifest.record_prefix != text_collection_docs_prefix(collection)
+    {
+        return Err(PrimadbError::Message(
+            "text cache manifest belongs to another collection".to_owned(),
+        ));
+    }
+    collection_cache_from_text_cache_files(config, files, source_hash).map(Some)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_native_text_cache(
+    root: &std::path::Path,
+    collection: &str,
+    cache: &TextCollectionCache,
+) -> Result<()> {
+    let collection_dir = root.join(crate::encode_component(collection));
+    std::fs::create_dir_all(&collection_dir)?;
+    let files = text_cache_files(collection, cache, now_millis().to_string())?;
+    std::fs::write(collection_dir.join("terms.bin.tmp"), &files.terms_bin)?;
+    std::fs::write(collection_dir.join("postings.bin.tmp"), &files.postings_bin)?;
+    std::fs::write(collection_dir.join("docs.bin.tmp"), &files.docs_bin)?;
+    std::fs::write(collection_dir.join("metadata.bin.tmp"), &files.metadata_bin)?;
+    std::fs::write(
+        collection_dir.join("manifest.json.tmp"),
+        serde_json::to_vec_pretty(&files.manifest)?,
+    )?;
+    std::fs::rename(
+        collection_dir.join("terms.bin.tmp"),
+        collection_dir.join("terms.bin"),
+    )?;
+    std::fs::rename(
+        collection_dir.join("postings.bin.tmp"),
+        collection_dir.join("postings.bin"),
+    )?;
+    std::fs::rename(
+        collection_dir.join("docs.bin.tmp"),
+        collection_dir.join("docs.bin"),
+    )?;
+    std::fs::rename(
+        collection_dir.join("metadata.bin.tmp"),
+        collection_dir.join("metadata.bin"),
+    )?;
     std::fs::rename(
         collection_dir.join("manifest.json.tmp"),
         collection_dir.join("manifest.json"),
@@ -4704,6 +5310,25 @@ impl VectorWatchSubscription {
     }
 }
 
+impl TextWatchSubscription {
+    pub fn receiver(&self) -> Receiver<TextSearchResult> {
+        self.inner.receiver.clone()
+    }
+
+    pub async fn recv(&self) -> Option<TextSearchResult> {
+        self.inner.receiver.recv().await.ok()
+    }
+
+    pub fn try_recv(&self) -> Option<TextSearchResult> {
+        self.inner.receiver.try_recv().ok()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn recv_blocking(&self) -> Option<TextSearchResult> {
+        self.inner.receiver.recv_blocking().ok()
+    }
+}
+
 impl Clone for Subscription {
     fn clone(&self) -> Self {
         Self {
@@ -4789,6 +5414,16 @@ impl Drop for VectorWatchSubscriptionInner {
         if let Some(db) = self.db.upgrade() {
             if let Ok(mut inner) = db.lock() {
                 inner.vector_subscriptions.remove(&self.id);
+            }
+        }
+    }
+}
+
+impl Drop for TextWatchSubscriptionInner {
+    fn drop(&mut self) {
+        if let Some(db) = self.db.upgrade() {
+            if let Ok(mut inner) = db.lock() {
+                inner.text_subscriptions.remove(&self.id);
             }
         }
     }
@@ -6651,6 +7286,12 @@ fn build_pull_responses(
             done: true,
             result: PullResponseBody::VectorSearch { result },
         }],
+        RemoteResult::TextSearch { result } => vec![PullResponse {
+            request_id: request_id.to_owned(),
+            chunk: PullChunk { index: 0, total: 1 },
+            done: true,
+            result: PullResponseBody::TextSearch { result },
+        }],
         RemoteResult::Node { node } => vec![PullResponse {
             request_id: request_id.to_owned(),
             chunk: PullChunk { index: 0, total: 1 },
@@ -7257,10 +7898,12 @@ mod tests {
         QuerySpec, RecordBatch, RecordEntry, RecordMutation, RecordPrecondition, RecordScan,
         RecordScanResult, RecordValue, RemotePath, Result, RoomHookContext, ScopeAuthority,
         ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext, ServeResultContext,
-        TransactionOptions, TransactionStatus, TransactionStep, TraversalDirection, TraversalSpec,
-        VectorCollectionConfig, VectorFilter, VectorMetric, VectorSearchSpec,
+        TextCandidatePolicy, TextCollectionConfig, TextDocument, TextScoreScope, TextSearchSource,
+        TextSearchSpec, TransactionOptions, TransactionStatus, TransactionStep, TraversalDirection,
+        TraversalSpec, VectorCollectionConfig, VectorFilter, VectorMetric, VectorSearchSpec,
     };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7472,6 +8115,202 @@ mod tests {
     }
 
     #[test]
+    fn text_documents_are_stored_as_records_and_search_ranked() -> Result<()> {
+        let db = Primadb::with_replica_id("text-a");
+        db.create_text_collection("notes", TextCollectionConfig::default())?;
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "alpha".to_owned(),
+                fields: BTreeMap::from([
+                    ("title".to_owned(), "secure mesh routing".to_owned()),
+                    ("body".to_owned(), "trust routing proposal".to_owned()),
+                ]),
+                metadata: BTreeMap::from([("kind".to_owned(), json!("note"))]),
+            },
+        )?;
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "beta".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "unrelated local note".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+
+        let records = db.scan_records(RecordScan {
+            prefix: Some("__primadb_text/".to_owned()),
+            ..RecordScan::default()
+        })?;
+        assert!(
+            records
+                .entries
+                .iter()
+                .any(|entry| entry.key.ends_with("/docs/616c706861"))
+        );
+
+        let result = db.text_search(
+            "notes",
+            "secure routing",
+            TextSearchSpec {
+                include_metadata: true,
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            result.matches.first().map(|item| item.id.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(result.score_scope, TextScoreScope::Collection);
+        assert_eq!(
+            result.matches[0].metadata.as_ref().unwrap()["kind"],
+            json!("note")
+        );
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn text_collection_writes_native_cache_under_segment_storage() -> Result<()> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("primadb-text-cache-{}-{nonce}", std::process::id()));
+
+        {
+            let db = Primadb::with_replica_id("text-cache-a");
+            db.use_segment_storage(&directory, 8)?;
+            db.create_text_collection("notes", TextCollectionConfig::default())?;
+            db.put_text_document(
+                "notes",
+                TextDocument {
+                    id: "alpha".to_owned(),
+                    fields: BTreeMap::from([(
+                        "body".to_owned(),
+                        "persistent text cache".to_owned(),
+                    )]),
+                    metadata: BTreeMap::new(),
+                },
+            )?;
+            let result = db.text_search("notes", "persistent", TextSearchSpec::default())?;
+            assert_eq!(
+                result.matches.first().map(|item| item.id.as_str()),
+                Some("alpha")
+            );
+            assert!(
+                directory
+                    .join("text-cache")
+                    .join(crate::encode_component("notes"))
+                    .join("manifest.json")
+                    .exists()
+            );
+        }
+
+        let db2 = Primadb::with_replica_id("text-cache-b");
+        db2.use_segment_storage(&directory, 8)?;
+        let result = db2.text_search("notes", "persistent", TextSearchSpec::default())?;
+        assert_eq!(
+            result.matches.first().map(|item| item.id.as_str()),
+            Some("alpha")
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+        Ok(())
+    }
+
+    #[test]
+    fn text_watches_emit_initial_and_updates() -> Result<()> {
+        let db = Primadb::with_replica_id("text-watch");
+        db.create_text_collection("notes", TextCollectionConfig::default())?;
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "alpha".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "secure routing".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+        let watch = db.watch_text_search("notes", "vault proposal", TextSearchSpec::default())?;
+        let initial = watch.recv_blocking().unwrap();
+        assert!(initial.matches.is_empty());
+
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "beta".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "vault proposal".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+        let updated = watch.recv_blocking().unwrap();
+        assert_eq!(updated.matches[0].id, "beta");
+        Ok(())
+    }
+
+    #[test]
+    fn query_scoped_text_search_rejects_paginated_queries_by_default() -> Result<()> {
+        let db = Primadb::with_replica_id("text-query");
+        db.root("posts").field("a").put(json!({
+            "room": "mesh",
+            "body": "secure routing notes"
+        }))?;
+        let source = TextSearchSource::GraphQuery {
+            path: RemotePath::new("posts", vec![]),
+            spec: QuerySpec {
+                filters: vec![QueryFilter::Eq {
+                    path: "room".to_owned(),
+                    value: json!("mesh"),
+                }],
+                limit: Some(1),
+                ..QuerySpec::default()
+            },
+        };
+        assert!(
+            db.text_search(source.clone(), "routing", TextSearchSpec::default())
+                .is_err()
+        );
+        let result = db.text_search(
+            source,
+            "routing",
+            TextSearchSpec {
+                candidate_policy: TextCandidatePolicy::AllowPreselectedCandidates,
+                ..Default::default()
+            },
+        )?;
+        assert!(result.truncated_candidates);
+        assert_eq!(result.score_scope, TextScoreScope::CandidateSet);
+        Ok(())
+    }
+
+    #[test]
+    fn record_scan_text_search_ranks_json_string_leaves() -> Result<()> {
+        let db = Primadb::with_replica_id("text-records");
+        db.put_record_json(
+            "memory/1",
+            json!({"topic": "trust", "body": "trust proposal in mesh"}),
+        )?;
+        db.put_record_json("memory/2", json!({"body": "unrelated"}))?;
+        let result = db.text_search(
+            TextSearchSource::Records {
+                scan: RecordScan {
+                    prefix: Some("memory/".to_owned()),
+                    ..RecordScan::default()
+                },
+            },
+            "trust proposal",
+            TextSearchSpec::default(),
+        )?;
+        assert_eq!(
+            result.matches.first().map(|item| item.id.as_str()),
+            Some("memory/1")
+        );
+        assert_eq!(result.score_scope, TextScoreScope::CandidateSet);
+        Ok(())
+    }
+
+    #[test]
     fn vector_remote_result_chunks_round_trip() -> Result<()> {
         let result = crate::VectorSearchResult {
             matches: vec![crate::VectorMatch {
@@ -7496,6 +8335,37 @@ mod tests {
         assert_eq!(responses.len(), 1);
         match &responses[0].result {
             PullResponseBody::VectorSearch { result: actual } => assert_eq!(actual, &result),
+            other => panic!("unexpected response body: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn text_remote_result_chunks_round_trip() -> Result<()> {
+        let result = crate::TextSearchResult {
+            source: crate::TextSearchSourceSummary::Collection {
+                collection: "notes".to_owned(),
+            },
+            query: "mesh".to_owned(),
+            matches: Vec::new(),
+            backend: crate::TextSearchBackend::Exact,
+            exact: true,
+            stale: false,
+            candidate_count: 0,
+            searched_count: 0,
+            truncated_candidates: false,
+            score_scope: crate::TextScoreScope::Collection,
+        };
+        let responses = build_pull_responses(
+            "request-1",
+            crate::RemoteResult::TextSearch {
+                result: result.clone(),
+            },
+            &PrimadbLimits::default(),
+        );
+        assert_eq!(responses.len(), 1);
+        match &responses[0].result {
+            PullResponseBody::TextSearch { result: actual } => assert_eq!(actual, &result),
             other => panic!("unexpected response body: {other:?}"),
         }
         Ok(())

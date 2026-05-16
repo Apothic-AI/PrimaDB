@@ -115,6 +115,12 @@ When a caller needs every reachable policy-matching peer instead of one selected
 `watch_records_fan_in(...)`. Fan-in responses preserve source peer metadata, merged records,
 conflict metadata, and partial failures.
 
+BM25 search follows the same ambient model. Use `textSearch(...)` / `text_search(...)` for normal
+single-peer policy selection, and `textSearchFanIn(...)` / `text_search_fan_in(...)` or
+`watchTextSearchFanIn(...)` / `watch_text_search_fan_in(...)` when every policy-matching peer
+should contribute source-tagged text results. Merged text fan-in results keep `scoreScope =
+"peer_local"` because each peer scores against its own collection or candidate set.
+
 The default policy is "any connected/recommended peer." Pass a `RemoteInterestPolicy` only when
 needed:
 

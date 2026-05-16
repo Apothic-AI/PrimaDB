@@ -108,6 +108,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `RecordWatchSubscription`
 - `Scope`
 - `Subscription`
+- `TextWatchSubscription`
 - `Transaction`
 - `TransactionChain`
 - `TraversalSubscription`
@@ -315,6 +316,7 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `error_pull_response`
 - `error_watch_event`
 - `merge_remote_records_fan_in`
+- `merge_remote_text_search_fan_in`
 - `PullChunk`
 - `PullRequest`
 - `PullRequestKind`
@@ -327,10 +329,12 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `RemotePath`
 - `RemotePeerFailure`
 - `RemotePeerRecords`
+- `RemotePeerTextSearch`
 - `RemoteRecordConflict`
 - `RemoteRecordConflictSource`
 - `RemoteRecordsFanIn`
 - `RemoteResult`
+- `RemoteTextSearchFanIn`
 - `RemoteWatchMessage`
 - `RemoteWatchSubscription`
 - `stable_content_hash`
@@ -339,6 +343,30 @@ This page covers the public Rust crate surface. The site also serves the full bu
 - `WatchEvent`
 - `WatchRequest`
 - `WatchRequestKind`
+
+### `text_search`
+
+- `SearchStalePolicy`
+- `TextAnalyzerConfig`
+- `TextAnalyzerKind`
+- `TextCacheFiles`
+- `TextCacheManifest`
+- `TextCandidatePolicy`
+- `TextCollectionConfig`
+- `TextDocument`
+- `TextFieldConfig`
+- `TextFieldHit`
+- `TextIndexState`
+- `TextIndexStats`
+- `TextScoreScope`
+- `TextSearchBackend`
+- `TextSearchMatch`
+- `TextSearchMode`
+- `TextSearchResult`
+- `TextSearchSource`
+- `TextSearchSourceSummary`
+- `TextSearchSpec`
+- `TextSnippet`
 
 ### `transport`
 

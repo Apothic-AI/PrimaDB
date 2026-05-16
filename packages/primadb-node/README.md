@@ -22,6 +22,7 @@ Current surface:
 - peer-agnostic relay/mesh watches through `watchGet(...)`, `watchMap(...)`, `watchQuery(...)`, `watchLex(...)`, `watchRecords(...)`, `watchNode(...)`, and `watchSnapshot(...)`
 - application RouteEnvelope payloads through `publishApplication(...)`, `sendApplication(...)`, and `subscribeApplications(...)`
 - source-tagged multi-peer record fan-in through `recordsFanIn(...)` and `watchRecordsFanIn(...)`
+- BM25 text search through `textSearch(...)`, `watchTextSearch(...)`, `textSearchFanIn(...)`, and `watchTextSearchFanIn(...)`
 - explicit peer-targeted pulls and watches through `remoteGet(...)`, `remoteQuery(...)`, `remoteLex(...)`, `remoteRecords(...)`, `remoteNode(...)`, `remoteSnapshot(...)`, `watchRemoteGet(...)`, `watchRemoteMap(...)`, `watchRemoteQuery(...)`, `watchRemoteLex(...)`, `watchRemoteRecords(...)`, `watchRemoteNode(...)`, and `watchRemoteSnapshot(...)`
 - authenticated relay/mesh session identity through `generateIdentity()`, `authenticateLocalUser(...)`, `sessionAuth` config, and `context.verifiedIdentity`
 - Argon2id password-derived secret-box keys through `derivePasswordKey(...)`, usable with `setSnapshotEncryptionKey(...)` and `setTransportEncryptionKey(...)`

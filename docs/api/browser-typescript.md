@@ -1001,6 +1001,84 @@ export interface RecordScanResult {
 }
 ```
 
+#### `RemotePath`
+
+Kind: interface
+
+```ts
+export interface RemotePath {
+    anchor: string;
+    segments?: string[];
+}
+```
+
+#### `QueryOrder`
+
+Kind: interface
+
+```ts
+export interface QueryOrder {
+    path: string;
+    direction?: "asc" | "desc";
+}
+```
+
+#### `QueryFilter`
+
+Kind: type alias
+
+```ts
+export type QueryFilter = {
+    kind: "eq";
+    path: string;
+    value: JsonValue;
+} | {
+    kind: "ne";
+    path: string;
+    value: JsonValue;
+} | {
+    kind: "gt";
+    path: string;
+    value: JsonValue;
+} | {
+    kind: "gte";
+    path: string;
+    value: JsonValue;
+} | {
+    kind: "lt";
+    path: string;
+    value: JsonValue;
+} | {
+    kind: "lte";
+    path: string;
+    value: JsonValue;
+} | {
+    kind: "prefix";
+    path: string;
+    value: string;
+} | {
+    kind: "contains";
+    path: string;
+    value: string;
+} | {
+    kind: "exists";
+    path: string;
+};
+```
+
+#### `QuerySpec`
+
+Kind: interface
+
+```ts
+export interface QuerySpec {
+    filters?: QueryFilter[];
+    order?: QueryOrder | null;
+    limit?: number | null;
+    offset?: number;
+}
+```
+
 #### `RemoteInterestTarget`
 
 Kind: type alias
@@ -1020,6 +1098,14 @@ export interface RemoteInterestPolicy {
     peers?: string[];
     requireCapability?: boolean;
 }
+```
+
+#### `RouteTransportKind`
+
+Kind: type alias
+
+```ts
+export type RouteTransportKind = "web_socket" | "moq" | "web_rtc" | "broadcast_channel" | "memory" | "unknown";
 ```
 
 #### `RecordMutation`
@@ -1231,6 +1317,217 @@ export interface VectorSearchResult {
     state: VectorManagerState;
     stale: boolean;
     approximateReason?: string | null;
+}
+```
+
+#### `TextFieldConfig`
+
+Kind: interface
+
+```ts
+export interface TextFieldConfig {
+    name: string;
+    weight?: number;
+    indexed?: boolean;
+    stored?: boolean;
+}
+```
+
+#### `TextAnalyzerConfig`
+
+Kind: interface
+
+```ts
+export interface TextAnalyzerConfig {
+    kind?: "simple";
+    lowercase?: boolean;
+    unicodeNormalization?: string | null;
+    stopwords?: string | null;
+    stemming?: string | null;
+    version?: number;
+}
+```
+
+#### `TextCollectionConfig`
+
+Kind: interface
+
+```ts
+export interface TextCollectionConfig {
+    fields?: TextFieldConfig[];
+    analyzer?: TextAnalyzerConfig;
+    k1?: number;
+    b?: number;
+    metadata?: Record<string, JsonValue>;
+}
+```
+
+#### `TextDocument`
+
+Kind: interface
+
+```ts
+export interface TextDocument {
+    id: string;
+    fields?: Record<string, string>;
+    metadata?: Record<string, JsonValue>;
+}
+```
+
+#### `TextSearchSource`
+
+Kind: type alias
+
+```ts
+export type TextSearchSource = string | {
+    kind: "collection";
+    collection: string;
+} | {
+    kind: "query";
+    path: RemotePath;
+    spec: QuerySpec;
+} | {
+    kind: "records";
+    scan: RecordScan;
+};
+```
+
+#### `TextSearchSpec`
+
+Kind: interface
+
+```ts
+export interface TextSearchSpec {
+    limit?: number | null;
+    offset?: number | null;
+    fields?: string[] | null;
+    includeMetadata?: boolean;
+    includeSnippets?: boolean;
+    explain?: boolean;
+    exact?: boolean;
+    stalePolicy?: "allow" | "refresh" | "reject";
+    candidateLimit?: number | null;
+    candidatePolicy?: "reject_paginated_query" | "allow_preselected_candidates";
+}
+```
+
+#### `TextSearchMatch`
+
+Kind: interface
+
+```ts
+export interface TextSearchMatch {
+    id: string;
+    score: number;
+    fieldHits: Array<{
+        field: string;
+        terms: string[];
+        score: number;
+    }>;
+    metadata?: Record<string, JsonValue> | null;
+    snippets?: Array<{
+        field: string;
+        text: string;
+    }> | null;
+    explanation?: string | null;
+}
+```
+
+#### `TextSearchResult`
+
+Kind: interface
+
+```ts
+export interface TextSearchResult {
+    source: JsonValue;
+    query: string;
+    matches: TextSearchMatch[];
+    backend: "exact";
+    exact: boolean;
+    stale: boolean;
+    candidateCount: number;
+    searchedCount: number;
+    truncatedCandidates: boolean;
+    scoreScope: "collection" | "candidate_set" | "peer_local";
+}
+```
+
+#### `TextIndexStats`
+
+Kind: interface
+
+```ts
+export interface TextIndexStats {
+    documentCount: number;
+    deletedCount: number;
+    termCount: number;
+    totalTerms: number;
+    averageFieldLength: number;
+    state: "ready" | "rebuilding" | "stale" | "failed";
+    sourceHash: string;
+}
+```
+
+#### `RemotePeerFailure`
+
+Kind: interface
+
+```ts
+export interface RemotePeerFailure {
+    peerId: string;
+    transport: RouteTransportKind;
+    message: string;
+}
+```
+
+#### `RemotePeerRecords`
+
+Kind: interface
+
+```ts
+export interface RemotePeerRecords {
+    peerId: string;
+    transport: RouteTransportKind;
+    result: RecordScanResult;
+}
+```
+
+#### `RemotePeerTextSearch`
+
+Kind: interface
+
+```ts
+export interface RemotePeerTextSearch {
+    peerId: string;
+    transport: RouteTransportKind;
+    result: TextSearchResult;
+}
+```
+
+#### `RemoteRecordsFanIn`
+
+Kind: interface
+
+```ts
+export interface RemoteRecordsFanIn {
+    requestId: string;
+    records: RemotePeerRecords[];
+    failures: RemotePeerFailure[];
+    merged: RecordScanResult;
+    conflicts: Array<Record<string, JsonValue>>;
+}
+```
+
+#### `RemoteTextSearchFanIn`
+
+Kind: interface
+
+```ts
+export interface RemoteTextSearchFanIn {
+    requestId: string;
+    results: RemotePeerTextSearch[];
+    failures: RemotePeerFailure[];
+    merged: TextSearchResult;
 }
 ```
 
