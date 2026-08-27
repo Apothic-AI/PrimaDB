@@ -2,14 +2,15 @@
 
 ## 2026-08-27
 
-- Added `CompactedOperations`, retaining the ordered operation vector and a
-  typed `HashMap` index for O(1)-average compaction.
-- Preserved the original queue slot when a newer operation replaces an older
-  operation with the same field or set-member identity.
-- Rebuilt or maintained the index across initialization, snapshot and metadata
-  restoration, transaction rollback, pending drains, and durable prefix drains.
-- Added structural tests covering ordering, revisions, typed-key delimiter
-  safety, restoration, drain maintenance, and 20,000-key batches.
-- Verification completed: `cargo fmt -- --check`, 102 default tests,
-  all-target/all-feature checking, and wasm32 checking all pass. The
-  all-target/all-feature check reports one pre-existing dead-code warning.
+- Added a full-build materialization cache shared by every direct-index root.
+- Cached only completed acyclic subgraphs; cycle-tainted traversals continue to
+  materialize per root so back-edge truncation remains root-relative.
+- Kept scalar inspection in the materialization path, including crypto signed
+  value verification and auth metadata generation.
+- Added focused tests for shared fan-out correctness, a 512-root/24-node shared
+  chain with one materialization visit per graph node, root-relative cycles,
+  and signed scalar indexing under `crypto`.
+- Verification completed: formatting, 110 default library tests, 139
+  all-feature library tests, 139 all-target/all-feature tests, and
+  all-target/all-feature checking pass. The check reports one pre-existing
+  dead-code warning.
