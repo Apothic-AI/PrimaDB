@@ -4,7 +4,7 @@ use crate::error::{PrimadbError, Result};
 use crate::record::{RecordEntry, RecordValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 #[cfg(feature = "vector-edgevec")]
 use std::sync::Arc;
 
@@ -264,6 +264,39 @@ pub(crate) struct VectorCollectionCache {
     pub source_hash: String,
     #[cfg(feature = "vector-edgevec")]
     pub ann: Option<EdgeVecVectorIndex>,
+}
+
+struct PreparedVectorFilter<'a> {
+    filter: Option<&'a VectorFilter>,
+    ids: Option<BTreeSet<&'a str>>,
+}
+
+struct ExactCandidate<'a> {
+    id: &'a str,
+    entry: &'a VectorCacheEntry,
+    distance: f32,
+}
+
+impl PartialEq for ExactCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.distance.total_cmp(&other.distance) == std::cmp::Ordering::Equal && self.id == other.id
+    }
+}
+
+impl Eq for ExactCandidate<'_> {}
+
+impl PartialOrd for ExactCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ExactCandidate<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.distance
+            .total_cmp(&other.distance)
+            .then_with(|| self.id.cmp(other.id))
+    }
 }
 
 #[cfg(feature = "vector-edgevec")]
@@ -619,6 +652,7 @@ impl EdgeVecVectorIndex {
             .search(&query_for_index, search_k, &self.inner.storage)
             .map_err(|error| PrimadbError::Message(format!("edgevec search failed: {error}")))?;
 
+        let filter = prepare_vector_filter(spec.filter.as_ref());
         let mut matches = Vec::with_capacity(spec.limit);
         for candidate in candidates {
             let Some(key) = self.inner.vector_id_to_key.get(&candidate.vector_id.0) else {
@@ -627,7 +661,7 @@ impl EdgeVecVectorIndex {
             let Some(entry) = cache.entries.get(key) else {
                 continue;
             };
-            if !vector_filter_matches(key, entry.metadata.as_ref(), spec.filter.as_ref()) {
+            if !vector_filter_matches(key, entry.metadata.as_ref(), &filter) {
                 continue;
             }
             matches.push(VectorMatch {
@@ -877,29 +911,47 @@ pub(crate) fn exact_search(
     validate_vector(query, cache.config.dim)?;
     validate_search_spec(spec)?;
 
-    let mut matches = cache
-        .entries
-        .iter()
-        .filter(|(id, entry)| {
-            vector_filter_matches(id, entry.metadata.as_ref(), spec.filter.as_ref())
-        })
-        .map(|(id, entry)| VectorMatch {
-            id: id.clone(),
+    let filter = prepare_vector_filter(spec.filter.as_ref());
+    let mut candidates = BinaryHeap::with_capacity(spec.limit.min(cache.entries.len()));
+    for (id, entry) in &cache.entries {
+        if !vector_filter_matches(id, entry.metadata.as_ref(), &filter) {
+            continue;
+        }
+        let candidate = ExactCandidate {
+            id,
+            entry,
             distance: vector_distance(cache.config.metric, query, &entry.vector),
-            metadata: spec
-                .include_metadata
-                .then(|| entry.metadata.clone())
-                .flatten(),
-            vector: spec.include_vector.then(|| entry.vector.clone()),
-        })
-        .collect::<Vec<_>>();
+        };
+        if candidates.len() < spec.limit {
+            candidates.push(candidate);
+        } else if candidate
+            < *candidates
+                .peek()
+                .expect("a full top-k heap must have a root")
+        {
+            candidates.pop();
+            candidates.push(candidate);
+        }
+    }
 
-    matches.sort_by(|left, right| {
+    let mut candidates = candidates.into_vec();
+    candidates.sort_unstable_by(|left, right| {
         left.distance
             .total_cmp(&right.distance)
-            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.id.cmp(right.id))
     });
-    matches.truncate(spec.limit);
+    let matches = candidates
+        .into_iter()
+        .map(|candidate| VectorMatch {
+            id: candidate.id.to_owned(),
+            distance: candidate.distance,
+            metadata: spec
+                .include_metadata
+                .then(|| candidate.entry.metadata.clone())
+                .flatten(),
+            vector: spec.include_vector.then(|| candidate.entry.vector.clone()),
+        })
+        .collect();
 
     let stale = cache.state != VectorManagerState::Ready;
     Ok(VectorSearchResult {
@@ -945,12 +997,21 @@ pub fn vector_distance(metric: VectorMetric, query: &[f32], vector: &[f32]) -> f
     }
 }
 
+fn prepare_vector_filter(filter: Option<&VectorFilter>) -> PreparedVectorFilter<'_> {
+    PreparedVectorFilter {
+        filter,
+        ids: filter
+            .filter(|filter| !filter.ids.is_empty())
+            .map(|filter| filter.ids.iter().map(String::as_str).collect()),
+    }
+}
+
 fn vector_filter_matches(
     id: &str,
     metadata: Option<&JsonValue>,
-    filter: Option<&VectorFilter>,
+    prepared: &PreparedVectorFilter<'_>,
 ) -> bool {
-    let Some(filter) = filter else {
+    let Some(filter) = prepared.filter else {
         return true;
     };
     if let Some(prefix) = &filter.id_prefix
@@ -958,12 +1019,7 @@ fn vector_filter_matches(
     {
         return false;
     }
-    if !filter.ids.is_empty() {
-        let ids = filter
-            .ids
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
+    if let Some(ids) = &prepared.ids {
         if !ids.contains(id) {
             return false;
         }
@@ -1022,5 +1078,123 @@ pub(crate) fn chunk_from_record(entry: &RecordEntry) -> Result<(VectorChunkHeade
             "vector chunk record `{}` is not bytes",
             entry.key
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VectorCollectionCache, exact_search};
+    use crate::{VectorCollectionConfig, VectorFilter, VectorMetric, VectorSearchSpec};
+    use serde_json::json;
+
+    fn cache_with_entries() -> VectorCollectionCache {
+        let mut cache = VectorCollectionCache::empty(VectorCollectionConfig {
+            dim: 1,
+            metric: VectorMetric::L2,
+            backend: None,
+            hnsw: None,
+            chunking: Default::default(),
+        });
+        for (id, value, group) in [
+            ("alpha", 1.0, "keep"),
+            ("beta", 1.0, "keep"),
+            ("far", 5.0, "keep"),
+            ("zero", 0.0, "drop"),
+        ] {
+            cache.entries.insert(
+                id.to_owned(),
+                super::VectorCacheEntry {
+                    vector: vec![value],
+                    metadata: Some(json!({"group": group})),
+                    write_id: String::new(),
+                    checksum: String::new(),
+                },
+            );
+        }
+        cache
+    }
+
+    #[test]
+    fn exact_top_k_preserves_distance_and_id_tie_order_with_filters() {
+        let cache = cache_with_entries();
+        let result = exact_search(
+            &cache,
+            &[0.0],
+            &VectorSearchSpec {
+                limit: 2,
+                ef: None,
+                filter: Some(VectorFilter {
+                    ids: vec!["far".to_owned(), "alpha".to_owned(), "beta".to_owned()],
+                    ..Default::default()
+                }),
+                include_vector: true,
+                include_metadata: true,
+                exact: true,
+                stale_policy: Default::default(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            result
+                .matches
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        assert_eq!(result.matches[0].distance, 1.0);
+        assert_eq!(result.matches[0].vector, Some(vec![1.0]));
+        assert_eq!(
+            result.matches[0].metadata.as_ref().unwrap()["group"],
+            "keep"
+        );
+    }
+
+    #[test]
+    fn exact_top_k_scans_large_corpus_without_materializing_non_matches() {
+        let mut cache = VectorCollectionCache::empty(VectorCollectionConfig {
+            dim: 1,
+            metric: VectorMetric::L2,
+            backend: None,
+            hnsw: None,
+            chunking: Default::default(),
+        });
+        for index in 0..20_000 {
+            cache.entries.insert(
+                format!("item-{index:05}"),
+                super::VectorCacheEntry {
+                    vector: vec![index as f32 + 1.0],
+                    metadata: Some(json!({"index": index})),
+                    write_id: String::new(),
+                    checksum: String::new(),
+                },
+            );
+        }
+
+        let result = exact_search(
+            &cache,
+            &[0.0],
+            &VectorSearchSpec {
+                limit: 3,
+                ef: None,
+                filter: None,
+                include_vector: false,
+                include_metadata: false,
+                exact: true,
+                stale_policy: Default::default(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.matches.len(), 3);
+        assert_eq!(result.matches[0].id, "item-00000");
+        assert_eq!(result.matches[2].id, "item-00002");
+        assert!(
+            result
+                .matches
+                .iter()
+                .all(|item| item.metadata.is_none() && item.vector.is_none())
+        );
     }
 }
