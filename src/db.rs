@@ -85,6 +85,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
+const LOCAL_WATCH_QUEUE_CAPACITY: usize = 64;
+
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 const PARALLEL_CHUNK_MIN_LEN: usize = 512;
 
@@ -276,6 +278,8 @@ struct Inner {
     transaction_journal: Option<TransactionJournal>,
     #[cfg(test)]
     query_candidate_projections: usize,
+    #[cfg(test)]
+    watch_recomputations: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -608,17 +612,20 @@ impl ChangeImpact {
         }
     }
 
-    fn from_ops(ops: &[Operation]) -> Self {
+    fn from_ops(ops: &[Operation], nodes: &BTreeMap<NodeId, NodeState>) -> Self {
         let mut touched_paths = BTreeSet::new();
         let mut touched_record_keys = BTreeSet::new();
         let mut records_changed = false;
+        let mut record_keys_complete = true;
         for op in ops {
             touched_paths.insert(operation_touched_path(op));
             if operation_is_record_op(op) {
                 records_changed = true;
-            }
-            if let Some(key) = operation_touched_record_key(op) {
-                touched_record_keys.insert(key);
+                if let Some(key) = operation_touched_record_key(op, nodes) {
+                    touched_record_keys.insert(key);
+                } else {
+                    record_keys_complete = false;
+                }
             }
         }
         Self {
@@ -626,7 +633,11 @@ impl ChangeImpact {
             full_refresh: false,
             touched_paths: touched_paths.into_iter().collect(),
             records_changed,
-            touched_record_keys: touched_record_keys.into_iter().collect(),
+            touched_record_keys: if record_keys_complete {
+                touched_record_keys.into_iter().collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -822,6 +833,8 @@ impl Primadb {
                 transaction_journal: None,
                 #[cfg(test)]
                 query_candidate_projections: 0,
+                #[cfg(test)]
+                watch_recomputations: 0,
             })),
         }
     }
@@ -1575,7 +1588,7 @@ impl Primadb {
                         Ok(value),
                         member_ids,
                         operation_count,
-                        ChangeImpact::from_ops(&ops),
+                        ChangeImpact::from_ops(&ops, &inner.nodes),
                     )
                 }
                 Err(error) => {
@@ -1943,9 +1956,9 @@ impl Primadb {
     where
         I: IntoIterator<Item = Operation>,
     {
-        let mut applied = 0;
-        let mut applied_ops = Vec::new();
-        {
+        let (applied, impact) = {
+            let mut applied = 0;
+            let mut applied_ops = Vec::new();
             let mut inner = self.inner.lock().unwrap();
             for op in ops {
                 if inner.apply_operation_internal(op.clone(), OperationOrigin::Remote) {
@@ -1953,9 +1966,11 @@ impl Primadb {
                     applied_ops.push(op);
                 }
             }
-        }
+            let impact = ChangeImpact::from_ops(&applied_ops, &inner.nodes);
+            (applied, impact)
+        };
         if applied > 0 {
-            self.finalize_change(ChangeImpact::from_ops(&applied_ops))?;
+            self.finalize_change(impact)?;
         }
         Ok(applied)
     }
@@ -2474,7 +2489,7 @@ impl Primadb {
     }
 
     pub fn subscribe_changes(&self) -> ChangeSubscription {
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = async_channel::bounded(LOCAL_WATCH_QUEUE_CAPACITY);
         let (id, event) = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_change_subscription_id = inner.next_change_subscription_id.saturating_add(1);
@@ -2996,7 +3011,7 @@ impl Primadb {
     fn finalize_local_change(&self) -> Result<()> {
         let impact = {
             let inner = self.inner.lock().unwrap();
-            ChangeImpact::from_ops(inner.unflushed_ops.as_slice())
+            ChangeImpact::from_ops(inner.unflushed_ops.as_slice(), &inner.nodes)
         };
         self.finalize_change(impact)
     }
@@ -3314,7 +3329,7 @@ impl Primadb {
         let path_key = watch_path_key(anchor, segments);
         let last_hash = crate::stable_content_hash(&snapshot);
 
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = async_channel::bounded(LOCAL_WATCH_QUEUE_CAPACITY);
         let id = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_subscription_id = inner.next_subscription_id.saturating_add(1);
@@ -3352,7 +3367,7 @@ impl Primadb {
         let dependency_paths = traversal_dependency_paths(anchor, segments, &result);
         let last_hash = crate::stable_content_hash(&result);
 
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = async_channel::bounded(LOCAL_WATCH_QUEUE_CAPACITY);
         let id = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_traversal_subscription_id =
@@ -3386,7 +3401,7 @@ impl Primadb {
         let result = self.scan_records(scan.clone())?;
         let last_hash = crate::stable_content_hash(&result);
 
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = async_channel::bounded(LOCAL_WATCH_QUEUE_CAPACITY);
         let id = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_record_subscription_id = inner.next_record_subscription_id.saturating_add(1);
@@ -3421,7 +3436,7 @@ impl Primadb {
         let result = self.search_vectors(&collection, &query, spec.clone())?;
         let last_hash = crate::stable_content_hash(&result);
 
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = async_channel::bounded(LOCAL_WATCH_QUEUE_CAPACITY);
         let id = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_vector_subscription_id = inner.next_vector_subscription_id.saturating_add(1);
@@ -3458,7 +3473,7 @@ impl Primadb {
         let result = self.execute_text_search(source.clone(), &query, spec.clone())?;
         let last_hash = crate::stable_content_hash(&result);
 
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = async_channel::bounded(LOCAL_WATCH_QUEUE_CAPACITY);
         let id = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_text_subscription_id = inner.next_text_subscription_id.saturating_add(1);
@@ -3724,18 +3739,28 @@ impl Primadb {
 
         let mut stale = Vec::new();
         let mut hash_updates = Vec::new();
+        let mut snapshots: BTreeMap<Vec<u8>, Option<JsonValue>> = BTreeMap::new();
         for (id, watcher) in watchers {
             if !event.full_refresh && !watch_change_overlaps(&watcher.path_key, event) {
                 continue;
             }
-            let snapshot = self
-                .materialize(&watcher.anchor, &watcher.segments)
-                .unwrap_or(None);
+            let key = watch_key(&(watcher.anchor.clone(), watcher.segments.clone()));
+            let snapshot = if let Some(snapshot) = snapshots.get(&key) {
+                snapshot.clone()
+            } else {
+                let snapshot = self
+                    .materialize(&watcher.anchor, &watcher.segments)
+                    .unwrap_or(None);
+                #[cfg(test)]
+                self.note_watch_recomputation();
+                snapshots.insert(key, snapshot.clone());
+                snapshot
+            };
             let snapshot_hash = crate::stable_content_hash(&snapshot);
             if snapshot_hash == watcher.last_hash {
                 continue;
             }
-            if watcher.sender.try_send(snapshot).is_err() {
+            if !send_watch_update(&watcher.sender, snapshot) {
                 stale.push(id);
             } else {
                 hash_updates.push((id, snapshot_hash));
@@ -3769,16 +3794,26 @@ impl Primadb {
 
         let mut stale = Vec::new();
         let mut hash_updates = Vec::new();
+        let mut results: BTreeMap<Vec<u8>, RecordScanResult> = BTreeMap::new();
         for (id, watcher) in watchers {
             if !record_watch_change_overlaps(&watcher.scan, event) {
                 continue;
             }
-            let result = self.scan_records(watcher.scan.clone())?;
+            let key = watch_key(&watcher.scan);
+            let result = if let Some(result) = results.get(&key) {
+                result.clone()
+            } else {
+                let result = self.scan_records(watcher.scan.clone())?;
+                #[cfg(test)]
+                self.note_watch_recomputation();
+                results.insert(key, result.clone());
+                result
+            };
             let result_hash = crate::stable_content_hash(&result);
             if result_hash == watcher.last_hash {
                 continue;
             }
-            if watcher.sender.try_send(result).is_err() {
+            if !send_watch_update(&watcher.sender, result) {
                 stale.push(id);
             } else {
                 hash_updates.push((id, result_hash));
@@ -3812,17 +3847,31 @@ impl Primadb {
 
         let mut stale = Vec::new();
         let mut hash_updates = Vec::new();
+        let mut results: BTreeMap<Vec<u8>, VectorSearchResult> = BTreeMap::new();
         for (id, watcher) in watchers {
             if !vector_watch_change_overlaps(&watcher.collection, event) {
                 continue;
             }
-            let result =
-                self.search_vectors(&watcher.collection, &watcher.query, watcher.spec.clone())?;
+            let key = watch_key(&(
+                watcher.collection.clone(),
+                watcher.query.clone(),
+                watcher.spec.clone(),
+            ));
+            let result = if let Some(result) = results.get(&key) {
+                result.clone()
+            } else {
+                let result =
+                    self.search_vectors(&watcher.collection, &watcher.query, watcher.spec.clone())?;
+                #[cfg(test)]
+                self.note_watch_recomputation();
+                results.insert(key, result.clone());
+                result
+            };
             let result_hash = crate::stable_content_hash(&result);
             if result_hash == watcher.last_hash {
                 continue;
             }
-            if watcher.sender.try_send(result).is_err() {
+            if !send_watch_update(&watcher.sender, result) {
                 stale.push(id);
             } else {
                 hash_updates.push((id, result_hash));
@@ -3856,20 +3905,34 @@ impl Primadb {
 
         let mut stale = Vec::new();
         let mut hash_updates = Vec::new();
+        let mut results: BTreeMap<Vec<u8>, TextSearchResult> = BTreeMap::new();
         for (id, watcher) in watchers {
             if !text_watch_change_overlaps(&watcher.source, event) {
                 continue;
             }
-            let result = self.execute_text_search(
+            let key = watch_key(&(
                 watcher.source.clone(),
-                &watcher.query,
+                watcher.query.clone(),
                 watcher.spec.clone(),
-            )?;
+            ));
+            let result = if let Some(result) = results.get(&key) {
+                result.clone()
+            } else {
+                let result = self.execute_text_search(
+                    watcher.source.clone(),
+                    &watcher.query,
+                    watcher.spec.clone(),
+                )?;
+                #[cfg(test)]
+                self.note_watch_recomputation();
+                results.insert(key, result.clone());
+                result
+            };
             let result_hash = crate::stable_content_hash(&result);
             if result_hash == watcher.last_hash {
                 continue;
             }
-            if watcher.sender.try_send(result).is_err() {
+            if !send_watch_update(&watcher.sender, result) {
                 stale.push(id);
             } else {
                 hash_updates.push((id, result_hash));
@@ -3903,18 +3966,34 @@ impl Primadb {
 
         let mut stale = Vec::new();
         let mut updates = Vec::new();
+        let mut results: BTreeMap<Vec<u8>, (TraversalResult, BTreeSet<String>)> = BTreeMap::new();
         for (id, watcher) in watchers {
             if !event.full_refresh && !traversal_watch_change_overlaps(&watcher, event) {
                 continue;
             }
-            let result = self.traverse_at(&watcher.anchor, &watcher.segments, &watcher.spec)?;
+            let key = watch_key(&(
+                watcher.anchor.clone(),
+                watcher.segments.clone(),
+                watcher.spec.clone(),
+            ));
+            let (result, dependency_paths) = if let Some((result, dependency_paths)) =
+                results.get(&key)
+            {
+                (result.clone(), dependency_paths.clone())
+            } else {
+                let result = self.traverse_at(&watcher.anchor, &watcher.segments, &watcher.spec)?;
+                #[cfg(test)]
+                self.note_watch_recomputation();
+                let dependency_paths =
+                    traversal_dependency_paths(&watcher.anchor, &watcher.segments, &result);
+                results.insert(key, (result.clone(), dependency_paths.clone()));
+                (result, dependency_paths)
+            };
             let result_hash = crate::stable_content_hash(&result);
             if result_hash == watcher.last_hash {
                 continue;
             }
-            let dependency_paths =
-                traversal_dependency_paths(&watcher.anchor, &watcher.segments, &result);
-            if watcher.sender.try_send(result).is_err() {
+            if !send_watch_update(&watcher.sender, result) {
                 stale.push(id);
             } else {
                 updates.push((id, result_hash, dependency_paths));
@@ -3937,6 +4016,17 @@ impl Primadb {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn note_watch_recomputation(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.watch_recomputations = inner.watch_recomputations.saturating_add(1);
+    }
+
+    #[cfg(test)]
+    fn watch_recomputation_count(&self) -> usize {
+        self.inner.lock().unwrap().watch_recomputations
+    }
+
     fn notify_change_subscribers(&self, event: ChangeEvent) -> Result<()> {
         let (watchers, pending_ops): (Vec<(u64, ChangeWatcher)>, usize) = {
             let inner = self.inner.lock().unwrap();
@@ -3954,7 +4044,7 @@ impl Primadb {
         let mut event = event;
         event.pending_ops = pending_ops;
         for (id, watcher) in watchers {
-            if watcher.sender.try_send(event.clone()).is_err() {
+            if !send_watch_update(&watcher.sender, event.clone()) {
                 stale.push(id);
             }
         }
@@ -7623,15 +7713,33 @@ fn operation_is_record_op(op: &Operation) -> bool {
     }
 }
 
-fn operation_touched_record_key(op: &Operation) -> Option<String> {
+fn operation_touched_record_key(
+    op: &Operation,
+    nodes: &BTreeMap<NodeId, NodeState>,
+) -> Option<String> {
     match &op.action {
         OperationAction::SetField {
             node,
             field,
             value: OperationValue::Scalar(JsonValue::String(key)),
         } if crate::is_record_node_id(node) && field == "key" => Some(key.clone()),
-        _ => None,
+        _ => {
+            let node = operation_source_node(op);
+            crate::is_record_node_id(node)
+                .then(|| nodes.get(node).and_then(crate::record_key_from_node_state))
+                .flatten()
+        }
     }
+}
+
+fn watch_key<T: Serialize>(value: &T) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap_or_default()
+}
+
+fn send_watch_update<T>(sender: &Sender<T>, value: T) -> bool {
+    // Slow local consumers keep the newest state; force_send bounds the queue
+    // while preserving closed-channel detection for stale watcher cleanup.
+    sender.force_send(value).is_ok()
 }
 
 fn operation_source_node(op: &Operation) -> &str {
@@ -8643,7 +8751,10 @@ fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompactedOperations, NodeFetchScheduler, Primadb, build_pull_responses};
+    use super::{
+        CompactedOperations, LOCAL_WATCH_QUEUE_CAPACITY, NodeFetchScheduler, Primadb,
+        build_pull_responses,
+    };
     use crate::{
         ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PrimadbError,
         PrimadbLimits, PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter,
@@ -9265,6 +9376,152 @@ mod tests {
         )?;
         let updated = watch.recv_blocking().unwrap();
         assert_eq!(updated.matches[0].id, "beta");
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_text_watch_invalidates_existing_record_value_changes() -> Result<()> {
+        let db = Primadb::with_replica_id("text-watch-indexed");
+        db.create_text_collection("notes", TextCollectionConfig::default())?;
+        db.create_text_collection("archive", TextCollectionConfig::default())?;
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "alpha".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "old content".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+        db.put_text_document(
+            "archive",
+            TextDocument {
+                id: "old".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "archived content".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+
+        let watch = db.watch_text_search("notes", "fresh signal", TextSearchSpec::default())?;
+        let unrelated_watch =
+            db.watch_text_search("archive", "fresh signal", TextSearchSpec::default())?;
+        assert!(watch.recv_blocking().unwrap().matches.is_empty());
+        assert!(unrelated_watch.recv_blocking().unwrap().matches.is_empty());
+        assert!(watch.try_recv().is_none());
+        assert!(unrelated_watch.try_recv().is_none());
+        let recomputations_before_update = db.watch_recomputation_count();
+
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "alpha".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "fresh signal".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+        let update = watch.recv_blocking().expect("indexed text update");
+        assert_eq!(
+            update.matches.first().map(|item| item.id.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            db.watch_recomputation_count() - recomputations_before_update,
+            1
+        );
+        assert!(unrelated_watch.try_recv().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn equivalent_record_watches_share_one_recomputation() -> Result<()> {
+        let db = Primadb::with_replica_id("watch-coalesce");
+        let scan = RecordScan {
+            prefix: Some("notes/".to_owned()),
+            ..RecordScan::default()
+        };
+        let first = db.watch_records(scan.clone())?;
+        let second = db.watch_records(scan)?;
+        assert!(first.recv_blocking().unwrap().entries.is_empty());
+        assert!(second.recv_blocking().unwrap().entries.is_empty());
+        let before = db.watch_recomputation_count();
+
+        db.put_record_json("notes/1", json!({"body": "first"}))?;
+        assert_eq!(db.watch_recomputation_count() - before, 1);
+        assert_eq!(first.recv_blocking().unwrap().entries.len(), 1);
+        assert_eq!(second.recv_blocking().unwrap().entries.len(), 1);
+        assert!(first.try_recv().is_none());
+        assert!(second.try_recv().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_vector_watch_invalidates_existing_record_value_changes() -> Result<()> {
+        let db = Primadb::with_replica_id("vector-watch-indexed");
+        for collection in ["docs", "archive"] {
+            db.create_vector_collection(
+                collection,
+                VectorCollectionConfig {
+                    dim: 2,
+                    metric: VectorMetric::L2,
+                    backend: None,
+                    hnsw: None,
+                    chunking: Default::default(),
+                },
+            )?;
+        }
+        db.put_vector("docs", "alpha", vec![10.0, 0.0], None)?;
+        db.put_vector("archive", "old", vec![20.0, 0.0], None)?;
+
+        let watch = db.watch_vector_search("docs", [0.0, 0.0], vector_search_spec())?;
+        let unrelated = db.watch_vector_search("archive", [0.0, 0.0], vector_search_spec())?;
+        let initial = watch.recv_blocking().expect("initial vector result");
+        assert_eq!(initial.matches[0].distance, 10.0);
+        assert_eq!(unrelated.recv_blocking().unwrap().matches[0].distance, 20.0);
+        let recomputations_before_update = db.watch_recomputation_count();
+
+        db.put_vector("docs", "alpha", vec![1.0, 0.0], None)?;
+        let update = watch.recv_blocking().expect("indexed vector update");
+        assert_eq!(update.matches[0].distance, 1.0);
+        assert_eq!(
+            db.watch_recomputation_count() - recomputations_before_update,
+            1
+        );
+        assert!(unrelated.try_recv().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn local_watch_queue_is_bounded_and_keeps_latest_state() -> Result<()> {
+        let db = Primadb::with_replica_id("watch-backpressure");
+        let watch = db.root("queue").field("value").subscribe()?;
+        assert_eq!(watch.recv_blocking(), Some(None));
+
+        for value in 0..(LOCAL_WATCH_QUEUE_CAPACITY + 16) {
+            db.root("queue").field("value").put(json!(value))?;
+        }
+        assert!(watch.receiver().len() <= LOCAL_WATCH_QUEUE_CAPACITY);
+
+        let mut values = Vec::new();
+        while let Some(Some(value)) = watch.try_recv() {
+            values.push(value.as_i64().expect("numeric watch value"));
+        }
+        assert_eq!(
+            values.last().copied(),
+            Some((LOCAL_WATCH_QUEUE_CAPACITY + 15) as i64)
+        );
+        assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
+        Ok(())
+    }
+
+    #[test]
+    fn closed_local_watch_is_removed_as_stale() -> Result<()> {
+        let db = Primadb::with_replica_id("watch-stale");
+        let watch = db.root("stale").subscribe()?;
+        assert_eq!(db.stats().subscriptions, 1);
+        assert_eq!(watch.recv_blocking(), Some(None));
+        watch.receiver().close();
+
+        db.root("stale").put(json!({"value": true}))?;
+        assert_eq!(db.stats().subscriptions, 0);
         Ok(())
     }
 
