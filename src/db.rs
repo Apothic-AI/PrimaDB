@@ -55,9 +55,9 @@ use crate::traversal::{
 };
 use crate::value::{FieldState, FieldValue, NodeId, NodeState, SetState};
 use crate::vector::{
-    VectorBackendKind, VectorCacheEntry, VectorCollectionCache, VectorCollectionConfig,
-    VectorEntry, VectorIndexStats, VectorItemMeta, VectorManagerState, VectorMetric,
-    VectorSearchResult, VectorSearchSpec, VectorStalePolicy, build_vector_ann,
+    VectorBackendKind, VectorCacheEntry, VectorCacheFiles, VectorCollectionCache,
+    VectorCollectionConfig, VectorEntry, VectorIndexStats, VectorItemMeta, VectorManagerState,
+    VectorMetric, VectorSearchResult, VectorSearchSpec, VectorStalePolicy, build_vector_ann,
     build_vector_cache_files, checksum_bytes, chunk_from_record, collection_cache_from_cache_files,
     collection_config_from_record, encode_f32_le, encode_vector_chunk, item_meta_from_record,
     records_source_hash, search_vector_collection, validate_collection_config, validate_vector,
@@ -83,7 +83,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 const PARALLEL_QUERY_MIN_LEN: usize = 256;
@@ -271,8 +271,44 @@ struct Inner {
     vector_cache_root: Option<std::path::PathBuf>,
     #[cfg(not(target_arch = "wasm32"))]
     text_cache_root: Option<std::path::PathBuf>,
+    cache_rebuilds: BTreeSet<CacheRebuildKey>,
+    cache_rebuild_wait: Arc<Condvar>,
     #[cfg(feature = "crypto")]
     security: SecurityState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CacheRebuildKind {
+    Text,
+    Vector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CacheRebuildKey {
+    kind: CacheRebuildKind,
+    collection: String,
+}
+
+#[derive(Debug, Clone)]
+struct VectorRebuildSnapshot {
+    collection: String,
+    config: VectorCollectionConfig,
+    records: Vec<RecordEntry>,
+    source_hash: String,
+    revision: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    cache_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct TextRebuildSnapshot {
+    collection: String,
+    config: TextCollectionConfig,
+    records: Vec<RecordEntry>,
+    source_hash: String,
+    revision: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    cache_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -565,6 +601,8 @@ impl Primadb {
                 vector_cache_root: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 text_cache_root: None,
+                cache_rebuilds: BTreeSet::new(),
+                cache_rebuild_wait: Arc::new(Condvar::new()),
                 #[cfg(feature = "crypto")]
                 security: SecurityState::default(),
             })),
@@ -849,8 +887,8 @@ impl Primadb {
     ) -> Result<Option<VectorEntry>> {
         let collection = collection.as_ref();
         let id = id.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        self.ensure_vector_collection_ready(collection)?;
+        let inner = self.inner.lock().unwrap();
         Ok(inner
             .vector_collections
             .get(collection)
@@ -872,8 +910,8 @@ impl Primadb {
     ) -> Result<VectorSearchResult> {
         let collection = collection.as_ref();
         let query = query.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        self.ensure_vector_collection_ready(collection)?;
+        let inner = self.inner.lock().unwrap();
         let cache = inner.vector_collections.get(collection).ok_or_else(|| {
             PrimadbError::Message(format!("vector collection `{collection}` is not loaded"))
         })?;
@@ -898,8 +936,8 @@ impl Primadb {
 
     pub fn vector_index_stats(&self, collection: impl AsRef<str>) -> Result<VectorIndexStats> {
         let collection = collection.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        self.ensure_vector_collection_ready(collection)?;
+        let inner = self.inner.lock().unwrap();
         inner
             .vector_collections
             .get(collection)
@@ -915,12 +953,17 @@ impl Primadb {
         collection: impl AsRef<str>,
     ) -> Result<crate::VectorCacheFiles> {
         let collection = collection.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        ensure_vector_collection_ready_locked(&mut inner, collection)?;
+        self.ensure_vector_collection_ready(collection)?;
+        let inner = self.inner.lock().unwrap();
         let cache = inner.vector_collections.get(collection).ok_or_else(|| {
             PrimadbError::Message(format!("vector collection `{collection}` is not loaded"))
         })?;
-        build_vector_cache_files(collection, cache, now_millis().to_string())
+        let cache = cache.clone();
+        let revision = inner.change_revision;
+        drop(inner);
+        let mut files = build_vector_cache_files(collection, &cache, now_millis().to_string())?;
+        files.manifest.source_revision = Some(revision);
+        Ok(files)
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -930,9 +973,12 @@ impl Primadb {
         files: crate::VectorCacheFiles,
     ) -> Result<()> {
         let collection = collection.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        let (config, source_hash) =
-            vector_collection_config_and_source_hash_locked(&mut inner, collection)?;
+        let (config, source_hash, revision) = {
+            let mut inner = self.inner.lock().unwrap();
+            let (config, _records, source_hash) =
+                vector_collection_records_and_source_hash_locked(&mut inner, collection)?;
+            (config, source_hash, inner.change_revision)
+        };
         if files.manifest.collection != collection
             || files.manifest.record_prefix != vector_collection_items_prefix(collection)
         {
@@ -941,6 +987,12 @@ impl Primadb {
             ));
         }
         let cache = collection_cache_from_cache_files(config, files, &source_hash)?;
+        let mut inner = self.inner.lock().unwrap();
+        if inner.change_revision != revision {
+            return Err(PrimadbError::Message(
+                "vector cache source changed while it was being imported".to_owned(),
+            ));
+        }
         inner
             .vector_collections
             .insert(collection.to_owned(), cache);
@@ -1043,8 +1095,8 @@ impl Primadb {
     ) -> Result<Option<TextDocument>> {
         let collection = collection.as_ref();
         let id = id.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        ensure_text_collection_ready_locked(&mut inner, collection)?;
+        self.ensure_text_collection_ready(collection)?;
+        let inner = self.inner.lock().unwrap();
         Ok(inner
             .text_collections
             .get(collection)
@@ -1072,8 +1124,8 @@ impl Primadb {
 
     pub fn text_index_stats(&self, collection: impl AsRef<str>) -> Result<TextIndexStats> {
         let collection = collection.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        ensure_text_collection_ready_locked(&mut inner, collection)?;
+        self.ensure_text_collection_ready(collection)?;
+        let inner = self.inner.lock().unwrap();
         inner
             .text_collections
             .get(collection)
@@ -1090,12 +1142,17 @@ impl Primadb {
         collection: impl AsRef<str>,
     ) -> Result<TextCacheFiles> {
         let collection = collection.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        ensure_text_collection_ready_locked(&mut inner, collection)?;
+        self.ensure_text_collection_ready(collection)?;
+        let inner = self.inner.lock().unwrap();
         let cache = inner.text_collections.get(collection).ok_or_else(|| {
             PrimadbError::Message(format!("text collection `{collection}` is not loaded"))
         })?;
-        text_cache_files(collection, cache, now_millis().to_string())
+        let cache = cache.clone();
+        let revision = inner.change_revision;
+        drop(inner);
+        let mut files = text_cache_files(collection, &cache, now_millis().to_string())?;
+        files.manifest.source_revision = Some(revision);
+        Ok(files)
     }
 
     // Persistent text cache import/export is exposed to native storage paths first.
@@ -1106,9 +1163,12 @@ impl Primadb {
         files: TextCacheFiles,
     ) -> Result<()> {
         let collection = collection.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        let (config, source_hash) =
-            text_collection_config_and_source_hash_locked(&mut inner, collection)?;
+        let (config, source_hash, revision) = {
+            let mut inner = self.inner.lock().unwrap();
+            let (config, _records, source_hash) =
+                text_collection_records_and_source_hash_locked(&mut inner, collection)?;
+            (config, source_hash, inner.change_revision)
+        };
         if files.manifest.collection != collection
             || files.manifest.record_prefix != text_collection_docs_prefix(collection)
         {
@@ -1117,6 +1177,12 @@ impl Primadb {
             ));
         }
         let cache = collection_cache_from_text_cache_files(config, files, &source_hash)?;
+        let mut inner = self.inner.lock().unwrap();
+        if inner.change_revision != revision {
+            return Err(PrimadbError::Message(
+                "text cache source changed while it was being imported".to_owned(),
+            ));
+        }
         inner.text_collections.insert(collection.to_owned(), cache);
         Ok(())
     }
@@ -3233,8 +3299,8 @@ impl Primadb {
     ) -> Result<TextSearchResult> {
         match source {
             TextSearchSource::Collection { collection } => {
-                let mut inner = self.inner.lock().unwrap();
-                ensure_text_collection_ready_locked(&mut inner, &collection)?;
+                self.ensure_text_collection_ready(&collection)?;
+                let inner = self.inner.lock().unwrap();
                 let cache = inner.text_collections.get(&collection).ok_or_else(|| {
                     PrimadbError::Message(format!("text collection `{collection}` is not loaded"))
                 })?;
@@ -3291,6 +3357,162 @@ impl Primadb {
                     truncated,
                     TextScoreScope::CandidateSet,
                 )
+            }
+        }
+    }
+
+    fn ensure_vector_collection_ready(&self, collection: &str) -> Result<()> {
+        loop {
+            let (key, snapshot) = {
+                let mut inner = self.inner.lock().unwrap();
+                let key = CacheRebuildKey {
+                    kind: CacheRebuildKind::Vector,
+                    collection: collection.to_owned(),
+                };
+                let needs_rebuild = inner
+                    .vector_collections
+                    .get(collection)
+                    .map(|cache| cache.dirty || cache.state != VectorManagerState::Ready)
+                    .unwrap_or(true);
+                if !needs_rebuild {
+                    return Ok(());
+                }
+                if inner.cache_rebuilds.contains(&key) {
+                    let wait = inner.cache_rebuild_wait.clone();
+                    inner = wait.wait(inner).unwrap();
+                    continue;
+                }
+                inner.cache_rebuilds.insert(key.clone());
+                if let Some(cache) = inner.vector_collections.get_mut(collection) {
+                    cache.state = VectorManagerState::Rebuilding;
+                }
+                let snapshot = match vector_rebuild_snapshot(&mut inner, collection) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        inner.cache_rebuilds.remove(&key);
+                        inner.cache_rebuild_wait.notify_all();
+                        return Err(error);
+                    }
+                };
+                (key, snapshot)
+            };
+
+            let result = build_vector_collection_off_lock(&snapshot);
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut cache_write = None;
+            let stale = {
+                let mut inner = self.inner.lock().unwrap();
+                match result {
+                    Ok((cache, files)) if inner.change_revision == snapshot.revision => {
+                        inner
+                            .vector_collections
+                            .insert(collection.to_owned(), cache);
+                        #[cfg(target_arch = "wasm32")]
+                        let _ = files;
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            cache_write = snapshot
+                                .cache_root
+                                .clone()
+                                .zip(files)
+                                .map(|(root, files)| (root, files));
+                        }
+                        false
+                    }
+                    Ok(_) => true,
+                    Err(error) => {
+                        inner.cache_rebuilds.remove(&key);
+                        inner.cache_rebuild_wait.notify_all();
+                        return Err(error);
+                    }
+                }
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            if !stale && let Some((root, files)) = cache_write {
+                let _ = write_native_vector_cache(&root, collection, files);
+            }
+            let mut inner = self.inner.lock().unwrap();
+            inner.cache_rebuilds.remove(&key);
+            inner.cache_rebuild_wait.notify_all();
+            if !stale {
+                return Ok(());
+            }
+        }
+    }
+
+    fn ensure_text_collection_ready(&self, collection: &str) -> Result<()> {
+        loop {
+            let (key, snapshot) = {
+                let mut inner = self.inner.lock().unwrap();
+                let key = CacheRebuildKey {
+                    kind: CacheRebuildKind::Text,
+                    collection: collection.to_owned(),
+                };
+                let needs_rebuild = inner
+                    .text_collections
+                    .get(collection)
+                    .map(|cache| cache.dirty || cache.state != crate::TextIndexState::Ready)
+                    .unwrap_or(true);
+                if !needs_rebuild {
+                    return Ok(());
+                }
+                if inner.cache_rebuilds.contains(&key) {
+                    let wait = inner.cache_rebuild_wait.clone();
+                    inner = wait.wait(inner).unwrap();
+                    continue;
+                }
+                inner.cache_rebuilds.insert(key.clone());
+                if let Some(cache) = inner.text_collections.get_mut(collection) {
+                    cache.state = crate::TextIndexState::Rebuilding;
+                }
+                let snapshot = match text_rebuild_snapshot(&mut inner, collection) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        inner.cache_rebuilds.remove(&key);
+                        inner.cache_rebuild_wait.notify_all();
+                        return Err(error);
+                    }
+                };
+                (key, snapshot)
+            };
+
+            let result = build_text_collection_off_lock(&snapshot);
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut cache_write = None;
+            let stale = {
+                let mut inner = self.inner.lock().unwrap();
+                match result {
+                    Ok((cache, files)) if inner.change_revision == snapshot.revision => {
+                        inner.text_collections.insert(collection.to_owned(), cache);
+                        #[cfg(target_arch = "wasm32")]
+                        let _ = files;
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            cache_write = snapshot
+                                .cache_root
+                                .clone()
+                                .zip(files)
+                                .map(|(root, files)| (root, files));
+                        }
+                        false
+                    }
+                    Ok(_) => true,
+                    Err(error) => {
+                        inner.cache_rebuilds.remove(&key);
+                        inner.cache_rebuild_wait.notify_all();
+                        return Err(error);
+                    }
+                }
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            if !stale && let Some((root, files)) = cache_write {
+                let _ = write_native_text_cache(&root, collection, files);
+            }
+            let mut inner = self.inner.lock().unwrap();
+            inner.cache_rebuilds.remove(&key);
+            inner.cache_rebuild_wait.notify_all();
+            if !stale {
+                return Ok(());
             }
         }
     }
@@ -3860,54 +4082,62 @@ struct PendingVectorItem {
     malformed: bool,
 }
 
-fn ensure_vector_collection_ready_locked(inner: &mut Inner, collection: &str) -> Result<()> {
-    let needs_rebuild = inner
-        .vector_collections
-        .get(collection)
-        .map(|cache| cache.dirty || cache.state != VectorManagerState::Ready)
-        .unwrap_or(true);
-    if !needs_rebuild {
-        return Ok(());
-    }
-    rebuild_vector_collection_locked(inner, collection)
+fn vector_rebuild_snapshot(inner: &mut Inner, collection: &str) -> Result<VectorRebuildSnapshot> {
+    let (config, records, source_hash) =
+        vector_collection_records_and_source_hash_locked(inner, collection)?;
+    Ok(VectorRebuildSnapshot {
+        collection: collection.to_owned(),
+        config,
+        records,
+        source_hash,
+        revision: inner.change_revision,
+        #[cfg(not(target_arch = "wasm32"))]
+        cache_root: inner.vector_cache_root.clone(),
+    })
 }
 
-fn rebuild_vector_collection_locked(inner: &mut Inner, collection: &str) -> Result<()> {
-    if let Some(cache) = inner.vector_collections.get_mut(collection) {
-        cache.state = VectorManagerState::Rebuilding;
-    }
-
-    let (config, record_entries, source_hash) =
-        vector_collection_records_and_source_hash_locked(inner, collection)?;
+fn build_vector_collection_off_lock(
+    snapshot: &VectorRebuildSnapshot,
+) -> Result<(VectorCollectionCache, Option<VectorCacheFiles>)> {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(root) = &inner.vector_cache_root
-        && let Ok(Some(cache)) =
-            read_native_vector_cache(root, collection, config.clone(), &source_hash)
-    {
-        inner
-            .vector_collections
-            .insert(collection.to_owned(), cache);
-        return Ok(());
-    }
-    let cache = assemble_vector_collection_cache(collection, config, &record_entries, source_hash);
-    inner
-        .vector_collections
-        .insert(collection.to_owned(), cache.clone());
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(root) = &inner.vector_cache_root {
-        let _ = write_native_vector_cache(root, collection, &cache);
-    }
-    Ok(())
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn vector_collection_config_and_source_hash_locked(
-    inner: &mut Inner,
-    collection: &str,
-) -> Result<(VectorCollectionConfig, String)> {
-    let (config, _records, source_hash) =
-        vector_collection_records_and_source_hash_locked(inner, collection)?;
-    Ok((config, source_hash))
+    let (cache, rebuilt) = if let Some(root) = &snapshot.cache_root
+        && let Ok(Some(cache)) = read_native_vector_cache(
+            root,
+            &snapshot.collection,
+            snapshot.config.clone(),
+            &snapshot.source_hash,
+        ) {
+        (cache, false)
+    } else {
+        (
+            assemble_vector_collection_cache(
+                &snapshot.collection,
+                snapshot.config.clone(),
+                &snapshot.records,
+                snapshot.source_hash.clone(),
+            ),
+            true,
+        )
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (cache, rebuilt) = (
+        assemble_vector_collection_cache(
+            &snapshot.collection,
+            snapshot.config.clone(),
+            &snapshot.records,
+            snapshot.source_hash.clone(),
+        ),
+        true,
+    );
+    let files = if rebuilt {
+        let mut files =
+            build_vector_cache_files(&snapshot.collection, &cache, now_millis().to_string())?;
+        files.manifest.source_revision = Some(snapshot.revision);
+        Some(files)
+    } else {
+        None
+    };
+    Ok((cache, files))
 }
 
 fn vector_collection_records_and_source_hash_locked(
@@ -4033,51 +4263,61 @@ fn assemble_complete_vector_item(
     })
 }
 
-fn ensure_text_collection_ready_locked(inner: &mut Inner, collection: &str) -> Result<()> {
-    let needs_rebuild = inner
-        .text_collections
-        .get(collection)
-        .map(|cache| cache.dirty || cache.state != crate::TextIndexState::Ready)
-        .unwrap_or(true);
-    if !needs_rebuild {
-        return Ok(());
-    }
-    rebuild_text_collection_locked(inner, collection)
+fn text_rebuild_snapshot(inner: &mut Inner, collection: &str) -> Result<TextRebuildSnapshot> {
+    let (config, records, source_hash) =
+        text_collection_records_and_source_hash_locked(inner, collection)?;
+    Ok(TextRebuildSnapshot {
+        collection: collection.to_owned(),
+        config,
+        records,
+        source_hash,
+        revision: inner.change_revision,
+        #[cfg(not(target_arch = "wasm32"))]
+        cache_root: inner.text_cache_root.clone(),
+    })
 }
 
-fn rebuild_text_collection_locked(inner: &mut Inner, collection: &str) -> Result<()> {
-    if let Some(cache) = inner.text_collections.get_mut(collection) {
-        cache.state = crate::TextIndexState::Rebuilding;
-    }
-    let (config, record_entries, source_hash) =
-        text_collection_records_and_source_hash_locked(inner, collection)?;
+fn build_text_collection_off_lock(
+    snapshot: &TextRebuildSnapshot,
+) -> Result<(TextCollectionCache, Option<TextCacheFiles>)> {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(root) = &inner.text_cache_root
-        && let Ok(Some(cache)) =
-            read_native_text_cache(root, collection, config.clone(), &source_hash)
-    {
-        inner.text_collections.insert(collection.to_owned(), cache);
-        return Ok(());
-    }
-    let cache = assemble_text_collection_cache(collection, config, &record_entries, source_hash)?;
-    inner
-        .text_collections
-        .insert(collection.to_owned(), cache.clone());
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(root) = &inner.text_cache_root {
-        let _ = write_native_text_cache(root, collection, &cache);
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn text_collection_config_and_source_hash_locked(
-    inner: &mut Inner,
-    collection: &str,
-) -> Result<(TextCollectionConfig, String)> {
-    let (config, _records, source_hash) =
-        text_collection_records_and_source_hash_locked(inner, collection)?;
-    Ok((config, source_hash))
+    let (cache, rebuilt) = if let Some(root) = &snapshot.cache_root
+        && let Ok(Some(cache)) = read_native_text_cache(
+            root,
+            &snapshot.collection,
+            snapshot.config.clone(),
+            &snapshot.source_hash,
+        ) {
+        (cache, false)
+    } else {
+        (
+            assemble_text_collection_cache(
+                &snapshot.collection,
+                snapshot.config.clone(),
+                &snapshot.records,
+                snapshot.source_hash.clone(),
+            )?,
+            true,
+        )
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (cache, rebuilt) = (
+        assemble_text_collection_cache(
+            &snapshot.collection,
+            snapshot.config.clone(),
+            &snapshot.records,
+            snapshot.source_hash.clone(),
+        )?,
+        true,
+    );
+    let files = if rebuilt {
+        let mut files = text_cache_files(&snapshot.collection, &cache, now_millis().to_string())?;
+        files.manifest.source_revision = Some(snapshot.revision);
+        Some(files)
+    } else {
+        None
+    };
+    Ok((cache, files))
 }
 
 fn text_collection_records_and_source_hash_locked(
@@ -4256,11 +4496,10 @@ fn read_native_vector_cache_file(path: &std::path::Path) -> Result<Vec<u8>> {
 fn write_native_vector_cache(
     root: &std::path::Path,
     collection: &str,
-    cache: &VectorCollectionCache,
+    files: VectorCacheFiles,
 ) -> Result<()> {
     let collection_dir = root.join(crate::encode_component(collection));
     std::fs::create_dir_all(&collection_dir)?;
-    let files = build_vector_cache_files(collection, cache, now_millis().to_string())?;
     std::fs::write(collection_dir.join("vectors.f32.tmp"), &files.vectors_f32)?;
     std::fs::write(collection_dir.join("keys.bin.tmp"), &files.keys_bin)?;
     std::fs::write(collection_dir.join("metadata.bin.tmp"), &files.metadata_bin)?;
@@ -4340,11 +4579,10 @@ fn read_native_text_cache(
 fn write_native_text_cache(
     root: &std::path::Path,
     collection: &str,
-    cache: &TextCollectionCache,
+    files: TextCacheFiles,
 ) -> Result<()> {
     let collection_dir = root.join(crate::encode_component(collection));
     std::fs::create_dir_all(&collection_dir)?;
-    let files = text_cache_files(collection, cache, now_millis().to_string())?;
     std::fs::write(collection_dir.join("terms.bin.tmp"), &files.terms_bin)?;
     std::fs::write(collection_dir.join("postings.bin.tmp"), &files.postings_bin)?;
     std::fs::write(collection_dir.join("docs.bin.tmp"), &files.docs_bin)?;
@@ -7904,7 +8142,8 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn vector_search_spec() -> VectorSearchSpec {
@@ -8466,6 +8705,69 @@ mod tests {
         assert_eq!(result.matches[0].id, "a");
 
         let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_text_and_vector_cache_rebuilds_are_consistent() -> Result<()> {
+        let db = Primadb::with_replica_id("cache-concurrency");
+        db.create_text_collection("notes", TextCollectionConfig::default())?;
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "first".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "before rebuild".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+        db.create_vector_collection(
+            "vectors",
+            VectorCollectionConfig {
+                dim: 2,
+                metric: VectorMetric::L2,
+                backend: None,
+                hnsw: None,
+                chunking: Default::default(),
+            },
+        )?;
+        db.put_vector("vectors", "first", vec![0.0, 0.0], None)?;
+        db.text_search("notes", "before", TextSearchSpec::default())?;
+        db.search_vectors("vectors", [0.0, 0.0], vector_search_spec())?;
+
+        db.put_text_document(
+            "notes",
+            TextDocument {
+                id: "second".to_owned(),
+                fields: BTreeMap::from([("body".to_owned(), "after rebuild".to_owned())]),
+                metadata: BTreeMap::new(),
+            },
+        )?;
+        db.put_vector("vectors", "second", vec![1.0, 0.0], None)?;
+
+        let barrier = Arc::new(Barrier::new(9));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                let text = db.text_search("notes", "after", TextSearchSpec::default())?;
+                let vector = db.search_vectors("vectors", [1.0, 0.0], vector_search_spec())?;
+                Ok::<_, PrimadbError>((text, vector))
+            }));
+        }
+        barrier.wait();
+        for worker in workers {
+            let (text, vector) = worker.join().expect("cache worker panicked")?;
+            assert_eq!(
+                text.matches.first().map(|item| item.id.as_str()),
+                Some("second")
+            );
+            assert_eq!(
+                vector.matches.first().map(|item| item.id.as_str()),
+                Some("second")
+            );
+        }
         Ok(())
     }
 
