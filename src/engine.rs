@@ -336,6 +336,21 @@ static SEGMENT_FAULT_POINTS: Mutex<BTreeMap<std::path::PathBuf, SegmentFaultPoin
     Mutex::new(BTreeMap::new());
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SegmentWriteMetrics {
+    pub file_writes: usize,
+    pub bytes_written: usize,
+    pub direct_index_writes: usize,
+    pub file_syncs: usize,
+    pub directory_syncs: usize,
+    pub direct_index_directory_syncs: usize,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+static SEGMENT_WRITE_METRICS: Mutex<BTreeMap<std::path::PathBuf, SegmentWriteMetrics>> =
+    Mutex::new(BTreeMap::new());
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) fn set_segment_fault_point_for_test(
     root: impl Into<std::path::PathBuf>,
     point: SegmentFaultPoint,
@@ -344,6 +359,26 @@ pub(crate) fn set_segment_fault_point_for_test(
         .lock()
         .unwrap()
         .insert(root.into(), point);
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn reset_segment_write_metrics_for_test(root: impl Into<std::path::PathBuf>) {
+    SEGMENT_WRITE_METRICS
+        .lock()
+        .unwrap()
+        .insert(root.into(), SegmentWriteMetrics::default());
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn segment_write_metrics_for_test(
+    root: impl Into<std::path::PathBuf>,
+) -> SegmentWriteMetrics {
+    SEGMENT_WRITE_METRICS
+        .lock()
+        .unwrap()
+        .get(&root.into())
+        .copied()
+        .unwrap_or_default()
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(windows)))]
@@ -416,14 +451,22 @@ impl SegmentFileStore {
     }
 
     fn ensure_layout(&self) -> Result<()> {
-        std::fs::create_dir_all(self.root.join("nodes"))?;
-        std::fs::create_dir_all(self.root.join("auth"))?;
-        std::fs::create_dir_all(self.root.join("node_indexes"))?;
-        std::fs::create_dir_all(self.root.join("indexes").join("direct"))?;
-        std::fs::create_dir_all(self.record_entries_root())?;
-        std::fs::create_dir_all(self.root.join("journal"))?;
+        let paths = [
+            self.root.join("nodes"),
+            self.root.join("auth"),
+            self.root.join("node_indexes"),
+            self.root.join("indexes").join("direct"),
+            self.record_entries_root(),
+            self.root.join("journal"),
+        ];
+        let mut sync_dirs = BTreeSet::new();
+        for path in paths {
+            sync_dirs.extend(Self::ensure_parent_dirs(&path)?);
+        }
         if matches!(self.durability, SegmentDurability::Full) {
-            self.sync_dir(&self.root)?;
+            for path in sync_dirs {
+                self.sync_dir(&path)?;
+            }
         }
         Ok(())
     }
@@ -512,19 +555,26 @@ impl SegmentFileStore {
         Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
 
-    fn upsert_record_entry(&self, entry: &RecordEntry) -> Result<()> {
+    fn upsert_record_entry_batched(
+        &self,
+        entry: &RecordEntry,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
         let path = self.record_entry_path(&entry.key);
-        self.write_json_file(&path, entry)
+        self.write_json_file_batched(&path, entry, sync_dirs)
     }
 
-    fn remove_record_entry(&self, key: &str) -> Result<bool> {
+    fn remove_record_entry_batched(
+        &self,
+        key: &str,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<bool> {
         let path = self.record_entry_path(key);
-        if !path.exists() {
+        if !self.remove_file_batched(&path, sync_dirs)? {
             return Ok(false);
         }
-        self.remove_file_durable(&path)?;
         if let Some(parent) = path.parent() {
-            self.prune_empty_record_dirs(parent)?;
+            self.prune_empty_record_dirs_batched(parent, sync_dirs)?;
         }
         Ok(true)
     }
@@ -544,45 +594,55 @@ impl SegmentFileStore {
         self.write_json_file(path, bucket)
     }
 
-    fn remove_direct_index_entry(&self, key: &str) -> Result<bool> {
-        let path = self.direct_index_path(key);
-        if !path.exists() {
-            return Ok(false);
-        }
-        let mut bucket = Self::read_direct_index_bucket_path(&path)?;
-        let removed = bucket.entries.remove(key).is_some();
-        if bucket.entries.is_empty() {
-            self.remove_file_durable(&path)?;
-        } else if removed {
-            self.write_direct_index_bucket_path(&path, &bucket)?;
-        }
-        Ok(removed)
-    }
-
-    fn upsert_direct_index_entry(&self, key: &str, entry: &DirectScalarIndexEntry) -> Result<()> {
-        let path = self.direct_index_path(key);
-        let mut bucket = Self::read_direct_index_bucket_path(&path)?;
-        bucket.entries.insert(key.to_owned(), entry.clone());
-        self.write_direct_index_bucket_path(&path, &bucket)
+    fn write_direct_index_bucket_path_batched(
+        &self,
+        path: &std::path::Path,
+        bucket: &DirectIndexBucket,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
+        self.write_json_file_batched(path, bucket, sync_dirs)
     }
 
     fn write_json_file<T: Serialize>(&self, path: &std::path::Path, value: &T) -> Result<()> {
         self.write_file(path, &serde_json::to_vec(value)?)
     }
 
+    fn write_json_file_batched<T: Serialize>(
+        &self,
+        path: &std::path::Path,
+        value: &T,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
+        self.write_file_batched(path, &serde_json::to_vec(value)?, sync_dirs)
+    }
+
     fn write_file(&self, path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let mut sync_dirs = BTreeSet::new();
+        self.write_file_batched(path, bytes, &mut sync_dirs)?;
+        for path in sync_dirs {
+            self.sync_dir(&path)?;
         }
+        Ok(())
+    }
 
-        if matches!(self.durability, SegmentDurability::Relaxed) {
-            std::fs::write(path, bytes)?;
-            return Ok(());
-        }
-
+    fn write_file_batched(
+        &self,
+        path: &std::path::Path,
+        bytes: &[u8],
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
         let parent = path.parent().ok_or_else(|| {
             PrimadbError::Message(format!("path `{}` has no parent directory", path.display()))
         })?;
+        let created_dir_parents = Self::ensure_parent_dirs(parent)?;
+
+        if matches!(self.durability, SegmentDurability::Relaxed) {
+            std::fs::write(path, bytes)?;
+            #[cfg(test)]
+            self.record_file_write_for_test(path, bytes.len());
+            return Ok(());
+        }
+
         let temp_path = self.temp_path_for(path);
         {
             let mut file = std::fs::OpenOptions::new()
@@ -593,16 +653,44 @@ impl SegmentFileStore {
             file.write_all(bytes)?;
             file.flush()?;
             match self.durability {
-                SegmentDurability::Full => file.sync_all()?,
-                SegmentDurability::Data => file.sync_data()?,
+                SegmentDurability::Full => {
+                    #[cfg(test)]
+                    self.record_file_sync_for_test();
+                    file.sync_all()?
+                }
+                SegmentDurability::Data => {
+                    #[cfg(test)]
+                    self.record_file_sync_for_test();
+                    file.sync_data()?
+                }
                 SegmentDurability::Relaxed => {}
             }
         }
         replace_file(&temp_path, path)?;
+        #[cfg(test)]
+        self.record_file_write_for_test(path, bytes.len());
         if matches!(self.durability, SegmentDurability::Full) {
-            self.sync_dir(parent)?;
+            sync_dirs.extend(created_dir_parents);
+            sync_dirs.insert(parent.to_path_buf());
         }
         Ok(())
+    }
+
+    fn ensure_parent_dirs(parent: &std::path::Path) -> Result<BTreeSet<std::path::PathBuf>> {
+        let mut missing = Vec::new();
+        let mut current = parent;
+        while !current.exists() {
+            missing.push(current.to_path_buf());
+            let Some(next) = current.parent() else {
+                break;
+            };
+            current = next;
+        }
+        std::fs::create_dir_all(parent)?;
+        Ok(missing
+            .into_iter()
+            .filter_map(|path| path.parent().map(std::path::Path::to_path_buf))
+            .collect())
     }
 
     fn remove_file_durable(&self, path: &std::path::Path) -> Result<()> {
@@ -648,7 +736,40 @@ impl SegmentFileStore {
     fn sync_dir(&self, path: &std::path::Path) -> Result<()> {
         let file = std::fs::File::open(path)?;
         file.sync_all()?;
+        #[cfg(test)]
+        self.record_directory_sync_for_test(path);
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn record_file_write_for_test(&self, path: &std::path::Path, bytes: usize) {
+        let mut metrics = SEGMENT_WRITE_METRICS.lock().unwrap();
+        let entry = metrics.entry(self.root.clone()).or_default();
+        entry.file_writes += 1;
+        entry.bytes_written += bytes;
+        if path.starts_with(self.root.join("indexes").join("direct")) {
+            entry.direct_index_writes += 1;
+        }
+    }
+
+    #[cfg(test)]
+    fn record_file_sync_for_test(&self) {
+        SEGMENT_WRITE_METRICS
+            .lock()
+            .unwrap()
+            .entry(self.root.clone())
+            .or_default()
+            .file_syncs += 1;
+    }
+
+    #[cfg(test)]
+    fn record_directory_sync_for_test(&self, path: &std::path::Path) {
+        let mut metrics = SEGMENT_WRITE_METRICS.lock().unwrap();
+        let entry = metrics.entry(self.root.clone()).or_default();
+        entry.directory_syncs += 1;
+        if path.starts_with(self.root.join("indexes").join("direct")) {
+            entry.direct_index_directory_syncs += 1;
+        }
     }
 
     #[cfg(test)]
@@ -827,7 +948,11 @@ impl SegmentFileStore {
         Ok(scan.limit.is_some_and(|limit| entries.len() >= limit))
     }
 
-    fn prune_empty_record_dirs(&self, start: &std::path::Path) -> Result<usize> {
+    fn prune_empty_record_dirs_batched(
+        &self,
+        start: &std::path::Path,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<usize> {
         let root = self.record_entries_root();
         let mut current = start.to_path_buf();
         let mut removed = 0;
@@ -838,7 +963,7 @@ impl SegmentFileStore {
                     if entries.next().is_some() {
                         break;
                     }
-                    self.remove_dir_durable(&current)?;
+                    self.remove_dir_batched(&current, sync_dirs)?;
                     removed += 1;
                 }
                 _ => break,
@@ -940,49 +1065,141 @@ impl SegmentFileStore {
         let record = Self::commit_record_for_payload(payload)?;
         let pending_path = self.journal_pending_path(record.payload.transaction.id);
         self.write_json_file(&pending_path, &record)?;
-        if matches!(self.durability, SegmentDurability::Full) {
-            self.sync_dir(&self.root.join("journal"))?;
-        }
         Ok(pending_path)
     }
 
     fn materialize_commit_payload(&self, payload: &SegmentCommitPayload) -> Result<()> {
         let transaction = &payload.transaction;
+        let mut sync_dirs = BTreeSet::new();
 
         for (node_id, node_state) in &transaction.nodes {
-            self.write_json_file(&self.node_path(node_id), node_state)?;
+            self.write_json_file_batched(&self.node_path(node_id), node_state, &mut sync_dirs)?;
         }
 
         self.maybe_fail(SegmentFaultPoint::AfterNodeWrites)?;
 
         for (node_id, auth_meta) in &transaction.auth_meta {
-            self.write_json_file(&self.auth_meta_path(node_id), auth_meta)?;
+            self.write_json_file_batched(&self.auth_meta_path(node_id), auth_meta, &mut sync_dirs)?;
         }
 
-        for stale_key in &payload.direct_index_removals {
-            let _ = self.remove_direct_index_entry(stale_key)?;
-        }
+        self.materialize_direct_index_changes(payload, &mut sync_dirs)?;
         for (node_id, manifest) in &transaction.node_indexes {
-            for key in &manifest.direct_index_keys {
-                let Some(entry) = transaction.direct_indexes.get(key) else {
-                    continue;
-                };
-                self.upsert_direct_index_entry(key, entry)?;
-            }
-            self.write_json_file(&self.node_index_manifest_path(node_id), manifest)?;
+            self.write_json_file_batched(
+                &self.node_index_manifest_path(node_id),
+                manifest,
+                &mut sync_dirs,
+            )?;
         }
 
         for key in &transaction.deleted_records {
-            let _ = self.remove_record_entry(key)?;
+            let _ = self.remove_record_entry_batched(key, &mut sync_dirs)?;
         }
         for entry in transaction.records.values() {
-            self.upsert_record_entry(entry)?;
+            self.upsert_record_entry_batched(entry, &mut sync_dirs)?;
+        }
+
+        for path in sync_dirs {
+            self.sync_dir(&path)?;
         }
 
         self.maybe_fail(SegmentFaultPoint::AfterIndexWrites)?;
 
         self.write_json_file(&self.manifest_path(), &transaction.metadata)?;
         self.maybe_fail(SegmentFaultPoint::AfterManifestWrite)?;
+        Ok(())
+    }
+
+    fn materialize_direct_index_changes(
+        &self,
+        payload: &SegmentCommitPayload,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
+        let transaction = &payload.transaction;
+        let mut buckets: BTreeMap<std::path::PathBuf, (DirectIndexBucket, bool)> = BTreeMap::new();
+
+        for key in &payload.direct_index_removals {
+            let path = self.direct_index_path(key);
+            if !buckets.contains_key(&path) {
+                buckets.insert(
+                    path.clone(),
+                    (Self::read_direct_index_bucket_path(&path)?, false),
+                );
+            }
+            let bucket = buckets
+                .get_mut(&path)
+                .expect("inserted direct index bucket");
+            if bucket.0.entries.remove(key).is_some() {
+                bucket.1 = true;
+            }
+        }
+
+        for manifest in transaction.node_indexes.values() {
+            for key in &manifest.direct_index_keys {
+                let Some(entry) = transaction.direct_indexes.get(key) else {
+                    continue;
+                };
+                let path = self.direct_index_path(key);
+                if !buckets.contains_key(&path) {
+                    buckets.insert(
+                        path.clone(),
+                        (Self::read_direct_index_bucket_path(&path)?, false),
+                    );
+                }
+                let bucket = buckets
+                    .get_mut(&path)
+                    .expect("inserted direct index bucket");
+                if bucket.0.entries.get(key) != Some(entry) {
+                    bucket.0.entries.insert(key.clone(), entry.clone());
+                    bucket.1 = true;
+                }
+            }
+        }
+
+        for (path, (bucket, changed)) in buckets {
+            if !changed {
+                continue;
+            }
+            if bucket.entries.is_empty() {
+                if path.exists() {
+                    self.remove_file_batched(&path, sync_dirs)?;
+                }
+            } else {
+                self.write_direct_index_bucket_path_batched(&path, &bucket, sync_dirs)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_file_batched(
+        &self,
+        path: &std::path::Path,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(path)?;
+        if matches!(self.durability, SegmentDurability::Full)
+            && let Some(parent) = path.parent()
+        {
+            sync_dirs.insert(parent.to_path_buf());
+        }
+        Ok(true)
+    }
+
+    fn remove_dir_batched(
+        &self,
+        path: &std::path::Path,
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
+        let parent = path.parent().map(std::path::Path::to_path_buf);
+        std::fs::remove_dir(path)?;
+        sync_dirs.remove(path);
+        if matches!(self.durability, SegmentDurability::Full)
+            && let Some(parent) = parent
+        {
+            sync_dirs.insert(parent);
+        }
         Ok(())
     }
 
@@ -1103,8 +1320,12 @@ impl SegmentFileStore {
             return Ok(0);
         }
         let remove_count = entries.len() - self.journal_retention;
+        let mut sync_dirs = BTreeSet::new();
         for path in entries.into_iter().take(remove_count) {
-            let _ = self.remove_file_durable(&path);
+            let _ = self.remove_file_batched(&path, &mut sync_dirs);
+        }
+        for path in sync_dirs {
+            self.sync_dir(&path)?;
         }
         Ok(remove_count)
     }
@@ -1812,4 +2033,76 @@ fn collect_files(root: &std::path::Path, output: &mut Vec<std::path::PathBuf>) -
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn direct_index_bucket_changes_are_materialized_once_per_path() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("primadb-engine-bucket-batch-{unique}"));
+        let store = SegmentFileStore::new(&root, 8)?;
+        let key = direct_index_key("value", "s_76616c7565", "node");
+        let entry = DirectScalarIndexEntry {
+            node_id: "node".to_owned(),
+            path: "value".to_owned(),
+            value: JsonValue::String("value".to_owned()),
+            sortable_key: "s_76616c7565".to_owned(),
+        };
+        let transaction = StorageTransaction {
+            id: 1,
+            metadata: StorageMetadata::new(HybridClock::with_actor("test"), Vec::new(), 2),
+            nodes: BTreeMap::new(),
+            node_indexes: BTreeMap::from([
+                (
+                    "first".to_owned(),
+                    NodeIndexManifest {
+                        direct_index_keys: vec![key.clone()],
+                    },
+                ),
+                (
+                    "second".to_owned(),
+                    NodeIndexManifest {
+                        direct_index_keys: vec![key.clone()],
+                    },
+                ),
+            ]),
+            direct_indexes: BTreeMap::from([(key, entry)]),
+            records: BTreeMap::new(),
+            deleted_records: BTreeSet::new(),
+            auth_meta: BTreeMap::new(),
+            journal_ops: Vec::new(),
+        };
+        let payload = SegmentCommitPayload {
+            schema_version: SEGMENT_COMMIT_SCHEMA_VERSION,
+            transaction,
+            direct_index_removals: vec![direct_index_key("value", "s_76616c7565", "node")],
+        };
+
+        reset_segment_write_metrics_for_test(root.clone());
+        store.materialize_commit_payload(&payload)?;
+        let metrics = segment_write_metrics_for_test(root.clone());
+        assert_eq!(metrics.direct_index_writes, 1);
+        assert!(metrics.direct_index_directory_syncs > 0);
+
+        let bucket_path = store.direct_index_path(
+            payload
+                .transaction
+                .direct_indexes
+                .keys()
+                .next()
+                .expect("test transaction direct index key"),
+        );
+        let bucket = SegmentFileStore::read_direct_index_bucket_path(&bucket_path)?;
+        assert_eq!(bucket.entries.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
 }

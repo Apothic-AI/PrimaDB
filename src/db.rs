@@ -11325,6 +11325,108 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn segment_files_coalesce_unchanged_direct_index_bucket_writes() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-write-metrics-{unique}"));
+        let value = json!({
+            "name": "checkpoint",
+            "version": 7,
+            "enabled": true,
+        });
+
+        let writer = Primadb::with_replica_id("write-metrics-writer");
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
+        crate::engine::reset_segment_write_metrics_for_test(path.clone());
+        writer
+            .root("checkpoints")
+            .field("current")
+            .put(value.clone())?;
+        let first = crate::engine::segment_write_metrics_for_test(path.clone());
+        assert!(first.direct_index_writes > 0);
+        assert!(first.bytes_written > 0);
+        assert_eq!(first.file_syncs, first.file_writes);
+
+        crate::engine::reset_segment_write_metrics_for_test(path.clone());
+        writer.root("checkpoints").field("current").put(value)?;
+        let unchanged = crate::engine::segment_write_metrics_for_test(path.clone());
+        assert_eq!(unchanged.direct_index_writes, 0);
+        assert_eq!(unchanged.direct_index_directory_syncs, 0);
+
+        crate::engine::reset_segment_write_metrics_for_test(path.clone());
+        writer.root("checkpoints").field("current").put(json!({
+            "name": "checkpoint",
+            "version": 8,
+            "enabled": true,
+        }))?;
+        let changed = crate::engine::segment_write_metrics_for_test(path.clone());
+        assert_eq!(changed.direct_index_writes, 2);
+        assert!(changed.direct_index_directory_syncs > 0);
+        drop(writer);
+
+        let reader = Primadb::with_replica_id("write-metrics-reader");
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
+        assert_eq!(
+            reader.root("checkpoints").field("current").once_json()?,
+            Some(json!({
+                "$id": "checkpoints/current",
+                "name": "checkpoint",
+                "version": 8,
+                "enabled": true,
+            }))
+        );
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_files_keep_durability_mode_sync_policies() -> Result<()> {
+        let modes = [
+            ("full", crate::SegmentDurability::Full, true, true),
+            ("data", crate::SegmentDurability::Data, true, false),
+            ("relaxed", crate::SegmentDurability::Relaxed, false, false),
+        ];
+
+        for (name, durability, expect_file_sync, expect_directory_sync) in modes {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("primadb-segment-durability-{name}-{unique}"));
+            let db = Primadb::with_replica_id(format!("durability-{name}"));
+            db.open_durable_storage(crate::DurableStorageConfig::SegmentFiles {
+                directory: path.display().to_string(),
+                journal_retention: 8,
+                durability,
+                lock_mode: crate::SegmentLockMode::Exclusive,
+            })?;
+            crate::engine::reset_segment_write_metrics_for_test(path.clone());
+            db.root("durability").field("value").put(json!(1))?;
+            let metrics = crate::engine::segment_write_metrics_for_test(path.clone());
+
+            assert_eq!(
+                metrics.file_syncs > 0,
+                expect_file_sync,
+                "{name} file sync policy"
+            );
+            assert_eq!(
+                metrics.direct_index_directory_syncs > 0,
+                expect_directory_sync,
+                "{name} directory sync policy"
+            );
+            drop(db);
+            let _ = std::fs::remove_dir_all(path);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn segment_files_enforce_single_writer_lock() -> Result<()> {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
