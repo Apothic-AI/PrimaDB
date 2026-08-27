@@ -82,7 +82,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
@@ -233,8 +233,8 @@ struct TextWatchSubscriptionInner {
 struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
-    pending_ops: Vec<Operation>,
-    unflushed_ops: Vec<Operation>,
+    pending_ops: CompactedOperations,
+    unflushed_ops: CompactedOperations,
     subscriptions: std::collections::BTreeMap<u64, Watcher>,
     traversal_subscriptions: std::collections::BTreeMap<u64, TraversalWatcher>,
     record_subscriptions: std::collections::BTreeMap<u64, RecordWatcher>,
@@ -310,6 +310,132 @@ struct TextRebuildSnapshot {
     revision: u64,
     #[cfg(not(target_arch = "wasm32"))]
     cache_root: Option<std::path::PathBuf>,
+}
+
+/// The identity of the state slot an operation updates.
+///
+/// This is deliberately typed instead of being a formatted string. The map in
+/// [`CompactedOperations`] caches one key per queued operation, so appending an
+/// operation does not scan the queue or reconstruct every existing key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OperationCompactionKey {
+    Field {
+        node: String,
+        field: String,
+    },
+    SetMember {
+        node: String,
+        field: String,
+        member: String,
+    },
+}
+
+impl OperationCompactionKey {
+    fn from_operation(op: &Operation) -> Self {
+        match &op.action {
+            OperationAction::SetField { node, field, .. }
+            | OperationAction::DeleteField { node, field } => Self::Field {
+                node: node.clone(),
+                field: field.clone(),
+            },
+            OperationAction::AddSetMember {
+                node,
+                field,
+                member,
+            }
+            | OperationAction::RemoveSetMember {
+                node,
+                field,
+                member,
+            } => Self::SetMember {
+                node: node.clone(),
+                field: field.clone(),
+                member: member.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompactedOperations {
+    operations: Vec<Operation>,
+    indices: HashMap<OperationCompactionKey, usize>,
+}
+
+impl CompactedOperations {
+    fn from_operations<I>(operations: I) -> Self
+    where
+        I: IntoIterator<Item = Operation>,
+    {
+        let mut queue = Self::default();
+        for operation in operations {
+            queue.push(operation);
+        }
+        queue
+    }
+
+    fn push(&mut self, op: Operation) {
+        let key = OperationCompactionKey::from_operation(&op);
+        if let Some(&index) = self.indices.get(&key) {
+            let existing = &mut self.operations[index];
+            if op.revision >= existing.revision {
+                // Keep the original index: compaction has always preserved
+                // the first occurrence's position in the operation stream.
+                *existing = op;
+            }
+            return;
+        }
+
+        let index = self.operations.len();
+        self.operations.push(op);
+        self.indices.insert(key, index);
+    }
+
+    fn as_slice(&self) -> &[Operation] {
+        &self.operations
+    }
+
+    fn to_vec(&self) -> Vec<Operation> {
+        self.operations.clone()
+    }
+
+    fn into_operations(self) -> Vec<Operation> {
+        self.operations
+    }
+
+    fn len(&self) -> usize {
+        self.operations.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.operations.clear();
+        self.indices.clear();
+    }
+
+    fn rebuild_indices(&mut self) {
+        self.indices.clear();
+        for (index, operation) in self.operations.iter().enumerate() {
+            self.indices
+                .insert(OperationCompactionKey::from_operation(operation), index);
+        }
+    }
+
+    fn drain_prefix(&mut self, count: usize) {
+        debug_assert!(count <= self.operations.len());
+        self.operations.drain(..count);
+        self.indices.retain(|_, index| {
+            if *index < count {
+                false
+            } else {
+                *index -= count;
+                true
+            }
+        });
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -540,13 +666,14 @@ impl OperationQueueUndo {
         }
     }
 
-    fn restore(self, queue: &mut Vec<Operation>) {
-        queue.truncate(self.initial_len);
+    fn restore(self, queue: &mut CompactedOperations) {
+        queue.operations.truncate(self.initial_len);
         for (index, operation) in self.replaced {
-            if index < queue.len() {
-                queue[index] = operation;
+            if index < queue.operations.len() {
+                queue.operations[index] = operation;
             }
         }
+        queue.rebuild_indices();
     }
 }
 
@@ -560,7 +687,7 @@ fn restore_set_membership(set: &mut BTreeSet<NodeId>, node: NodeId, contained: b
 
 fn storage_metadata_from_inner(inner: &Inner, next_tx_id: u64) -> crate::StorageMetadata {
     let mut metadata =
-        build_storage_metadata(inner.clock.clone(), inner.pending_ops.clone(), next_tx_id);
+        build_storage_metadata(inner.clock.clone(), inner.pending_ops.to_vec(), next_tx_id);
     metadata.scope_policies = inner.scope_policies.clone();
     metadata.provisional_transactions = inner.provisional_transactions.clone();
     metadata.next_provisional_transaction_id = inner.next_provisional_transaction_id;
@@ -615,8 +742,8 @@ impl Primadb {
             inner: Arc::new(Mutex::new(Inner {
                 clock: HybridClock::with_actor(replica_id),
                 nodes: Default::default(),
-                pending_ops: Vec::new(),
-                unflushed_ops: Vec::new(),
+                pending_ops: CompactedOperations::default(),
+                unflushed_ops: CompactedOperations::default(),
                 subscriptions: Default::default(),
                 traversal_subscriptions: Default::default(),
                 record_subscriptions: Default::default(),
@@ -1404,7 +1531,7 @@ impl Primadb {
 
             match result {
                 Ok(value) => {
-                    let ops = inner.unflushed_ops[start_unflushed_len..].to_vec();
+                    let ops = inner.unflushed_ops.as_slice()[start_unflushed_len..].to_vec();
                     let operation_count = ops.len();
                     inner.transaction_journal.take();
                     (
@@ -1496,7 +1623,7 @@ impl Primadb {
             (
                 inner.storage_engine.clone(),
                 inner.clock.clone(),
-                inner.pending_ops.clone(),
+                inner.pending_ops.to_vec(),
                 inner.nodes.clone(),
                 inner.scope_policies.clone(),
                 inner.provisional_transactions.clone(),
@@ -1532,7 +1659,7 @@ impl Primadb {
         let tx_id = inner.next_storage_tx_id;
         let metadata = storage_metadata_from_inner(&inner, tx_id.saturating_add(1));
         let mut transaction = build_storage_transaction(tx_id, metadata, inner.nodes.clone());
-        transaction.journal_ops = inner.unflushed_ops.clone();
+        transaction.journal_ops = inner.unflushed_ops.to_vec();
         transaction
     }
 
@@ -1551,7 +1678,12 @@ impl Primadb {
         if inner.unflushed_ops.is_empty() {
             build_storage_transaction(tx_id, metadata, BTreeMap::new())
         } else {
-            build_storage_transaction_from_ops(tx_id, metadata, &inner.nodes, &inner.unflushed_ops)
+            build_storage_transaction_from_ops(
+                tx_id,
+                metadata,
+                &inner.nodes,
+                inner.unflushed_ops.as_slice(),
+            )
         }
     }
 
@@ -1590,10 +1722,11 @@ impl Primadb {
         let mut inner = self.inner.lock().unwrap();
         if !ops.is_empty() {
             let saved = ops.len();
-            if inner.unflushed_ops.len() < saved || inner.unflushed_ops[..saved] != *ops {
+            if inner.unflushed_ops.len() < saved || inner.unflushed_ops.as_slice()[..saved] != *ops
+            {
                 return Ok(());
             }
-            inner.unflushed_ops.drain(..saved);
+            inner.unflushed_ops.drain_prefix(saved);
         }
         Ok(())
     }
@@ -1658,7 +1791,7 @@ impl Primadb {
             let mut inner = self.inner.lock().unwrap();
             inner.clock = snapshot.clock;
             inner.nodes = snapshot.nodes;
-            inner.pending_ops = compact_operations(snapshot.pending_ops);
+            inner.pending_ops = CompactedOperations::from_operations(snapshot.pending_ops);
             inner.scope_policies = snapshot.scope_policies;
             inner.provisional_transactions = snapshot.provisional_transactions;
             inner.next_provisional_transaction_id = snapshot.next_provisional_transaction_id;
@@ -1686,9 +1819,9 @@ impl Primadb {
             inner.clock = snapshot.clock.rebased_with_actor(local_actor);
             inner.nodes = snapshot.nodes;
             inner.pending_ops = if keep_pending {
-                compact_operations(snapshot.pending_ops)
+                CompactedOperations::from_operations(snapshot.pending_ops)
             } else {
-                Vec::new()
+                CompactedOperations::default()
             };
             inner.scope_policies = snapshot.scope_policies;
             inner.provisional_transactions = snapshot.provisional_transactions;
@@ -1702,7 +1835,7 @@ impl Primadb {
     }
 
     pub fn pending_operations(&self) -> Vec<Operation> {
-        self.inner.lock().unwrap().pending_ops.clone()
+        self.inner.lock().unwrap().pending_ops.to_vec()
     }
 
     pub fn change_revision(&self) -> u64 {
@@ -1719,7 +1852,7 @@ impl Primadb {
     pub fn drain_pending_operations(&self) -> Result<Vec<Operation>> {
         let ops = {
             let mut inner = self.inner.lock().unwrap();
-            std::mem::take(&mut inner.pending_ops)
+            std::mem::take(&mut inner.pending_ops).into_operations()
         };
         if !ops.is_empty() {
             self.finalize_change(ChangeImpact::pending_only())?;
@@ -1735,7 +1868,7 @@ impl Primadb {
         {
             let mut inner = self.inner.lock().unwrap();
             for op in ops {
-                push_compacted_operation(&mut inner.pending_ops, op);
+                inner.pending_ops.push(op);
                 count += 1;
             }
         }
@@ -2017,7 +2150,7 @@ impl Primadb {
             (
                 inner.storage_engine.clone(),
                 inner.clock.clone(),
-                inner.pending_ops.clone(),
+                inner.pending_ops.to_vec(),
                 inner.nodes.clone(),
                 inner.scope_policies.clone(),
             )
@@ -2529,7 +2662,7 @@ impl Primadb {
             let inner = self.inner.lock().unwrap();
             let mut metadata = build_storage_metadata(
                 inner.clock.clone(),
-                inner.pending_ops.clone(),
+                inner.pending_ops.to_vec(),
                 inner.next_storage_tx_id + 1,
             );
             metadata.scope_policies = inner.scope_policies.clone();
@@ -2599,7 +2732,7 @@ impl Primadb {
             let mut inner = self.inner.lock().unwrap();
             if let Some(metadata) = metadata.clone() {
                 inner.clock = metadata.clock;
-                inner.pending_ops = metadata.pending_ops;
+                inner.pending_ops = CompactedOperations::from_operations(metadata.pending_ops);
                 inner.scope_policies = metadata.scope_policies;
                 inner.provisional_transactions = metadata.provisional_transactions;
                 inner.next_provisional_transaction_id = metadata.next_provisional_transaction_id;
@@ -2753,7 +2886,7 @@ impl Primadb {
                         tx_id,
                         metadata,
                         &inner.nodes,
-                        &inner.unflushed_ops,
+                        inner.unflushed_ops.as_slice(),
                     )
                 }
             });
@@ -2764,12 +2897,12 @@ impl Primadb {
                 DatabaseSnapshot {
                     clock: inner.clock.clone(),
                     nodes: inner.nodes.clone(),
-                    pending_ops: inner.pending_ops.clone(),
+                    pending_ops: inner.pending_ops.to_vec(),
                     scope_policies: inner.scope_policies.clone(),
                     provisional_transactions: inner.provisional_transactions.clone(),
                     next_provisional_transaction_id: inner.next_provisional_transaction_id,
                 },
-                inner.unflushed_ops.clone(),
+                inner.unflushed_ops.to_vec(),
                 storage_transaction,
                 inner.external_storage_hooks,
             )
@@ -2826,7 +2959,7 @@ impl Primadb {
     fn finalize_local_change(&self) -> Result<()> {
         let impact = {
             let inner = self.inner.lock().unwrap();
-            ChangeImpact::from_ops(&inner.unflushed_ops)
+            ChangeImpact::from_ops(inner.unflushed_ops.as_slice())
         };
         self.finalize_change(impact)
     }
@@ -5802,15 +5935,11 @@ impl Inner {
             OperationQueue::Pending => (&self.pending_ops, &mut journal.pending_ops),
             OperationQueue::Unflushed => (&self.unflushed_ops, &mut journal.unflushed_ops),
         };
-        let key = operation_compaction_key(op);
-        if let Some((index, existing)) = operations
-            .iter()
-            .enumerate()
-            .find(|(_, candidate)| operation_compaction_key(candidate) == key)
-        {
+        let key = OperationCompactionKey::from_operation(op);
+        if let Some(&index) = operations.indices.get(&key) {
             undo.replaced
                 .entry(index)
-                .or_insert_with(|| existing.clone());
+                .or_insert_with(|| operations.operations[index].clone());
         }
     }
 
@@ -6899,12 +7028,12 @@ impl Inner {
             let source = operation_source_node(&op).to_owned();
             self.reindex_node_relationships(&source);
             self.journal_operation_queue(OperationQueue::Unflushed, &op);
-            push_compacted_operation(&mut self.unflushed_ops, op.clone());
+            self.unflushed_ops.push(op.clone());
         }
 
         if accepted && origin == OperationOrigin::Local {
             self.journal_operation_queue(OperationQueue::Pending, &op);
-            push_compacted_operation(&mut self.pending_ops, op);
+            self.pending_ops.push(op);
         }
 
         accepted
@@ -7234,50 +7363,6 @@ fn operation_touched_record_key(op: &Operation) -> Option<String> {
         } if crate::is_record_node_id(node) && field == "key" => Some(key.clone()),
         _ => None,
     }
-}
-
-fn operation_compaction_key(op: &Operation) -> String {
-    match &op.action {
-        OperationAction::SetField { node, field, .. }
-        | OperationAction::DeleteField { node, field } => {
-            format!("field\0{node}\0{field}")
-        }
-        OperationAction::AddSetMember {
-            node,
-            field,
-            member,
-        }
-        | OperationAction::RemoveSetMember {
-            node,
-            field,
-            member,
-        } => format!("set\0{node}\0{field}\0{member}"),
-    }
-}
-
-fn push_compacted_operation(queue: &mut Vec<Operation>, op: Operation) {
-    let key = operation_compaction_key(&op);
-    if let Some(existing) = queue
-        .iter_mut()
-        .find(|candidate| operation_compaction_key(candidate) == key)
-    {
-        if op.revision >= existing.revision {
-            *existing = op;
-        }
-        return;
-    }
-    queue.push(op);
-}
-
-fn compact_operations<I>(ops: I) -> Vec<Operation>
-where
-    I: IntoIterator<Item = Operation>,
-{
-    let mut compacted = Vec::new();
-    for op in ops {
-        push_compacted_operation(&mut compacted, op);
-    }
-    compacted
 }
 
 fn operation_source_node(op: &Operation) -> &str {
@@ -8289,17 +8374,19 @@ fn lex_key_matches(key: &str, spec: &LexSpec) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeFetchScheduler, Primadb, build_pull_responses};
+    use super::{CompactedOperations, NodeFetchScheduler, Primadb, build_pull_responses};
     use crate::{
         ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PrimadbError,
         PrimadbLimits, PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter,
         QuerySpec, RecordBatch, RecordEntry, RecordMutation, RecordPrecondition, RecordScan,
-        RecordScanResult, RecordValue, RemotePath, Result, RoomHookContext, ScopeAuthority,
-        ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext, ServeResultContext,
-        TextCandidatePolicy, TextCollectionConfig, TextDocument, TextScoreScope, TextSearchSource,
-        TextSearchSpec, TransactionOptions, TransactionStatus, TransactionStep, TraversalDirection,
-        TraversalSpec, VectorCollectionConfig, VectorFilter, VectorMetric, VectorSearchSpec,
+        RecordScanResult, RecordValue, RemotePath, Result, Revision, RoomHookContext,
+        ScopeAuthority, ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext,
+        ServeResultContext, TextCandidatePolicy, TextCollectionConfig, TextDocument,
+        TextScoreScope, TextSearchSource, TextSearchSpec, TransactionOptions, TransactionStatus,
+        TransactionStep, TraversalDirection, TraversalSpec, VectorCollectionConfig, VectorFilter,
+        VectorMetric, VectorSearchSpec,
     };
+    use crate::{Operation, OperationAction, OperationValue};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier};
@@ -8316,6 +8403,143 @@ mod tests {
             exact: true,
             stale_policy: Default::default(),
         }
+    }
+
+    fn test_operation(id: impl Into<String>, millis: u64, action: OperationAction) -> Operation {
+        Operation {
+            op_id: id.into(),
+            author: "test".to_owned(),
+            revision: Revision {
+                millis,
+                counter: 0,
+                actor: "test".to_owned(),
+            },
+            action,
+        }
+    }
+
+    #[test]
+    fn compacted_operations_preserve_first_key_order_and_revision_semantics() {
+        let field_a = || OperationAction::SetField {
+            node: "node".to_owned(),
+            field: "a".to_owned(),
+            value: OperationValue::Scalar(json!(true)),
+        };
+        let set_member = || OperationAction::AddSetMember {
+            node: "node".to_owned(),
+            field: "members".to_owned(),
+            member: "alice".to_owned(),
+        };
+        let field_b = || OperationAction::SetField {
+            node: "node".to_owned(),
+            field: "b".to_owned(),
+            value: OperationValue::Scalar(json!(true)),
+        };
+
+        let mut queue = CompactedOperations::default();
+        queue.push(test_operation("field-a-first", 2, field_a()));
+        queue.push(test_operation("member-first", 2, set_member()));
+        queue.push(test_operation("field-b", 2, field_b()));
+        queue.push(test_operation("field-a-older", 1, field_a()));
+        queue.push(test_operation(
+            "field-a-latest",
+            3,
+            OperationAction::DeleteField {
+                node: "node".to_owned(),
+                field: "a".to_owned(),
+            },
+        ));
+        queue.push(test_operation(
+            "member-latest",
+            3,
+            OperationAction::RemoveSetMember {
+                node: "node".to_owned(),
+                field: "members".to_owned(),
+                member: "alice".to_owned(),
+            },
+        ));
+
+        let ids: Vec<_> = queue
+            .as_slice()
+            .iter()
+            .map(|operation| operation.op_id.as_str())
+            .collect();
+        assert_eq!(ids, ["field-a-latest", "member-latest", "field-b"]);
+        assert_eq!(queue.indices.len(), queue.len());
+    }
+
+    #[test]
+    fn compacted_operation_keys_are_typed_and_cache_survives_restoration_and_drain() {
+        let operations = [
+            test_operation(
+                "delimited-node",
+                1,
+                OperationAction::SetField {
+                    node: "a\0b".to_owned(),
+                    field: "c".to_owned(),
+                    value: OperationValue::Scalar(json!(1)),
+                },
+            ),
+            test_operation(
+                "delimited-field",
+                1,
+                OperationAction::SetField {
+                    node: "a".to_owned(),
+                    field: "b\0c".to_owned(),
+                    value: OperationValue::Scalar(json!(2)),
+                },
+            ),
+        ];
+        let mut queue = CompactedOperations::from_operations(operations);
+        assert_eq!(queue.len(), 2);
+
+        queue.drain_prefix(1);
+        queue.push(test_operation(
+            "delimited-field-newer",
+            2,
+            OperationAction::DeleteField {
+                node: "a".to_owned(),
+                field: "b\0c".to_owned(),
+            },
+        ));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.as_slice()[0].op_id, "delimited-field-newer");
+        assert_eq!(queue.indices.len(), 1);
+    }
+
+    #[test]
+    fn compacted_operations_handle_large_keyed_batches() {
+        const OPERATION_COUNT: usize = 20_000;
+        let mut queue = CompactedOperations::default();
+        for index in 0..OPERATION_COUNT {
+            queue.push(test_operation(
+                format!("first-{index}"),
+                1,
+                OperationAction::SetField {
+                    node: "bulk".to_owned(),
+                    field: format!("field-{index}"),
+                    value: OperationValue::Scalar(json!(index)),
+                },
+            ));
+        }
+        for index in 0..OPERATION_COUNT {
+            queue.push(test_operation(
+                format!("latest-{index}"),
+                2,
+                OperationAction::DeleteField {
+                    node: "bulk".to_owned(),
+                    field: format!("field-{index}"),
+                },
+            ));
+        }
+
+        assert_eq!(queue.len(), OPERATION_COUNT);
+        assert_eq!(queue.indices.len(), OPERATION_COUNT);
+        assert_eq!(queue.as_slice()[0].op_id, "latest-0");
+        assert_eq!(
+            queue.as_slice()[OPERATION_COUNT - 1].op_id,
+            format!("latest-{}", OPERATION_COUNT - 1)
+        );
     }
 
     #[test]
