@@ -726,15 +726,12 @@ impl Primadb {
     }
 
     pub fn scan_records(&self, scan: RecordScan) -> Result<RecordScanResult> {
-        let storage_entries = {
+        let storage_engine = {
             let engine = { self.inner.lock().unwrap().storage_engine.clone() };
-            match engine {
-                Some(engine) => engine.scan_record_entries(&scan)?,
-                None => None,
-            }
+            engine
         };
         let mut inner = self.inner.lock().unwrap();
-        let entries = collect_record_entries_for_scan(&mut inner, &scan, storage_entries)?;
+        let entries = collect_record_entries_for_scan(&mut inner, &scan, storage_engine)?;
         Ok(record_scan_result(entries, &scan))
     }
 
@@ -4071,14 +4068,49 @@ fn collect_record_entries_for_scan_locked(
     inner: &mut Inner,
     scan: &RecordScan,
 ) -> Result<Vec<RecordEntry>> {
-    let storage_entries = match inner.storage_engine.clone() {
-        Some(engine) => engine.scan_record_entries(scan)?,
-        None => None,
-    };
-    collect_record_entries_for_scan(inner, scan, storage_entries)
+    collect_record_entries_for_scan(inner, scan, inner.storage_engine.clone())
 }
 
 fn collect_record_entries_for_scan(
+    inner: &mut Inner,
+    scan: &RecordScan,
+    storage_engine: Option<Arc<dyn IncrementalStore>>,
+) -> Result<Vec<RecordEntry>> {
+    let Some(storage_engine) = storage_engine else {
+        return collect_record_entries_for_scan_page(inner, scan, None);
+    };
+
+    let Some(limit) = scan.limit else {
+        let storage_entries = storage_engine.scan_record_entries(scan)?;
+        return collect_record_entries_for_scan_page(inner, scan, storage_entries);
+    };
+
+    let page_limit = limit.saturating_add(1).max(1);
+    let mut page_scan = scan.clone();
+    page_scan.limit = Some(page_limit);
+    let mut storage_entries = Vec::new();
+    loop {
+        let page = storage_engine.scan_record_entries(&page_scan)?;
+        let page_is_short = page.as_ref().is_none_or(|page| page.len() < page_limit);
+        let last_key = page
+            .as_ref()
+            .and_then(|page| page.last())
+            .map(|entry| entry.key.clone());
+        if let Some(page) = page {
+            storage_entries.extend(page);
+        }
+
+        let merged =
+            collect_record_entries_for_scan_page(inner, scan, Some(storage_entries.clone()))?;
+        if merged.len() > limit || page_is_short || last_key.is_none() {
+            return Ok(merged);
+        }
+
+        page_scan.cursor = last_key;
+    }
+}
+
+fn collect_record_entries_for_scan_page(
     inner: &mut Inner,
     scan: &RecordScan,
     storage_entries: Option<Vec<RecordEntry>>,
@@ -10638,6 +10670,105 @@ mod tests {
             .get_record("agentfs/dentry/1/README.md")?
             .expect("dentry should remain");
         assert_eq!(dentry.value, RecordValue::Json(json!({"ino": 2})));
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn segment_record_scans_page_large_directories_in_both_directions() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-record-scan-pages-{unique}"));
+
+        let writer = Primadb::with_replica_id("record-page-writer");
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
+        for index in 0..128 {
+            writer.put_record_json(&format!("records/{index:03}"), json!({"index": index}))?;
+        }
+        drop(writer);
+
+        let reader = Primadb::with_replica_id("record-page-reader");
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
+        assert_eq!(reader.stats().nodes, 0);
+
+        let overlay = Primadb::with_replica_id("record-page-overlay");
+        overlay.put_record_json("records/000", json!({"overlay": true}))?;
+        overlay.delete_record("records/001")?;
+        overlay.delete_record("records/002")?;
+        overlay.put_record_json("records/000.5", json!({"overlay": true}))?;
+        let overlay_nodes = overlay.inner.lock().unwrap().nodes.clone();
+        reader.inner.lock().unwrap().nodes.extend(overlay_nodes);
+
+        let overlay_page = reader.scan_records(RecordScan {
+            prefix: Some("records/".to_owned()),
+            limit: Some(2),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(overlay_page.entries[0].key, "records/000");
+        assert_eq!(overlay_page.entries[1].key, "records/000.5");
+        assert_eq!(overlay_page.next_cursor.as_deref(), Some("records/000.5"));
+        reader.inner.lock().unwrap().nodes.clear();
+
+        let forward = reader.scan_records(RecordScan {
+            prefix: Some("records/".to_owned()),
+            limit: Some(7),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(forward.entries.len(), 7);
+        assert_eq!(forward.entries[0].key, "records/000");
+        assert_eq!(forward.entries[6].key, "records/006");
+        assert_eq!(forward.next_cursor.as_deref(), Some("records/006"));
+
+        let forward_next = reader.scan_records(RecordScan {
+            prefix: Some("records/".to_owned()),
+            cursor: forward.next_cursor,
+            limit: Some(7),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(forward_next.entries[0].key, "records/007");
+        assert_eq!(forward_next.entries[6].key, "records/013");
+
+        let reverse = reader.scan_records(RecordScan {
+            prefix: Some("records/".to_owned()),
+            reverse: true,
+            limit: Some(7),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(reverse.entries.len(), 7);
+        assert_eq!(reverse.entries[0].key, "records/127");
+        assert_eq!(reverse.entries[6].key, "records/121");
+        assert_eq!(reverse.next_cursor.as_deref(), Some("records/121"));
+
+        let reverse_next = reader.scan_records(RecordScan {
+            prefix: Some("records/".to_owned()),
+            reverse: true,
+            cursor: reverse.next_cursor,
+            limit: Some(7),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(reverse_next.entries[0].key, "records/120");
+        assert_eq!(reverse_next.entries[6].key, "records/114");
+
+        let range = reader.scan_records(RecordScan {
+            prefix: Some("records/".to_owned()),
+            start_after: Some("records/050".to_owned()),
+            end_before: Some("records/055".to_owned()),
+            limit: Some(2),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(
+            range
+                .entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            ["records/051", "records/052"]
+        );
+        assert_eq!(range.next_cursor.as_deref(), Some("records/052"));
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())
