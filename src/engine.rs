@@ -736,35 +736,95 @@ impl SegmentFileStore {
         (root, partial)
     }
 
-    fn collect_record_entry_files(
+    fn collect_record_entries(
         dir: &std::path::Path,
+        encoded_key: &str,
         partial_component_prefix: Option<&str>,
-        files: &mut Vec<std::path::PathBuf>,
-    ) -> Result<()> {
+        scan: &RecordScan,
+        entries: &mut Vec<RecordEntry>,
+    ) -> Result<bool> {
         if !dir.exists() {
-            return Ok(());
+            return Ok(false);
         }
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+
+        let mut children = std::fs::read_dir(dir)?
+            .map(|entry| entry.map_err(Into::into))
+            .collect::<Result<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        let record_file = children
+            .iter()
+            .find(|entry| entry.file_name() == RECORD_ENTRY_FILE)
+            .map(|entry| entry.path());
+        let mut directories = children
+            .into_iter()
+            .filter(|entry| entry.path().is_dir())
+            .collect::<Vec<_>>();
+
+        if !scan.reverse
+            && let Some(path) = record_file.as_deref()
+            && Self::collect_record_entry_file(path, encoded_key, scan, entries)?
+        {
+            return Ok(true);
+        }
+
+        if scan.reverse {
+            directories.reverse();
+        }
+        for entry in directories {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_file() {
-                if name == RECORD_ENTRY_FILE {
-                    files.push(path);
-                }
-                continue;
-            }
-            if !path.is_dir() {
-                continue;
-            }
             if let Some(partial) = partial_component_prefix
                 && !name.starts_with(partial)
             {
                 continue;
             }
-            Self::collect_record_entry_files(&path, None, files)?;
+
+            let next_encoded_key = if encoded_key.is_empty() {
+                name
+            } else {
+                format!("{encoded_key}{name}")
+            };
+            if Self::collect_record_entries(&path, &next_encoded_key, None, scan, entries)? {
+                return Ok(true);
+            }
         }
-        Ok(())
+
+        if scan.reverse
+            && let Some(path) = record_file.as_deref()
+            && Self::collect_record_entry_file(path, encoded_key, scan, entries)?
+        {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn collect_record_entry_file(
+        path: &std::path::Path,
+        encoded_key: &str,
+        scan: &RecordScan,
+        entries: &mut Vec<RecordEntry>,
+    ) -> Result<bool> {
+        let candidate = if encoded_key.is_empty() || encoded_key == RECORD_EMPTY_KEY_COMPONENT {
+            Some(String::new())
+        } else if encoded_key.ends_with(RECORD_OVERFLOW_COMPONENT) {
+            None
+        } else {
+            decode_component(encoded_key).ok()
+        };
+
+        let entry = match candidate {
+            Some(key) if scan.matches_key(&key) => Self::read_record_entry_path(path)?,
+            Some(_) => return Ok(false),
+            None => {
+                let entry = Self::read_record_entry_path(path)?;
+                if !scan.matches_key(&entry.key) {
+                    return Ok(false);
+                }
+                entry
+            }
+        };
+        entries.push(entry);
+        Ok(scan.limit.is_some_and(|limit| entries.len() >= limit))
     }
 
     fn prune_empty_record_dirs(&self, start: &std::path::Path) -> Result<usize> {
@@ -1249,19 +1309,23 @@ impl IncrementalStore for SegmentFileStore {
             return Ok(Some(Vec::new()));
         }
         let mut entries = Vec::new();
-        let mut files = Vec::new();
-        Self::collect_record_entry_files(&root, partial_component_prefix.as_deref(), &mut files)?;
-        files.sort();
-        for file in files {
-            let entry = Self::read_record_entry_path(&file)?;
-            if scan.matches_key(&entry.key) {
-                entries.push(entry);
-            }
-        }
-        entries.sort_by(|left, right| left.key.cmp(&right.key));
-        if scan.reverse {
-            entries.reverse();
-        }
+        let encoded_root = root
+            .strip_prefix(self.record_entries_root())
+            .ok()
+            .map(|relative| {
+                relative
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        Self::collect_record_entries(
+            &root,
+            &encoded_root,
+            partial_component_prefix.as_deref(),
+            scan,
+            &mut entries,
+        )?;
         Ok(Some(entries))
     }
 
