@@ -86,8 +86,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-const PARALLEL_QUERY_MIN_LEN: usize = 256;
-#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 const PARALLEL_CHUNK_MIN_LEN: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -276,6 +274,8 @@ struct Inner {
     #[cfg(feature = "crypto")]
     security: SecurityState,
     transaction_journal: Option<TransactionJournal>,
+    #[cfg(test)]
+    query_candidate_projections: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -537,6 +537,41 @@ enum Cursor {
     Field { node: NodeId, field: String },
 }
 
+#[derive(Debug, Clone)]
+enum QueryCandidateSource {
+    Node(NodeId),
+    Field { node: NodeId, field: String },
+}
+
+#[derive(Debug, Clone)]
+struct QueryCandidate {
+    key: String,
+    source: QueryCandidateSource,
+}
+
+#[derive(Debug)]
+struct EvaluatedQueryCandidate {
+    candidate: QueryCandidate,
+    full_value: Option<JsonValue>,
+    order_value: Option<JsonValue>,
+}
+
+enum QueryValuePath<'a> {
+    Full,
+    Key,
+    Segments(Vec<&'a str>),
+}
+
+impl<'a> QueryValuePath<'a> {
+    fn new(path: &'a str) -> Self {
+        match path {
+            "" | "$value" => Self::Full,
+            "$key" => Self::Key,
+            _ => Self::Segments(path.split('.').collect()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationOrigin {
     Local,
@@ -785,6 +820,8 @@ impl Primadb {
                 #[cfg(feature = "crypto")]
                 security: SecurityState::default(),
                 transaction_journal: None,
+                #[cfg(test)]
+                query_candidate_projections: 0,
             })),
         }
     }
@@ -3084,21 +3121,12 @@ impl Primadb {
             return Ok(entries);
         }
 
-        let mut entries = filter_query_entries(self.map_at(anchor, segments)?, spec);
-
-        if let Some(order) = &spec.order {
-            sort_query_entries(&mut entries, order);
-        }
-
-        let offset = spec.offset.min(entries.len());
-        if offset > 0 {
-            entries.drain(0..offset);
-        }
-        if let Some(limit) = spec.limit {
-            entries.truncate(limit);
-        }
-
-        Ok(entries)
+        let mut inner = self.inner.lock().unwrap();
+        let candidates = match inner.resolve_cursor(anchor, segments)? {
+            Some(cursor) => inner.query_candidates(cursor),
+            None => Vec::new(),
+        };
+        Ok(inner.evaluate_query_candidates(candidates, spec))
     }
 
     fn traverse_at(
@@ -3197,8 +3225,7 @@ impl Primadb {
             }
         }
 
-        let mut entries = Vec::new();
-        let mut scan_path = None;
+        let mut candidates = Vec::new();
         if let Some(order_path) = ordered_index_path.clone() {
             let direction = spec
                 .order
@@ -3219,44 +3246,24 @@ impl Primadb {
                 if !eligible_ids.contains(&entry.node_id) || !seen.insert(entry.node_id.clone()) {
                     continue;
                 }
-                entries.push(MapEntry {
+                candidates.push(QueryCandidate {
                     key: entry.node_id.clone(),
-                    value: inner.materialize_node(
-                        &entry.node_id,
-                        &entry.node_id,
-                        &mut BTreeSet::new(),
-                    ),
+                    source: QueryCandidateSource::Node(entry.node_id),
                 });
-                if target_count.is_some_and(|target| entries.len() >= target) {
+                if target_count.is_some_and(|target| candidates.len() >= target) {
                     break;
                 }
             }
-            scan_path = Some(order_path);
         } else {
             for member_id in &eligible_ids {
-                entries.push(MapEntry {
+                candidates.push(QueryCandidate {
                     key: member_id.clone(),
-                    value: inner.materialize_node(member_id, member_id, &mut BTreeSet::new()),
+                    source: QueryCandidateSource::Node(member_id.clone()),
                 });
             }
         }
 
-        entries = filter_query_entries(entries, spec);
-        if let Some(order) = &spec.order {
-            if scan_path.as_deref() != Some(order.path.as_str()) {
-                sort_query_entries(&mut entries, order);
-            }
-        }
-
-        let offset = spec.offset.min(entries.len());
-        if offset > 0 {
-            entries.drain(0..offset);
-        }
-        if let Some(limit) = spec.limit {
-            entries.truncate(limit);
-        }
-
-        Ok(Some(entries))
+        Ok(Some(inner.evaluate_query_candidates(candidates, spec)))
     }
 
     fn scan_at(&self, anchor: &str, segments: &[String], spec: &LexSpec) -> Result<Vec<LexEntry>> {
@@ -7257,6 +7264,268 @@ impl Inner {
             FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
         }
     }
+
+    fn query_candidates(&mut self, cursor: Cursor) -> Vec<QueryCandidate> {
+        match cursor {
+            Cursor::Node(node) => {
+                let _ = self.maybe_load_node(&node);
+                self.nodes
+                    .get(&node)
+                    .map(|state| {
+                        state
+                            .fields
+                            .keys()
+                            .map(|field| QueryCandidate {
+                                key: field.clone(),
+                                source: QueryCandidateSource::Field {
+                                    node: node.clone(),
+                                    field: field.clone(),
+                                },
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            Cursor::Field { node, field } => {
+                let _ = self.maybe_load_node(&node);
+                let Some(value) = self
+                    .nodes
+                    .get(&node)
+                    .and_then(|state| state.fields.get(&field))
+                    .map(|state| state.value.clone())
+                else {
+                    return Vec::new();
+                };
+                match value {
+                    FieldValue::Link(target) => self.query_candidates(Cursor::Node(target)),
+                    FieldValue::Set(set) => set
+                        .members
+                        .keys()
+                        .cloned()
+                        .map(|node| QueryCandidate {
+                            key: node.clone(),
+                            source: QueryCandidateSource::Node(node),
+                        })
+                        .collect(),
+                    FieldValue::Scalar(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    fn evaluate_query_candidates(
+        &mut self,
+        candidates: Vec<QueryCandidate>,
+        spec: &QuerySpec,
+    ) -> Vec<MapEntry> {
+        let filter_paths = spec
+            .filters
+            .iter()
+            .map(|filter| QueryValuePath::new(filter_path(filter)))
+            .collect::<Vec<_>>();
+        let order_path = spec
+            .order
+            .as_ref()
+            .map(|order| QueryValuePath::new(&order.path));
+        let mut evaluated = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                self.evaluate_query_candidate(candidate, spec, &filter_paths, order_path.as_ref())
+            })
+            .collect::<Vec<_>>();
+        if let Some(order) = &spec.order {
+            evaluated.sort_by(|left, right| compare_evaluated_candidates(left, right, order));
+        }
+        let offset = spec.offset.min(evaluated.len());
+        let end = spec
+            .limit
+            .map(|limit| offset.saturating_add(limit).min(evaluated.len()))
+            .unwrap_or(evaluated.len());
+        evaluated
+            .into_iter()
+            .skip(offset)
+            .take(end.saturating_sub(offset))
+            .map(|mut evaluated| {
+                let key = evaluated.candidate.key.clone();
+                let value = evaluated
+                    .full_value
+                    .take()
+                    .unwrap_or_else(|| self.materialize_query_candidate(&evaluated.candidate));
+                MapEntry { key, value }
+            })
+            .collect()
+    }
+
+    fn evaluate_query_candidate(
+        &mut self,
+        candidate: QueryCandidate,
+        spec: &QuerySpec,
+        filter_paths: &[QueryValuePath<'_>],
+        order_path: Option<&QueryValuePath<'_>>,
+    ) -> Option<EvaluatedQueryCandidate> {
+        let mut evaluated = EvaluatedQueryCandidate {
+            candidate,
+            full_value: None,
+            order_value: None,
+        };
+        for (filter, path) in spec.filters.iter().zip(filter_paths) {
+            match self.query_candidate_value(&evaluated.candidate, path) {
+                Ok(value) if matches_filter_value(value.as_ref(), filter) => {}
+                Ok(_) => return None,
+                Err(()) => {
+                    if evaluated.full_value.is_none() {
+                        evaluated.full_value =
+                            Some(self.materialize_query_candidate(&evaluated.candidate));
+                    }
+                    if !matches_filter_parts(
+                        &evaluated.candidate.key,
+                        evaluated.full_value.as_ref().unwrap(),
+                        filter,
+                    ) {
+                        return None;
+                    }
+                }
+            }
+        }
+        if let Some(order) = &spec.order {
+            match self.query_candidate_value(&evaluated.candidate, order_path.unwrap()) {
+                Ok(value) => evaluated.order_value = value,
+                Err(()) => {
+                    if evaluated.full_value.is_none() {
+                        evaluated.full_value =
+                            Some(self.materialize_query_candidate(&evaluated.candidate));
+                    }
+                    evaluated.order_value = query_value_parts(
+                        &evaluated.candidate.key,
+                        evaluated.full_value.as_ref().unwrap(),
+                        &order.path,
+                    );
+                }
+            }
+        }
+        Some(evaluated)
+    }
+
+    fn materialize_query_candidate(&mut self, candidate: &QueryCandidate) -> JsonValue {
+        #[cfg(test)]
+        {
+            self.query_candidate_projections = self.query_candidate_projections.saturating_add(1);
+        }
+        match &candidate.source {
+            QueryCandidateSource::Node(node) => {
+                self.materialize_node(node, node, &mut BTreeSet::new())
+            }
+            QueryCandidateSource::Field { node, field } => {
+                let Some(value) = self
+                    .nodes
+                    .get(node)
+                    .and_then(|state| state.fields.get(field))
+                    .map(|state| state.value.clone())
+                else {
+                    return JsonValue::Null;
+                };
+                self.materialize_field(node, field, &value, &mut BTreeSet::new())
+            }
+        }
+    }
+
+    fn query_candidate_value(
+        &mut self,
+        candidate: &QueryCandidate,
+        path: &QueryValuePath<'_>,
+    ) -> std::result::Result<Option<JsonValue>, ()> {
+        let segments = match path {
+            QueryValuePath::Full => return Err(()),
+            QueryValuePath::Key => return Ok(Some(JsonValue::String(candidate.key.clone()))),
+            QueryValuePath::Segments(segments) => segments,
+        };
+        let mut visited = BTreeSet::new();
+        match &candidate.source {
+            QueryCandidateSource::Node(node) => self.query_node_value(node, segments, &mut visited),
+            QueryCandidateSource::Field { node, field } => {
+                self.query_field_value(node, field, segments, &mut visited)
+            }
+        }
+    }
+
+    fn query_node_value(
+        &mut self,
+        node: &str,
+        segments: &[&str],
+        visited: &mut BTreeSet<NodeId>,
+    ) -> std::result::Result<Option<JsonValue>, ()> {
+        if !visited.insert(node.to_owned()) {
+            return Err(());
+        }
+        if !self.maybe_load_node(node).unwrap_or(false) {
+            visited.remove(node);
+            return Err(());
+        }
+        let result = if let Some((first, rest)) = segments.split_first() {
+            if *first == "$id" {
+                if rest.is_empty() {
+                    Ok(Some(JsonValue::String(node.to_owned())))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                self.query_field_value(node, first, rest, visited)
+            }
+        } else {
+            Err(())
+        };
+        visited.remove(node);
+        result
+    }
+
+    fn query_field_value(
+        &mut self,
+        node: &str,
+        field: &str,
+        segments: &[&str],
+        visited: &mut BTreeSet<NodeId>,
+    ) -> std::result::Result<Option<JsonValue>, ()> {
+        let _ = self.maybe_load_node(node);
+        let Some(value) = self
+            .nodes
+            .get(node)
+            .and_then(|state| state.fields.get(field))
+            .map(|state| &state.value)
+        else {
+            return Ok(None);
+        };
+        match value {
+            FieldValue::Scalar(value) => self.query_scalar_value(node, field, value, segments),
+            FieldValue::Link(_) if segments.is_empty() => Err(()),
+            FieldValue::Link(target) => {
+                let target = target.clone();
+                self.query_node_value(&target, segments, visited)
+            }
+            FieldValue::Bytes(_) | FieldValue::Blob(_) | FieldValue::Set(_) => Err(()),
+        }
+    }
+
+    fn query_scalar_value(
+        &self,
+        node: &str,
+        field: &str,
+        value: &JsonValue,
+        segments: &[&str],
+    ) -> std::result::Result<Option<JsonValue>, ()> {
+        #[cfg(feature = "crypto")]
+        {
+            let value = self.materialize_scalar(&format!("{node}/{field}"), value);
+            query_scalar_path(&value, segments)
+        }
+
+        #[cfg(not(feature = "crypto"))]
+        {
+            let _ = (node, field);
+            query_scalar_path(value, segments)
+        }
+    }
 }
 
 fn display_path(anchor: &str, segments: &[String]) -> String {
@@ -7998,45 +8267,6 @@ where
     chunk_btree_map_impl(items, chunk_size.max(1))
 }
 
-fn filter_query_entries(mut entries: Vec<MapEntry>, spec: &QuerySpec) -> Vec<MapEntry> {
-    if spec.filters.is_empty() {
-        return entries;
-    }
-
-    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-    {
-        if entries.len() >= PARALLEL_QUERY_MIN_LEN {
-            return entries
-                .into_par_iter()
-                .filter(|entry| {
-                    spec.filters
-                        .iter()
-                        .all(|filter| matches_filter(entry, filter))
-                })
-                .collect();
-        }
-    }
-
-    entries.retain(|entry| {
-        spec.filters
-            .iter()
-            .all(|filter| matches_filter(entry, filter))
-    });
-    entries
-}
-
-fn sort_query_entries(entries: &mut Vec<MapEntry>, order: &crate::query::QueryOrder) {
-    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-    {
-        if entries.len() >= PARALLEL_QUERY_MIN_LEN {
-            entries.par_sort_unstable_by(|left, right| compare_entries(left, right, order));
-            return;
-        }
-    }
-
-    entries.sort_by(|left, right| compare_entries(left, right, order));
-}
-
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 fn chunk_vec_impl<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>>
 where
@@ -8112,44 +8342,86 @@ where
 }
 
 fn matches_filter(entry: &MapEntry, filter: &QueryFilter) -> bool {
+    matches_filter_parts(&entry.key, &entry.value, filter)
+}
+
+fn matches_filter_parts(key: &str, value: &JsonValue, filter: &QueryFilter) -> bool {
+    let value = query_value_parts(key, value, filter_path(filter));
+    matches_filter_value(value.as_ref(), filter)
+}
+
+fn filter_path(filter: &QueryFilter) -> &str {
     match filter {
-        QueryFilter::Eq { path, value } => {
-            query_value(entry, path).is_some_and(|candidate| candidate == *value)
-        }
-        QueryFilter::Ne { path, value } => {
-            query_value(entry, path).is_some_and(|candidate| candidate != *value)
-        }
-        QueryFilter::Gt { path, value } => query_value(entry, path)
-            .map(|candidate| compare_json_values(&candidate, value) == Some(Ordering::Greater))
-            .unwrap_or(false),
-        QueryFilter::Gte { path, value } => query_value(entry, path)
-            .map(|candidate| {
-                matches!(
-                    compare_json_values(&candidate, value),
-                    Some(Ordering::Greater | Ordering::Equal)
-                )
-            })
-            .unwrap_or(false),
-        QueryFilter::Lt { path, value } => query_value(entry, path)
-            .map(|candidate| compare_json_values(&candidate, value) == Some(Ordering::Less))
-            .unwrap_or(false),
-        QueryFilter::Lte { path, value } => query_value(entry, path)
-            .map(|candidate| {
-                matches!(
-                    compare_json_values(&candidate, value),
-                    Some(Ordering::Less | Ordering::Equal)
-                )
-            })
-            .unwrap_or(false),
-        QueryFilter::Prefix { path, value } => query_value(entry, path)
-            .and_then(|candidate| candidate.as_str().map(str::to_owned))
-            .map(|candidate| candidate.starts_with(value))
-            .unwrap_or(false),
-        QueryFilter::Contains { path, value } => query_value(entry, path)
-            .and_then(|candidate| candidate.as_str().map(str::to_owned))
-            .map(|candidate| candidate.contains(value))
-            .unwrap_or(false),
-        QueryFilter::Exists { path } => query_value(entry, path).is_some(),
+        QueryFilter::Eq { path, .. }
+        | QueryFilter::Ne { path, .. }
+        | QueryFilter::Gt { path, .. }
+        | QueryFilter::Gte { path, .. }
+        | QueryFilter::Lt { path, .. }
+        | QueryFilter::Lte { path, .. }
+        | QueryFilter::Prefix { path, .. }
+        | QueryFilter::Contains { path, .. }
+        | QueryFilter::Exists { path } => path,
+    }
+}
+
+fn matches_filter_value(value: Option<&JsonValue>, filter: &QueryFilter) -> bool {
+    match filter {
+        QueryFilter::Eq {
+            value: expected, ..
+        } => value.is_some_and(|candidate| candidate == expected),
+        QueryFilter::Ne {
+            value: expected, ..
+        } => value.is_some_and(|candidate| candidate != expected),
+        QueryFilter::Gt {
+            value: expected, ..
+        } => value
+            .and_then(|candidate| compare_json_values(candidate, expected))
+            .is_some_and(|ordering| ordering == Ordering::Greater),
+        QueryFilter::Gte {
+            value: expected, ..
+        } => value
+            .and_then(|candidate| compare_json_values(candidate, expected))
+            .is_some_and(|ordering| matches!(ordering, Ordering::Greater | Ordering::Equal)),
+        QueryFilter::Lt {
+            value: expected, ..
+        } => value
+            .and_then(|candidate| compare_json_values(candidate, expected))
+            .is_some_and(|ordering| ordering == Ordering::Less),
+        QueryFilter::Lte {
+            value: expected, ..
+        } => value
+            .and_then(|candidate| compare_json_values(candidate, expected))
+            .is_some_and(|ordering| matches!(ordering, Ordering::Less | Ordering::Equal)),
+        QueryFilter::Prefix {
+            value: expected, ..
+        } => value
+            .and_then(JsonValue::as_str)
+            .is_some_and(|candidate| candidate.starts_with(expected)),
+        QueryFilter::Contains {
+            value: expected, ..
+        } => value
+            .and_then(JsonValue::as_str)
+            .is_some_and(|candidate| candidate.contains(expected)),
+        QueryFilter::Exists { .. } => value.is_some(),
+    }
+}
+
+fn compare_evaluated_candidates(
+    left: &EvaluatedQueryCandidate,
+    right: &EvaluatedQueryCandidate,
+    order: &crate::query::QueryOrder,
+) -> Ordering {
+    let base = match (&left.order_value, &right.order_value) {
+        (Some(left), Some(right)) => compare_json_values(left, right).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => left.candidate.key.cmp(&right.candidate.key),
+    };
+    match order.direction {
+        QueryDirection::Asc => base.then_with(|| left.candidate.key.cmp(&right.candidate.key)),
+        QueryDirection::Desc => base
+            .reverse()
+            .then_with(|| left.candidate.key.cmp(&right.candidate.key)),
     }
 }
 
@@ -8292,32 +8564,12 @@ fn filter_matches_index_entry(filter: &QueryFilter, value: &JsonValue) -> bool {
     }
 }
 
-fn compare_entries(
-    left: &MapEntry,
-    right: &MapEntry,
-    order: &crate::query::QueryOrder,
-) -> Ordering {
-    let base = match (
-        query_value(left, &order.path),
-        query_value(right, &order.path),
-    ) {
-        (Some(left), Some(right)) => compare_json_values(&left, &right).unwrap_or(Ordering::Equal),
-        (Some(_), None) => Ordering::Greater,
-        (None, Some(_)) => Ordering::Less,
-        (None, None) => left.key.cmp(&right.key),
-    };
-    match order.direction {
-        QueryDirection::Asc => base.then_with(|| left.key.cmp(&right.key)),
-        QueryDirection::Desc => base.reverse().then_with(|| left.key.cmp(&right.key)),
-    }
-}
-
-fn query_value(entry: &MapEntry, path: &str) -> Option<JsonValue> {
+fn query_value_parts(key: &str, value: &JsonValue, path: &str) -> Option<JsonValue> {
     match path {
-        "" | "$value" => Some(entry.value.clone()),
-        "$key" => Some(JsonValue::String(entry.key.clone())),
+        "" | "$value" => Some(value.clone()),
+        "$key" => Some(JsonValue::String(key.to_owned())),
         _ => {
-            let mut current = &entry.value;
+            let mut current = value;
             for segment in path.split('.') {
                 current = match current {
                     JsonValue::Object(object) => object.get(segment)?,
@@ -8327,6 +8579,23 @@ fn query_value(entry: &MapEntry, path: &str) -> Option<JsonValue> {
             Some(current.clone())
         }
     }
+}
+
+fn query_scalar_path(
+    value: &JsonValue,
+    segments: &[&str],
+) -> std::result::Result<Option<JsonValue>, ()> {
+    let mut current = value;
+    for segment in segments {
+        current = match current {
+            JsonValue::Object(object) => match object.get(*segment) {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+    }
+    Ok(Some(current.clone()))
 }
 
 fn compare_json_values(left: &JsonValue, right: &JsonValue) -> Option<Ordering> {
@@ -8556,6 +8825,118 @@ mod tests {
         assert_eq!(users["$id"], "users");
         assert_eq!(users["alice"]["name"], "Alice");
         assert_eq!(users["alice"]["profile"]["timezone"], "America/New_York");
+        Ok(())
+    }
+
+    #[test]
+    fn query_preserves_nested_linked_projection_order_and_pagination() -> Result<()> {
+        let db = Primadb::with_replica_id("query-projection-semantics");
+        for (name, rank, active) in [("alpha", 3, true), ("beta", 1, false), ("gamma", 2, true)] {
+            db.root("lists").field("items").set(json!({
+                "name": name,
+                "profile": { "rank": rank, "active": active },
+                "payload": { "nested": { "value": name } },
+            }))?;
+        }
+
+        let entries = db.root("lists").field("items").query(QuerySpec {
+            filters: vec![QueryFilter::Eq {
+                path: "profile.active".to_owned(),
+                value: json!(true),
+            }],
+            order: Some(crate::query::QueryOrder {
+                path: "profile.rank".to_owned(),
+                direction: QueryDirection::Desc,
+            }),
+            offset: 1,
+            limit: Some(1),
+        })?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value["name"], "gamma");
+        assert_eq!(entries[0].value["profile"]["rank"], 2);
+        assert_eq!(entries[0].value["payload"]["nested"]["value"], "gamma");
+        assert!(entries[0].value["$id"].is_string());
+        Ok(())
+    }
+
+    #[test]
+    fn query_preserves_key_value_and_cycle_semantics() -> Result<()> {
+        let db = Primadb::with_replica_id("query-projection-cycles");
+        db.root("docs").field("first").put(json!({"rank": 2}))?;
+        db.root("docs").field("second").put(json!({"rank": 1}))?;
+        let first_id = db.root("docs").field("first").once_json()?.unwrap()["$id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second_id = db.root("docs").field("second").once_json()?.unwrap()["$id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        db.root(&first_id)
+            .field("peer")
+            .put(json!({"$link": second_id}))?;
+        db.root(&second_id)
+            .field("peer")
+            .put(json!({"$link": first_id}))?;
+
+        let by_key = db.root("docs").query(QuerySpec {
+            filters: vec![QueryFilter::Eq {
+                path: "$key".to_owned(),
+                value: json!("first"),
+            }],
+            ..QuerySpec::default()
+        })?;
+        assert_eq!(by_key.len(), 1);
+        assert_eq!(by_key[0].key, "first");
+        assert_eq!(by_key[0].value["peer"]["peer"]["$ref"], first_id);
+
+        let full_value = by_key[0].value.clone();
+        let by_value = db.root("docs").query(QuerySpec {
+            filters: vec![QueryFilter::Eq {
+                path: "$value".to_owned(),
+                value: full_value,
+            }],
+            ..QuerySpec::default()
+        })?;
+        assert_eq!(by_value.len(), 1);
+        assert_eq!(by_value[0], by_key[0]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_query_candidates_do_not_materialize_unrelated_linked_graphs() -> Result<()> {
+        let db = Primadb::with_replica_id("query-projection-performance");
+        for index in 0..128 {
+            let child = format!("payload/{index}");
+            db.root(&child).field("blob").put("x".repeat(16 * 1024))?;
+            db.root("items").field("members").set(json!({
+                "accepted": index == 127,
+                "rank": index,
+                "payload": { "$link": child },
+            }))?;
+        }
+        db.inner.lock().unwrap().query_candidate_projections = 0;
+
+        let entries = db.root("items").field("members").query(QuerySpec {
+            filters: vec![QueryFilter::Eq {
+                path: "accepted".to_owned(),
+                value: json!(true),
+            }],
+            order: Some(crate::query::QueryOrder {
+                path: "rank".to_owned(),
+                direction: QueryDirection::Asc,
+            }),
+            limit: Some(1),
+            offset: 0,
+        })?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value["rank"], 127);
+        assert_eq!(
+            entries[0].value["payload"]["blob"].as_str().unwrap().len(),
+            16 * 1024
+        );
+        assert_eq!(db.inner.lock().unwrap().query_candidate_projections, 1);
         Ok(())
     }
 
