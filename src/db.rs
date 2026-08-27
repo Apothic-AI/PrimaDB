@@ -273,6 +273,7 @@ struct Inner {
     text_cache_root: Option<std::path::PathBuf>,
     #[cfg(feature = "crypto")]
     security: SecurityState,
+    transaction_journal: Option<TransactionJournal>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -380,6 +381,12 @@ enum OperationOrigin {
     Remote,
 }
 
+#[derive(Clone, Copy)]
+enum OperationQueue {
+    Pending,
+    Unflushed,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ChangeImpact {
     data_changed: bool,
@@ -435,38 +442,83 @@ impl ChangeImpact {
     }
 }
 
-#[derive(Clone)]
-struct TransactionRollback {
+struct TransactionJournal {
     clock: HybridClock,
-    nodes: BTreeMap<NodeId, NodeState>,
-    pending_ops: Vec<Operation>,
-    unflushed_ops: Vec<Operation>,
-    missing_nodes: BTreeSet<NodeId>,
-    relationship_index: RelationshipIndex,
-    scheduled_node_fetches: BTreeSet<NodeId>,
+    nodes: BTreeMap<NodeId, Option<NodeState>>,
+    pending_ops: OperationQueueUndo,
+    unflushed_ops: OperationQueueUndo,
+    missing_nodes: BTreeMap<NodeId, bool>,
+    scheduled_node_fetches: BTreeMap<NodeId, bool>,
 }
 
-impl TransactionRollback {
-    fn capture(inner: &Inner) -> Self {
+impl TransactionJournal {
+    fn begin(inner: &Inner) -> Self {
         Self {
             clock: inner.clock.clone(),
-            nodes: inner.nodes.clone(),
-            pending_ops: inner.pending_ops.clone(),
-            unflushed_ops: inner.unflushed_ops.clone(),
-            missing_nodes: inner.missing_nodes.clone(),
-            relationship_index: inner.relationship_index.clone(),
-            scheduled_node_fetches: inner.scheduled_node_fetches.clone(),
+            nodes: BTreeMap::new(),
+            pending_ops: OperationQueueUndo::new(inner.pending_ops.len()),
+            unflushed_ops: OperationQueueUndo::new(inner.unflushed_ops.len()),
+            missing_nodes: BTreeMap::new(),
+            scheduled_node_fetches: BTreeMap::new(),
         }
     }
 
     fn restore(self, inner: &mut Inner) {
         inner.clock = self.clock;
-        inner.nodes = self.nodes;
-        inner.pending_ops = self.pending_ops;
-        inner.unflushed_ops = self.unflushed_ops;
-        inner.missing_nodes = self.missing_nodes;
-        inner.relationship_index = self.relationship_index;
-        inner.scheduled_node_fetches = self.scheduled_node_fetches;
+        self.pending_ops.restore(&mut inner.pending_ops);
+        self.unflushed_ops.restore(&mut inner.unflushed_ops);
+
+        let touched_nodes = self.nodes.keys().cloned().collect::<Vec<_>>();
+        for (node, previous) in self.nodes {
+            match previous {
+                Some(state) => {
+                    inner.nodes.insert(node, state);
+                }
+                None => {
+                    inner.nodes.remove(&node);
+                }
+            }
+        }
+        for (node, was_missing) in self.missing_nodes {
+            restore_set_membership(&mut inner.missing_nodes, node, was_missing);
+        }
+        for (node, was_scheduled) in self.scheduled_node_fetches {
+            restore_set_membership(&mut inner.scheduled_node_fetches, node, was_scheduled);
+        }
+        for node in touched_nodes {
+            inner.reindex_node_relationships(&node);
+        }
+    }
+}
+
+struct OperationQueueUndo {
+    initial_len: usize,
+    replaced: BTreeMap<usize, Operation>,
+}
+
+impl OperationQueueUndo {
+    fn new(initial_len: usize) -> Self {
+        Self {
+            initial_len,
+            replaced: BTreeMap::new(),
+        }
+    }
+
+    fn restore(self, queue: &mut Vec<Operation>) {
+        queue.truncate(self.initial_len);
+        for (index, operation) in self.replaced {
+            if index < queue.len() {
+                queue[index] = operation;
+            }
+        }
+    }
+}
+
+fn restore_set_membership(set: &mut BTreeSet<NodeId>, node: NodeId, contained: bool) {
+    if contained {
+        set.insert(node);
+    } else {
+        set.remove(&node);
     }
 }
 
@@ -567,6 +619,7 @@ impl Primadb {
                 text_cache_root: None,
                 #[cfg(feature = "crypto")]
                 security: SecurityState::default(),
+                transaction_journal: None,
             })),
         }
     }
@@ -1273,7 +1326,7 @@ impl Primadb {
     {
         let (result, member_ids, operation_count, impact) = {
             let mut inner = self.inner.lock().unwrap();
-            let rollback = TransactionRollback::capture(&inner);
+            inner.transaction_journal = Some(TransactionJournal::begin(&inner));
             let start_unflushed_len = inner.unflushed_ops.len();
             let (result, member_ids) = {
                 let mut tx = Transaction {
@@ -1290,6 +1343,7 @@ impl Primadb {
                 Ok(value) => {
                     let ops = inner.unflushed_ops[start_unflushed_len..].to_vec();
                     let operation_count = ops.len();
+                    inner.transaction_journal.take();
                     (
                         Ok(value),
                         member_ids,
@@ -1298,6 +1352,10 @@ impl Primadb {
                     )
                 }
                 Err(error) => {
+                    let rollback = inner
+                        .transaction_journal
+                        .take()
+                        .expect("local transaction journal missing");
                     rollback.restore(&mut inner);
                     (Err(error), Vec::new(), 0, ChangeImpact::pending_only())
                 }
@@ -5430,6 +5488,62 @@ impl Drop for TextWatchSubscriptionInner {
 }
 
 impl Inner {
+    fn journal_node(&mut self, node: &str) {
+        let Some(journal) = self.transaction_journal.as_mut() else {
+            return;
+        };
+        if journal.nodes.contains_key(node) {
+            return;
+        }
+        journal
+            .nodes
+            .insert(node.to_owned(), self.nodes.get(node).cloned());
+    }
+
+    fn journal_missing_node(&mut self, node: &str) {
+        let Some(journal) = self.transaction_journal.as_mut() else {
+            return;
+        };
+        if journal.missing_nodes.contains_key(node) {
+            return;
+        }
+        journal
+            .missing_nodes
+            .insert(node.to_owned(), self.missing_nodes.contains(node));
+    }
+
+    fn journal_scheduled_node_fetch(&mut self, node: &str) {
+        let Some(journal) = self.transaction_journal.as_mut() else {
+            return;
+        };
+        if journal.scheduled_node_fetches.contains_key(node) {
+            return;
+        }
+        journal
+            .scheduled_node_fetches
+            .insert(node.to_owned(), self.scheduled_node_fetches.contains(node));
+    }
+
+    fn journal_operation_queue(&mut self, queue: OperationQueue, op: &Operation) {
+        let Some(journal) = self.transaction_journal.as_mut() else {
+            return;
+        };
+        let (operations, undo) = match queue {
+            OperationQueue::Pending => (&self.pending_ops, &mut journal.pending_ops),
+            OperationQueue::Unflushed => (&self.unflushed_ops, &mut journal.unflushed_ops),
+        };
+        let key = operation_compaction_key(op);
+        if let Some((index, existing)) = operations
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| operation_compaction_key(candidate) == key)
+        {
+            undo.replaced
+                .entry(index)
+                .or_insert_with(|| existing.clone());
+        }
+    }
+
     fn traverse_at(
         &mut self,
         anchor: &str,
@@ -5669,6 +5783,7 @@ impl Inner {
             if reserved.len() >= max_fetches {
                 break;
             }
+            self.journal_scheduled_node_fetch(node);
             if self.scheduled_node_fetches.insert(node.clone()) {
                 reserved.push(node.clone());
             }
@@ -5678,6 +5793,7 @@ impl Inner {
 
     fn release_reserved_node_fetches(&mut self, nodes: &[NodeId]) {
         for node in nodes {
+            self.journal_scheduled_node_fetch(node);
             self.scheduled_node_fetches.remove(node);
         }
     }
@@ -5717,6 +5833,7 @@ impl Inner {
     }
 
     fn reindex_node_relationships(&mut self, node: &str) {
+        self.journal_node(node);
         self.relationship_index.remove_source(node);
         let Some(state) = self.nodes.get(node) else {
             return;
@@ -5760,7 +5877,9 @@ impl Inner {
         };
         match engine.get_node(node)? {
             Some(node_state) => {
+                self.journal_node(node);
                 merge_node_state(&mut self.nodes, node_state);
+                self.journal_missing_node(node);
                 self.missing_nodes.remove(node);
                 self.reindex_node_relationships(node);
                 Ok(true)
@@ -5769,6 +5888,7 @@ impl Inner {
                 if self.nodes.contains_key(node) {
                     Ok(true)
                 } else {
+                    self.journal_missing_node(node);
                     self.missing_nodes.insert(node.to_owned());
                     Ok(false)
                 }
@@ -5777,6 +5897,8 @@ impl Inner {
     }
 
     fn ensure_node(&mut self, node: &str) {
+        self.journal_node(node);
+        self.journal_missing_node(node);
         self.missing_nodes.remove(node);
         self.nodes
             .entry(node.to_owned())
@@ -6267,6 +6389,7 @@ impl Inner {
 
         let accepted = match &op.action {
             OperationAction::SetField { node, field, value } => {
+                self.journal_node(node);
                 let state = self
                     .nodes
                     .entry(node.clone())
@@ -6317,6 +6440,7 @@ impl Inner {
                 field,
                 member,
             } => {
+                self.journal_node(node);
                 let state = self
                     .nodes
                     .entry(node.clone())
@@ -6398,6 +6522,7 @@ impl Inner {
                 field,
                 member,
             } => {
+                self.journal_node(node);
                 let state = self
                     .nodes
                     .entry(node.clone())
@@ -6475,6 +6600,7 @@ impl Inner {
                 }
             }
             OperationAction::DeleteField { node, field } => {
+                self.journal_node(node);
                 let state = self
                     .nodes
                     .entry(node.clone())
@@ -6502,10 +6628,12 @@ impl Inner {
         if accepted {
             let source = operation_source_node(&op).to_owned();
             self.reindex_node_relationships(&source);
+            self.journal_operation_queue(OperationQueue::Unflushed, &op);
             push_compacted_operation(&mut self.unflushed_ops, op.clone());
         }
 
         if accepted && origin == OperationOrigin::Local {
+            self.journal_operation_queue(OperationQueue::Pending, &op);
             push_compacted_operation(&mut self.pending_ops, op);
         }
 
@@ -8549,6 +8677,49 @@ mod tests {
         assert_eq!(
             db.root("docs").field("a").once_json()?.unwrap()["version"],
             1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_transaction_rollback_restores_relationships_and_compacted_queues() -> Result<()> {
+        let db = Primadb::with_replica_id("node-a");
+        db.root("people").field("alice").put(json!({
+            "name": "Alice"
+        }))?;
+        db.root("people")
+            .field("bob")
+            .field("friend")
+            .put(json!({"$link": "people/alice"}))?;
+        let pending_before = db.pending_operations();
+        let snapshot_before = db.snapshot();
+
+        let result = db.transaction(|tx| {
+            tx.root("people")
+                .field("bob")
+                .field("friend")
+                .put(json!({"$link": "people/charlie"}))?;
+            tx.root("people").field("bob").assert_absent()
+        });
+
+        assert!(matches!(
+            result,
+            Err(PrimadbError::TransactionConflict { .. })
+        ));
+        assert_eq!(db.snapshot(), snapshot_before);
+        assert_eq!(db.pending_operations(), pending_before);
+        let traversal = db.root("people").field("bob").traverse(TraversalSpec {
+            direction: TraversalDirection::Outbound,
+            max_depth: 1,
+            ..TraversalSpec::default()
+        })?;
+        assert_eq!(
+            traversal
+                .entries
+                .iter()
+                .map(|entry| entry.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["people/alice"]
         );
         Ok(())
     }
