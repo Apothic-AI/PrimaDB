@@ -8607,6 +8607,19 @@ mod tests {
             );
         }
 
+        let cache_dir = directory
+            .join("text-cache")
+            .join(crate::encode_component("notes"));
+        let docs_path = cache_dir.join("docs.bin");
+        let mut documents: BTreeMap<String, TextDocument> =
+            serde_json::from_slice(&std::fs::read(&docs_path)?)?;
+        documents
+            .get_mut("alpha")
+            .expect("persisted document exists")
+            .fields
+            .insert("body".to_owned(), "rewritten after indexing".to_owned());
+        std::fs::write(docs_path, serde_json::to_vec(&documents)?)?;
+
         let db2 = Primadb::with_replica_id("text-cache-b");
         db2.use_segment_storage(&directory, 8)?;
         let result = db2.text_search("notes", "persistent", TextSearchSpec::default())?;
@@ -8614,6 +8627,8 @@ mod tests {
             result.matches.first().map(|item| item.id.as_str()),
             Some("alpha")
         );
+        let result = db2.text_search("notes", "rewritten", TextSearchSpec::default())?;
+        assert!(result.matches.is_empty());
 
         let _ = std::fs::remove_dir_all(&directory);
         Ok(())

@@ -681,12 +681,32 @@ pub(crate) fn collection_cache_from_text_cache_files(
             "text cache backend version does not match this build".to_owned(),
         ));
     }
+    if manifest.manager_state != TextIndexState::Ready {
+        return Err(PrimadbError::Message(
+            "text cache manifest is not ready for restoration".to_owned(),
+        ));
+    }
+    if manifest.source_hash_mode != "rebuild_scan" || manifest.created_at.is_empty() {
+        return Err(PrimadbError::Message(
+            "text cache manifest has invalid source metadata".to_owned(),
+        ));
+    }
+    if manifest.collection.trim().is_empty()
+        || manifest.record_prefix != text_collection_docs_prefix(&manifest.collection)
+    {
+        return Err(PrimadbError::Message(
+            "text cache manifest has an invalid collection record prefix".to_owned(),
+        ));
+    }
     if manifest.source_hash != expected_source_hash {
         return Err(PrimadbError::Message(
             "text cache source hash does not match authoritative records".to_owned(),
         ));
     }
-    if manifest.analyzer_version != config.analyzer.version
+    let serialized_config: TextCollectionConfig = serde_json::from_slice(&files.metadata_bin)?;
+    validate_text_collection_config(&serialized_config)?;
+    if serialized_config != config
+        || manifest.analyzer_version != config.analyzer.version
         || manifest.config_hash != stable_json_hash(&config)?
     {
         return Err(PrimadbError::Message(
@@ -699,7 +719,115 @@ pub(crate) fn collection_cache_from_text_cache_files(
             "text cache document table has inconsistent length".to_owned(),
         ));
     }
-    TextCollectionCache::from_documents(config, documents, manifest.source_hash.clone())
+    for (id, document) in &documents {
+        if id != &document.id || document.id.trim().is_empty() {
+            return Err(PrimadbError::Message(format!(
+                "text cache document table has inconsistent id `{id}`"
+            )));
+        }
+    }
+
+    let term_doc_freq: BTreeMap<String, usize> = serde_json::from_slice(&files.terms_bin)?;
+    if term_doc_freq.len() != manifest.term_count {
+        return Err(PrimadbError::Message(
+            "text cache term table has inconsistent length".to_owned(),
+        ));
+    }
+    let postings: BTreeMap<String, BTreeMap<String, BTreeMap<String, usize>>> =
+        serde_json::from_slice(&files.postings_bin)?;
+    if postings.len() != manifest.term_count || postings.len() != term_doc_freq.len() {
+        return Err(PrimadbError::Message(
+            "text cache postings and term tables have inconsistent lengths".to_owned(),
+        ));
+    }
+    if postings.keys().ne(term_doc_freq.keys()) {
+        return Err(PrimadbError::Message(
+            "text cache postings and term tables contain different terms".to_owned(),
+        ));
+    }
+
+    let mut index = TextIndex {
+        postings,
+        term_doc_freq,
+        ..TextIndex::default()
+    };
+    for (term, document_postings) in &index.postings {
+        if term.is_empty() || document_postings.is_empty() {
+            return Err(PrimadbError::Message(
+                "text cache postings contain an empty term bucket".to_owned(),
+            ));
+        }
+        let analyzed_term = analyze_text(&config.analyzer, term);
+        if analyzed_term.len() != 1 || analyzed_term[0] != *term {
+            return Err(PrimadbError::Message(format!(
+                "text cache contains an invalid analyzed term `{term}`"
+            )));
+        }
+        let Some(expected_doc_freq) = index.term_doc_freq.get(term) else {
+            return Err(PrimadbError::Message(format!(
+                "text cache postings contain term `{term}` missing from term table"
+            )));
+        };
+        if *expected_doc_freq == 0 || *expected_doc_freq != document_postings.len() {
+            return Err(PrimadbError::Message(format!(
+                "text cache document frequency is inconsistent for term `{term}`"
+            )));
+        }
+        for (doc_id, field_postings) in document_postings {
+            if field_postings.is_empty() {
+                return Err(PrimadbError::Message(format!(
+                    "text cache postings contain an empty field bucket for document `{doc_id}`"
+                )));
+            }
+            let Some(document) = documents.get(doc_id) else {
+                return Err(PrimadbError::Message(format!(
+                    "text cache postings reference unknown document `{doc_id}`"
+                )));
+            };
+            for (field, term_frequency) in field_postings {
+                if *term_frequency == 0 {
+                    return Err(PrimadbError::Message(format!(
+                        "text cache posting has zero frequency for term `{term}` in document `{doc_id}`"
+                    )));
+                }
+                if !document.fields.contains_key(field)
+                    || !indexed_field_names(&config, document)
+                        .iter()
+                        .any(|name| name == field)
+                {
+                    return Err(PrimadbError::Message(format!(
+                        "text cache posting references non-indexed field `{field}` in document `{doc_id}`"
+                    )));
+                }
+                index
+                    .doc_field_lengths
+                    .entry(doc_id.clone())
+                    .or_default()
+                    .entry(field.clone())
+                    .and_modify(|length| *length += *term_frequency)
+                    .or_insert(*term_frequency);
+                *index.doc_lengths.entry(doc_id.clone()).or_default() += *term_frequency;
+                index
+                    .doc_terms
+                    .entry(doc_id.clone())
+                    .or_default()
+                    .entry(field.clone())
+                    .or_default()
+                    .insert(term.clone());
+                index.total_terms += *term_frequency;
+            }
+        }
+    }
+
+    Ok(TextCollectionCache {
+        config,
+        documents,
+        deleted_count: 0,
+        state: TextIndexState::Ready,
+        dirty: false,
+        source_hash: manifest.source_hash.clone(),
+        index,
+    })
 }
 
 #[allow(dead_code)]
@@ -1140,6 +1268,58 @@ mod tests {
         let mut changed = config;
         changed.analyzer.version = 2;
         assert!(collection_cache_from_text_cache_files(changed, files, "source").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cache_restore_uses_serialized_postings_without_rebuilding_documents() -> Result<()> {
+        let documents = BTreeMap::from([
+            ("a".to_owned(), doc("a", "mesh", "secure routing")),
+            ("b".to_owned(), doc("b", "other", "plain notes")),
+        ]);
+        let config = TextCollectionConfig::default();
+        let cache =
+            TextCollectionCache::from_documents(config.clone(), documents, "source".to_owned())?;
+        let mut files = text_cache_files("docs", &cache, "now".to_owned())?;
+        let mut changed_documents: BTreeMap<String, TextDocument> =
+            serde_json::from_slice(&files.docs_bin)?;
+        changed_documents
+            .get_mut("a")
+            .expect("exported document exists")
+            .fields
+            .insert("body".to_owned(), "rewritten document".to_owned());
+        files.docs_bin = serde_json::to_vec(&changed_documents)?;
+
+        let restored = collection_cache_from_text_cache_files(config, files, "source")?;
+        let old_term = search_text_collection("docs", &restored, "routing", &Default::default())?;
+        assert_eq!(
+            old_term.matches.first().map(|item| item.id.as_str()),
+            Some("a")
+        );
+        let new_term = search_text_collection("docs", &restored, "rewritten", &Default::default())?;
+        assert!(new_term.matches.is_empty());
+        assert_eq!(restored.stats().document_count, 2);
+        assert_eq!(restored.stats().term_count, cache.stats().term_count);
+        Ok(())
+    }
+
+    #[test]
+    fn cache_restore_rejects_inconsistent_postings() -> Result<()> {
+        let documents = BTreeMap::from([("a".to_owned(), doc("a", "mesh", "routing"))]);
+        let config = TextCollectionConfig::default();
+        let cache =
+            TextCollectionCache::from_documents(config.clone(), documents, "source".to_owned())?;
+        let mut files = text_cache_files("docs", &cache, "now".to_owned())?;
+        let mut postings: BTreeMap<String, BTreeMap<String, BTreeMap<String, usize>>> =
+            serde_json::from_slice(&files.postings_bin)?;
+        postings
+            .get_mut("routing")
+            .expect("routing posting exists")
+            .get_mut("a")
+            .expect("document posting exists")
+            .insert("body".to_owned(), 0);
+        files.postings_bin = serde_json::to_vec(&postings)?;
+        assert!(collection_cache_from_text_cache_files(config, files, "source").is_err());
         Ok(())
     }
 
