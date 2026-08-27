@@ -42,6 +42,21 @@ const RECORD_OVERFLOW_COMPONENT: &str = "_overflow";
 #[cfg(not(target_arch = "wasm32"))]
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+std::thread_local! {
+    static STORAGE_MATERIALIZATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_storage_materialization_visit_count() {
+    STORAGE_MATERIALIZATION_VISITS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn storage_materialization_visit_count() -> usize {
+    STORAGE_MATERIALIZATION_VISITS.with(std::cell::Cell::get)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageMetadata {
     pub schema_version: u32,
@@ -1623,12 +1638,13 @@ pub fn build_storage_transaction(
 ) -> StorageTransaction {
     let mut node_indexes = BTreeMap::new();
     let mut direct_indexes = BTreeMap::new();
+    let mut materialization_cache = BTreeMap::new();
     let mut records = BTreeMap::new();
     let mut deleted_records = BTreeSet::new();
     let mut auth_meta = BTreeMap::new();
 
     for (node_id, node_state) in &nodes {
-        let direct = direct_scalar_indexes(node_id, &nodes);
+        let direct = direct_scalar_indexes(node_id, &nodes, &mut materialization_cache);
         let manifest = NodeIndexManifest {
             direct_index_keys: direct.keys().cloned().collect(),
         };
@@ -1893,9 +1909,11 @@ pub fn record_entry_from_node_state(node_state: &NodeState) -> Option<RecordEntr
 fn direct_scalar_indexes(
     node_id: &str,
     nodes: &BTreeMap<NodeId, NodeState>,
+    materialization_cache: &mut BTreeMap<NodeId, JsonValue>,
 ) -> BTreeMap<String, DirectScalarIndexEntry> {
     let mut indexes = BTreeMap::new();
-    let materialized = storage_materialize_node(node_id, nodes, &mut BTreeSet::new());
+    let (materialized, _) =
+        storage_materialize_node(node_id, nodes, &mut BTreeSet::new(), materialization_cache);
     collect_direct_scalar_indexes(node_id, "", &materialized, &mut indexes);
     indexes
 }
@@ -1904,14 +1922,21 @@ fn storage_materialize_node(
     node_id: &str,
     nodes: &BTreeMap<NodeId, NodeState>,
     visited: &mut BTreeSet<NodeId>,
-) -> JsonValue {
-    if !visited.insert(node_id.to_owned()) {
-        return JsonValue::Null;
+    materialization_cache: &mut BTreeMap<NodeId, JsonValue>,
+) -> (JsonValue, bool) {
+    if let Some(value) = materialization_cache.get(node_id) {
+        return (value.clone(), false);
     }
+    if !visited.insert(node_id.to_owned()) {
+        return (JsonValue::Null, true);
+    }
+    #[cfg(test)]
+    STORAGE_MATERIALIZATION_VISITS.with(|count| count.set(count.get() + 1));
     let value = nodes
         .get(node_id)
         .map(|node_state| {
             let mut object = JsonMap::new();
+            let mut contains_cycle = false;
             for (field, state) in &node_state.fields {
                 match &state.value {
                     FieldValue::Scalar(value) => {
@@ -1920,7 +1945,9 @@ fn storage_materialize_node(
                         }
                     }
                     FieldValue::Link(target) => {
-                        let value = storage_materialize_node(target, nodes, visited);
+                        let (value, child_contains_cycle) =
+                            storage_materialize_node(target, nodes, visited, materialization_cache);
+                        contains_cycle |= child_contains_cycle;
                         if !value.is_null() {
                             object.insert(field.clone(), value);
                         }
@@ -1928,10 +1955,15 @@ fn storage_materialize_node(
                     FieldValue::Set(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
                 }
             }
-            JsonValue::Object(object)
+            (JsonValue::Object(object), contains_cycle)
         })
-        .unwrap_or(JsonValue::Null);
+        .unwrap_or((JsonValue::Null, false));
     visited.remove(node_id);
+    // Cyclic materialization depends on the root's active path, so only completed
+    // acyclic subgraphs are safe to reuse across direct-index roots.
+    if !value.1 {
+        materialization_cache.insert(node_id.to_owned(), value.0.clone());
+    }
     value
 }
 
@@ -2034,12 +2066,16 @@ fn collect_files(root: &std::path::Path, output: &mut Vec<std::path::PathBuf>) -
     }
     Ok(())
 }
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::{Revision, VersionMarker};
+    use crate::value::FieldState;
+    use serde_json::json;
+    #[cfg(not(target_arch = "wasm32"))]
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn direct_index_bucket_changes_are_materialized_once_per_path() -> Result<()> {
         let unique = SystemTime::now()
@@ -2104,5 +2140,192 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
         Ok(())
+    }
+
+    fn field(value: FieldValue) -> FieldState {
+        FieldState {
+            value,
+            version: VersionMarker {
+                revision: Revision {
+                    millis: 1,
+                    counter: 0,
+                    actor: "test".to_owned(),
+                },
+                op_id: "test/op".to_owned(),
+            },
+        }
+    }
+
+    fn node(id: &str, fields: impl IntoIterator<Item = (&'static str, FieldValue)>) -> NodeState {
+        let mut node = NodeState::new(id);
+        node.fields.extend(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), field(value))),
+        );
+        node
+    }
+
+    #[test]
+    fn full_direct_index_build_reuses_shared_acyclic_subgraphs() {
+        let nodes = BTreeMap::from([
+            (
+                "root-a".to_owned(),
+                node("root-a", [("child", FieldValue::Link("shared".to_owned()))]),
+            ),
+            (
+                "root-b".to_owned(),
+                node("root-b", [("child", FieldValue::Link("shared".to_owned()))]),
+            ),
+            (
+                "shared".to_owned(),
+                node("shared", [("value", FieldValue::Scalar(json!(42)))]),
+            ),
+        ]);
+
+        reset_storage_materialization_visit_count();
+        let transaction = build_storage_transaction(
+            1,
+            build_storage_metadata(crate::clock::HybridClock::with_actor("test"), vec![], 2),
+            nodes,
+        );
+
+        // Each root is visited once; the shared child is visited only once.
+        assert_eq!(storage_materialization_visit_count(), 3);
+        for node_id in ["root-a", "root-b"] {
+            let entry = transaction
+                .direct_indexes
+                .values()
+                .find(|entry| entry.node_id == node_id && entry.path == "child.value")
+                .expect("shared child should be indexed for every root");
+            assert_eq!(entry.value, json!(42));
+        }
+    }
+
+    #[test]
+    fn full_direct_index_build_visits_large_shared_graph_once_per_node() {
+        const ROOT_COUNT: usize = 512;
+        const SHARED_DEPTH: usize = 24;
+        let mut nodes = BTreeMap::new();
+        for depth in 0..SHARED_DEPTH {
+            let node_id = format!("shared-{depth:02}");
+            let value = if depth + 1 == SHARED_DEPTH {
+                FieldValue::Scalar(json!("leaf"))
+            } else {
+                FieldValue::Link(format!("shared-{:02}", depth + 1))
+            };
+            nodes.insert(node_id.clone(), node(&node_id, [("next", value)]));
+        }
+        for index in 0..ROOT_COUNT {
+            let node_id = format!("root-{index:03}");
+            nodes.insert(
+                node_id.clone(),
+                node(
+                    &node_id,
+                    [("child", FieldValue::Link("shared-00".to_owned()))],
+                ),
+            );
+        }
+        let node_count = nodes.len();
+
+        reset_storage_materialization_visit_count();
+        let transaction = build_storage_transaction(
+            1,
+            build_storage_metadata(crate::clock::HybridClock::with_actor("test"), vec![], 2),
+            nodes,
+        );
+
+        assert_eq!(storage_materialization_visit_count(), node_count);
+        assert_eq!(transaction.node_indexes.len(), node_count);
+        assert_eq!(transaction.direct_indexes.len(), node_count);
+    }
+
+    #[test]
+    fn full_direct_index_build_preserves_cycle_truncation_per_root() {
+        let nodes = BTreeMap::from([
+            (
+                "cycle-a".to_owned(),
+                node(
+                    "cycle-a",
+                    [
+                        ("name", FieldValue::Scalar(json!("a"))),
+                        ("other", FieldValue::Link("cycle-b".to_owned())),
+                    ],
+                ),
+            ),
+            (
+                "cycle-b".to_owned(),
+                node(
+                    "cycle-b",
+                    [
+                        ("name", FieldValue::Scalar(json!("b"))),
+                        ("other", FieldValue::Link("cycle-a".to_owned())),
+                    ],
+                ),
+            ),
+        ]);
+
+        let transaction = build_storage_transaction(
+            1,
+            build_storage_metadata(crate::clock::HybridClock::with_actor("test"), vec![], 2),
+            nodes,
+        );
+
+        for (node_id, own_name, other_name) in [("cycle-a", "a", "b"), ("cycle-b", "b", "a")] {
+            assert!(transaction.direct_indexes.values().any(|entry| {
+                entry.node_id == node_id && entry.path == "name" && entry.value == json!(own_name)
+            }));
+            assert!(transaction.direct_indexes.values().any(|entry| {
+                entry.node_id == node_id
+                    && entry.path == "other.name"
+                    && entry.value == json!(other_name)
+            }));
+            assert!(
+                !transaction
+                    .direct_indexes
+                    .values()
+                    .any(|entry| entry.node_id == node_id && entry.path == "other.other.name")
+            );
+        }
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn full_direct_index_build_keeps_signed_scalar_verification() {
+        let identity = crate::Identity::from_secret_key_bytes([7; 32]);
+        let mut security = crate::SecurityState::default();
+        security
+            .set_local_user("test", identity, vec![crate::UserGrant::write_root("*")])
+            .unwrap();
+        let signed = security
+            .sign_data_value("secure/value", json!("secret"), None)
+            .unwrap();
+        let nodes = BTreeMap::from([(
+            "secure".to_owned(),
+            node("secure", [("value", FieldValue::Scalar(signed))]),
+        )]);
+
+        let transaction = build_storage_transaction(
+            1,
+            build_storage_metadata(crate::clock::HybridClock::with_actor("test"), vec![], 2),
+            nodes,
+        );
+
+        let entry = transaction
+            .direct_indexes
+            .values()
+            .find(|entry| entry.node_id == "secure" && entry.path == "value")
+            .expect("signed scalar should be indexed");
+        assert_eq!(entry.value, json!("secret"));
+        assert!(
+            transaction
+                .auth_meta
+                .get("secure")
+                .unwrap()
+                .signed_fields
+                .get("value")
+                .unwrap()
+                .verified
+        );
     }
 }

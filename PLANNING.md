@@ -1,13 +1,34 @@
-# P2 BM25 Optimization
+# P2 Performance Integration
 
 ## Goal
 
-Bound BM25 collection result selection and avoid constructing a full postings
-index for one-shot candidate searches while preserving exact result behavior.
+Integrate all six completed P2 performance changes on the committed P1 baseline
+while preserving behavior, focused regression coverage, and task documentation.
 
-## Plan
+## Integrated Work
 
-- [x] Add bounded top-k selection with deterministic score and ID ordering.
-- [x] Score one-shot candidates directly from analyzed query-term frequencies.
-- [x] Preserve scores, field hits, metadata, snippets, explanations, and paging.
-- [x] Complete formatting, Rust checks, and full relevant tests.
+- [x] Bound exact-vector top-k selection with deterministic distance and ID
+  ordering, precomputed filters, and deferred payload cloning.
+- [x] Bound BM25 page selection and score one-shot candidates without rebuilding
+  a full postings index while preserving scores and result details.
+- [x] Evaluate graph-query filters, ordering, offset, and limit before full linked
+  result projection, with correctness-first fallback behavior.
+- [x] Coalesce equivalent local watcher recomputations, repair indexed-record
+  invalidation, and bound local queues while retaining newest state.
+- [x] Coalesce direct-index bucket writes and transaction directory syncs while
+  preserving durability and journal recovery semantics.
+- [x] Memoize acyclic linked-subgraph materialization across direct-index roots
+  while preserving root-relative cycle truncation and crypto inspection.
+
+## Integration Plan
+
+- [x] Merge each supplied P2 head separately in the requested order.
+- [x] Inspect the working revision and ancestor graph for conflicts after every
+  merge.
+- [x] Resolve additive query/watch test counters and consolidate segment/direct
+  index tests semantically.
+- [x] Preserve P2 and task-specific planning/progress documents and combine the
+  conflicting top-level BM25/direct-index records here.
+- [x] Run the complete native default/all-feature and installed WASM verification
+  matrix.
+- [x] Record final graph, conflict, status, and test evidence.
