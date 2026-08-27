@@ -6,7 +6,7 @@ use crate::record::{RecordEntry, RecordScan, RecordValue};
 use crate::sync::RemotePath;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 pub const TEXT_RECORD_PREFIX: &str = "__primadb_text";
 #[allow(dead_code)]
@@ -558,14 +558,9 @@ pub(crate) fn search_text_candidates(
         fields: fields_for_candidates(&documents),
         ..TextCollectionConfig::default()
     };
-    let cache = TextCollectionCache::from_documents(
-        config,
-        documents,
-        records_source_hash_for_text_candidates(&candidates),
-    )?;
-    let query_terms = analyze_text(&cache.config.analyzer, query);
-    let mut matches = score_index(&cache, &query_terms, spec, score_scope);
-    let searched_count = cache.index.doc_lengths.len();
+    let query_terms = analyze_text(&config.analyzer, query);
+    let (mut matches, searched_count) =
+        score_one_shot_candidates(&documents, &config, &query_terms, spec, score_scope);
     paginate_matches(&mut matches, spec);
     Ok(TextSearchResult {
         source,
@@ -970,13 +965,131 @@ fn score_index(
         }
     }
 
+    build_top_matches(scores, &cache.documents, spec)
+}
+
+fn score_one_shot_candidates(
+    documents: &BTreeMap<String, TextDocument>,
+    config: &TextCollectionConfig,
+    query_terms: &[String],
+    spec: &TextSearchSpec,
+    _scope: TextScoreScope,
+) -> (Vec<TextSearchMatch>, usize) {
+    if documents.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let query_terms = query_terms.iter().collect::<BTreeSet<_>>();
+    let field_names = documents
+        .values()
+        .map(|document| indexed_field_names(config, document));
+    let mut document_stats = Vec::with_capacity(documents.len());
+    let mut term_doc_freq = BTreeMap::new();
+    let mut total_terms = 0;
+
+    for (document, field_names) in documents.values().zip(field_names) {
+        let mut doc_len = 0;
+        let mut matching_fields = BTreeMap::new();
+        let mut matching_terms = BTreeSet::new();
+        for field_name in field_names {
+            let Some(text) = document.fields.get(&field_name) else {
+                continue;
+            };
+            let tokens = analyze_text(&config.analyzer, text);
+            doc_len += tokens.len();
+            let mut term_frequencies: BTreeMap<String, usize> = BTreeMap::new();
+            for token in tokens {
+                if query_terms.contains(&token) {
+                    *term_frequencies.entry(token.clone()).or_default() += 1;
+                    matching_terms.insert(token);
+                }
+            }
+            if !term_frequencies.is_empty() {
+                matching_fields.insert(field_name, term_frequencies);
+            }
+        }
+        if doc_len == 0 {
+            continue;
+        }
+        total_terms += doc_len;
+        for term in matching_terms {
+            *term_doc_freq.entry(term).or_default() += 1;
+        }
+        document_stats.push((document, doc_len, matching_fields));
+    }
+
+    let doc_count = document_stats.len();
+    if doc_count == 0 {
+        return (Vec::new(), 0);
+    }
+    let doc_count_f32 = doc_count as f32;
+    let avg_doc_len = total_terms as f32 / doc_count_f32.max(1.0);
+    let field_weights = field_weights(config);
+    let selected_fields = spec
+        .fields
+        .as_ref()
+        .map(|fields| fields.iter().cloned().collect::<BTreeSet<_>>());
+    let mut scores: BTreeMap<String, (f32, BTreeMap<String, TextFieldHit>)> = BTreeMap::new();
+
+    for term in query_terms {
+        let df = *term_doc_freq.get(term.as_str()).unwrap_or(&0) as f32;
+        if df <= 0.0 {
+            continue;
+        }
+        let idf = ((doc_count_f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
+        for (document, doc_len, fields) in &document_stats {
+            for (field, frequencies) in fields {
+                let Some(tf) = frequencies.get(term.as_str()) else {
+                    continue;
+                };
+                if selected_fields
+                    .as_ref()
+                    .is_some_and(|fields| !fields.contains(field))
+                {
+                    continue;
+                }
+                let tf = *tf as f32;
+                let weight = field_weights.get(field).copied().unwrap_or(1.0);
+                if weight == 0.0 {
+                    continue;
+                }
+                let numerator = tf * (config.k1 + 1.0);
+                let denominator =
+                    tf + config.k1 * (1.0 - config.b + config.b * *doc_len as f32 / avg_doc_len);
+                let score = idf * numerator / denominator * weight;
+                let (total, hits) = scores.entry(document.id.clone()).or_default();
+                *total += score;
+                let hit = hits.entry(field.clone()).or_insert_with(|| TextFieldHit {
+                    field: field.clone(),
+                    terms: Vec::new(),
+                    score: 0.0,
+                });
+                hit.terms.push(term.to_string());
+                hit.score += score;
+            }
+        }
+    }
+
+    (build_top_matches(scores, documents, spec), doc_count)
+}
+
+fn build_top_matches(
+    scores: BTreeMap<String, (f32, BTreeMap<String, TextFieldHit>)>,
+    documents: &BTreeMap<String, TextDocument>,
+    spec: &TextSearchSpec,
+) -> Vec<TextSearchMatch> {
+    let max_matches = spec
+        .limit
+        .map(|limit| spec.offset.unwrap_or(0).saturating_add(limit))
+        .unwrap_or(usize::MAX);
+    let selected_ids = select_top_score_ids(&scores, max_matches);
     let mut matches = scores
         .into_iter()
         .filter_map(|(id, (score, field_hits))| {
-            if score <= 0.0 {
+            if !selected_ids.contains(&id) || score <= 0.0 {
                 return None;
             }
-            let document = cache.documents.get(&id)?;
+            let document = documents.get(&id)?;
             Some(TextSearchMatch {
                 id,
                 score,
@@ -999,6 +1112,59 @@ fn score_index(
             .then_with(|| left.id.cmp(&right.id))
     });
     matches
+}
+
+#[derive(Debug, PartialEq)]
+struct WorstScore {
+    id: String,
+    score: f32,
+}
+
+impl Eq for WorstScore {}
+
+impl Ord for WorstScore {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for WorstScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn select_top_score_ids(
+    scores: &BTreeMap<String, (f32, BTreeMap<String, TextFieldHit>)>,
+    max_matches: usize,
+) -> BTreeSet<String> {
+    if max_matches == usize::MAX {
+        return scores
+            .iter()
+            .filter(|(_, (score, _))| *score > 0.0)
+            .map(|(id, _)| id.clone())
+            .collect();
+    }
+    let mut selected = BinaryHeap::new();
+    for (id, (score, _)) in scores {
+        if *score <= 0.0 {
+            continue;
+        }
+        let candidate = WorstScore {
+            id: id.clone(),
+            score: *score,
+        };
+        if selected.len() < max_matches {
+            selected.push(candidate);
+        } else if candidate < *selected.peek().expect("non-empty bounded heap") {
+            selected.pop();
+            selected.push(candidate);
+        }
+    }
+    selected.into_iter().map(|entry| entry.id).collect()
 }
 
 fn paginate_matches(matches: &mut Vec<TextSearchMatch>, spec: &TextSearchSpec) {
@@ -1069,23 +1235,6 @@ fn snippets_for_document(document: &TextDocument, spec: &TextSearchSpec) -> Vec<
             text: value.chars().take(240).collect(),
         })
         .collect()
-}
-
-fn records_source_hash_for_text_candidates(candidates: &[TextCandidate]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    for candidate in candidates {
-        hasher.update(candidate.id.as_bytes());
-        hasher.update(&[0]);
-        if let Ok(bytes) = serde_json::to_vec(&candidate.fields) {
-            hasher.update(&bytes);
-        }
-        hasher.update(&[0]);
-        if let Ok(bytes) = serde_json::to_vec(&candidate.metadata) {
-            hasher.update(&bytes);
-        }
-        hasher.update(&[0xff]);
-    }
-    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 fn extract_json_text_fields(
@@ -1184,6 +1333,7 @@ fn default_b() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn doc(id: &str, title: &str, body: &str) -> TextDocument {
         TextDocument {
@@ -1344,6 +1494,188 @@ mod tests {
         )?;
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.score_scope, TextScoreScope::CandidateSet);
+        Ok(())
+    }
+
+    #[test]
+    fn one_shot_candidate_search_preserves_empty_query_search_count() -> Result<()> {
+        let candidates = vec![TextCandidate {
+            id: "memory/1".to_owned(),
+            fields: BTreeMap::from([("$value".to_owned(), "secure routing notes".to_owned())]),
+            metadata: BTreeMap::new(),
+        }];
+        let result = search_text_candidates(
+            TextSearchSourceSummary::Records { prefix: None },
+            "",
+            &TextSearchSpec::default(),
+            candidates,
+            false,
+            TextScoreScope::CandidateSet,
+        )?;
+        assert!(result.matches.is_empty());
+        assert_eq!(result.candidate_count, 1);
+        assert_eq!(result.searched_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn one_shot_candidate_search_handles_large_bounded_workloads() -> Result<()> {
+        let candidates = (0..2_000)
+            .map(|index| TextCandidate {
+                id: format!("doc-{index}"),
+                fields: BTreeMap::from([(
+                    "body".to_owned(),
+                    format!("routing common-term-{index}"),
+                )]),
+                metadata: BTreeMap::new(),
+            })
+            .collect();
+        let result = search_text_candidates(
+            TextSearchSourceSummary::Records { prefix: None },
+            "routing",
+            &TextSearchSpec {
+                limit: Some(3),
+                ..Default::default()
+            },
+            candidates,
+            false,
+            TextScoreScope::CandidateSet,
+        )?;
+        assert_eq!(result.searched_count, 2_000);
+        assert_eq!(result.matches.len(), 3);
+        assert_eq!(
+            result
+                .matches
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["doc-0", "doc-1", "doc-10"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_search_matches_indexed_scores_and_result_details() -> Result<()> {
+        let documents = BTreeMap::from([
+            (
+                "alpha".to_owned(),
+                TextDocument {
+                    id: "alpha".to_owned(),
+                    fields: BTreeMap::from([
+                        ("title".to_owned(), "secure routing".to_owned()),
+                        ("body".to_owned(), "secure mesh proposal".to_owned()),
+                    ]),
+                    metadata: BTreeMap::from([(String::from("kind"), json!("note"))]),
+                },
+            ),
+            (
+                "beta".to_owned(),
+                TextDocument {
+                    id: "beta".to_owned(),
+                    fields: BTreeMap::from([
+                        ("title".to_owned(), "routing".to_owned()),
+                        ("body".to_owned(), "unrelated notes".to_owned()),
+                    ]),
+                    metadata: BTreeMap::from([(String::from("kind"), json!("other"))]),
+                },
+            ),
+            ("gamma".to_owned(), doc("gamma", "unrelated", "plain notes")),
+        ]);
+        let cache = TextCollectionCache::from_documents(
+            TextCollectionConfig::default(),
+            documents.clone(),
+            "test".to_owned(),
+        )?;
+        let spec = TextSearchSpec {
+            limit: None,
+            include_metadata: true,
+            include_snippets: true,
+            explain: true,
+            ..Default::default()
+        };
+        let indexed = search_text_collection("docs", &cache, "secure routing", &spec)?;
+        let candidates = documents
+            .values()
+            .cloned()
+            .map(|document| TextCandidate {
+                id: document.id,
+                fields: document.fields,
+                metadata: document.metadata,
+            })
+            .collect();
+        let one_shot = search_text_candidates(
+            TextSearchSourceSummary::Records { prefix: None },
+            "secure routing",
+            &spec,
+            candidates,
+            false,
+            TextScoreScope::CandidateSet,
+        )?;
+
+        assert_eq!(indexed.matches, one_shot.matches);
+        assert_eq!(indexed.searched_count, one_shot.searched_count);
+        assert_eq!(indexed.candidate_count, one_shot.candidate_count);
+        assert_eq!(indexed.matches[0].id, "alpha");
+        assert_eq!(
+            indexed.matches[0].metadata.as_ref().unwrap()["kind"],
+            json!("note")
+        );
+        assert!(
+            indexed.matches[0]
+                .snippets
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+        );
+        assert!(indexed.matches[0].explanation.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn collection_top_k_preserves_score_order_and_ties() -> Result<()> {
+        let documents = BTreeMap::from([
+            ("a".to_owned(), doc("a", "mesh", "")),
+            ("b".to_owned(), doc("b", "mesh", "")),
+            ("c".to_owned(), doc("c", "mesh", "")),
+            ("d".to_owned(), doc("d", "unrelated", "")),
+        ]);
+        let cache = TextCollectionCache::from_documents(
+            TextCollectionConfig::default(),
+            documents,
+            "test".to_owned(),
+        )?;
+        let all = search_text_collection(
+            "docs",
+            &cache,
+            "mesh",
+            &TextSearchSpec {
+                limit: None,
+                ..Default::default()
+            },
+        )?;
+        let page = search_text_collection(
+            "docs",
+            &cache,
+            "mesh",
+            &TextSearchSpec {
+                limit: Some(2),
+                offset: Some(1),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(
+            page.matches
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            all.matches
+                .iter()
+                .skip(1)
+                .take(2)
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(page.matches[0].score, all.matches[1].score);
+        assert_eq!(page.matches[1].score, all.matches[2].score);
         Ok(())
     }
 }

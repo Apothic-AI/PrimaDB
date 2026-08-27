@@ -1,14 +1,13 @@
-# Keyed Operation Compaction
+# P2 BM25 Optimization
 
 ## Goal
 
-Replace linear operation-queue compaction with O(1)-average keyed lookup while
-preserving first-key ordering and revision replacement behavior.
+Bound BM25 collection result selection and avoid constructing a full postings
+index for one-shot candidate searches while preserving exact result behavior.
 
 ## Plan
 
-- [x] Introduce a typed compaction key and cache key-to-operation indices.
-- [x] Route queue creation, snapshot restoration, rollback, drain, and flush
-  paths through the keyed queue.
-- [x] Add focused ordering, restoration, delimiter, and large-batch tests.
+- [x] Add bounded top-k selection with deterministic score and ID ordering.
+- [x] Score one-shot candidates directly from analyzed query-term frequencies.
+- [x] Preserve scores, field hits, metadata, snippets, explanations, and paging.
 - [x] Complete formatting, Rust checks, and full relevant tests.
