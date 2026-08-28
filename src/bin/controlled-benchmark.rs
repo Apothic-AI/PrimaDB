@@ -1,4 +1,4 @@
-//! Reproducible native benchmark runner for the P2 staging integration.
+//! Reproducible native benchmark runner for the tranche 1 comparison.
 //!
 //! The runner deliberately keeps setup outside timed sections. It writes JSON
 //! with every per-repetition sample, and can turn two such runs into a report.
@@ -47,6 +47,10 @@ const DEFAULT_ITERATIONS: usize = 1;
 struct Config {
     mode: Mode,
     label: String,
+    role: Option<String>,
+    revision: Option<String>,
+    tree_fingerprint: Option<String>,
+    runner_revision: Option<String>,
     output: Option<PathBuf>,
     baseline: Option<PathBuf>,
     staging: Option<PathBuf>,
@@ -66,7 +70,10 @@ enum Mode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RunReport {
     schema: u32,
+    role: String,
     revision: String,
+    tree_fingerprint: String,
+    runner_revision: String,
     label: String,
     seed: u64,
     warmups: usize,
@@ -104,7 +111,22 @@ struct Sample {
     min_ns: u128,
     max_ns: u128,
     throughput_per_sec: f64,
+    phases: PhaseTimings,
     resource: ResourceDelta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PhaseTimings {
+    setup: Option<PhaseSummary>,
+    verification: Option<PhaseSummary>,
+    persistence: Option<PhaseSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PhaseSummary {
+    raw_ns: Vec<u128>,
+    median_ns: u128,
+    p95_ns: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -156,6 +178,10 @@ fn parse_args() -> Result<Config> {
     let mut config = Config {
         mode: Mode::Run,
         label: "unknown".to_owned(),
+        role: None,
+        revision: None,
+        tree_fingerprint: None,
+        runner_revision: None,
         output: None,
         baseline: None,
         staging: None,
@@ -179,6 +205,14 @@ fn parse_args() -> Result<Config> {
                 }
             }
             "--label" => config.label = value("--label", &mut args)?,
+            "--role" => config.role = Some(value("--role", &mut args)?),
+            "--revision" => config.revision = Some(value("--revision", &mut args)?),
+            "--tree-fingerprint" => {
+                config.tree_fingerprint = Some(value("--tree-fingerprint", &mut args)?)
+            }
+            "--runner-revision" => {
+                config.runner_revision = Some(value("--runner-revision", &mut args)?)
+            }
             "--output" => config.output = Some(value("--output", &mut args)?.into()),
             "--baseline" => config.baseline = Some(value("--baseline", &mut args)?.into()),
             "--staging" => config.staging = Some(value("--staging", &mut args)?.into()),
@@ -189,7 +223,7 @@ fn parse_args() -> Result<Config> {
             "--iterations" => config.iterations = value("--iterations", &mut args)?.parse()?,
             "--help" => {
                 println!(
-                    "controlled-benchmark --mode run --label LABEL --output FILE [--seed N --warmups N --repetitions N --iterations N]\ncontrolled-benchmark --mode compare --baseline FILE --staging FILE --report FILE"
+                    "controlled-benchmark --mode run --role baseline|staging --label LABEL --revision REVISION --tree-fingerprint FINGERPRINT --runner-revision REVISION --output FILE [--seed N --warmups N --repetitions N --iterations N]\ncontrolled-benchmark --mode compare --baseline FILE --staging FILE --report FILE"
                 );
                 std::process::exit(0);
             }
@@ -207,16 +241,26 @@ fn run(config: Config) -> Result<()> {
         .output
         .clone()
         .ok_or_else(|| bench_error!("--output is required in run mode"))?;
-    let revision = env::var("BENCH_COMMIT").unwrap_or_else(|_| "unprovided".to_owned());
+    let role = required(config.role.as_deref(), "--role")?;
+    if role != "baseline" && role != "staging" {
+        bail!("--role must be baseline or staging");
+    }
+    let revision = required(config.revision.as_deref(), "--revision")?;
+    let tree_fingerprint = required(config.tree_fingerprint.as_deref(), "--tree-fingerprint")?;
+    let runner_revision = required(config.runner_revision.as_deref(), "--runner-revision")?;
+    let label = required_nonempty(&config.label, "--label")?;
     let mut report = RunReport {
-        schema: 1,
+        schema: 2,
+        role: role.to_owned(),
         revision,
-        label: config.label.clone(),
+        tree_fingerprint,
+        runner_revision,
+        label: label.to_owned(),
         seed: config.seed,
         warmups: config.warmups,
         repetitions: config.repetitions,
         iterations: config.iterations,
-        environment: environment(),
+        environment: environment()?,
         samples: Vec::new(),
     };
 
@@ -284,26 +328,37 @@ fn compare(config: Config) -> Result<()> {
         .ok_or_else(|| bench_error!("--report is required in compare mode"))?;
     let baseline: RunReport = serde_json::from_slice(&std::fs::read(&baseline)?)?;
     let staging: RunReport = serde_json::from_slice(&std::fs::read(&staging)?)?;
-    if baseline.seed != staging.seed
+    if baseline.schema != staging.schema
+        || baseline.role != "baseline"
+        || staging.role != "staging"
+        || !baseline.revision.starts_with("815b2194")
+        || baseline.revision == staging.revision
+        || baseline.tree_fingerprint == staging.tree_fingerprint
+        || baseline.runner_revision != staging.runner_revision
+        || baseline.seed != staging.seed
         || baseline.warmups != staging.warmups
         || baseline.repetitions != staging.repetitions
         || baseline.iterations != staging.iterations
+        || baseline.environment.compiler_profile != staging.environment.compiler_profile
+        || baseline.environment.features != staging.environment.features
+        || baseline.samples.len() != staging.samples.len()
     {
-        bail!("benchmark protocols differ between reports");
+        bail!("benchmark provenance or protocol differs between reports");
     }
     let mut markdown = String::new();
-    writeln!(markdown, "# Controlled P2 Benchmark Report")?;
+    writeln!(markdown, "# Tranche 1 Benchmark Report")?;
     writeln!(markdown)?;
     writeln!(
         markdown,
-        "Baseline: `{}` ({})",
-        baseline.revision, baseline.label
+        "Baseline: `{}` ({}) [tree `{}`]",
+        baseline.revision, baseline.label, baseline.tree_fingerprint
     )?;
     writeln!(
         markdown,
-        "Staging: `{}` ({})",
-        staging.revision, staging.label
+        "Staging: `{}` ({}) [tree `{}`]",
+        staging.revision, staging.label, staging.tree_fingerprint
     )?;
+    writeln!(markdown, "Runner source: `{}`", baseline.runner_revision)?;
     writeln!(markdown)?;
     writeln!(markdown, "## Protocol")?;
     writeln!(markdown)?;
@@ -323,7 +378,7 @@ fn compare(config: Config) -> Result<()> {
     )?;
     writeln!(
         markdown,
-        "- The same binary source, seed, workload sizes, compiler profile, and process protocol were used for both revisions."
+        "- The same runner source, seed, workload sizes, compiler profile, and process protocol were used for both revisions."
     )?;
     writeln!(markdown)?;
     writeln!(markdown, "## Environment")?;
@@ -348,6 +403,13 @@ fn compare(config: Config) -> Result<()> {
         let current = staging_by_name
             .get(base.name.as_str())
             .ok_or_else(|| bench_error!("missing staging sample {}", base.name))?;
+        if base.workload != current.workload
+            || base.unit != current.unit
+            || base.repetitions != current.repetitions
+            || base.iterations_per_repetition != current.iterations_per_repetition
+        {
+            bail!("workload protocol differs for sample {}", base.name);
+        }
         let change = (current.median_ns as f64 / base.median_ns as f64 - 1.0) * 100.0;
         writeln!(
             markdown,
@@ -361,6 +423,35 @@ fn compare(config: Config) -> Result<()> {
             format!("{}-{} ns", base.min_ns, base.max_ns),
             format!("{}-{} ns", current.min_ns, current.max_ns),
             current.throughput_per_sec
+        )?;
+    }
+    writeln!(markdown)?;
+    writeln!(markdown, "## Phase Timings")?;
+    writeln!(markdown)?;
+    writeln!(
+        markdown,
+        "Setup and verification are one measured pre-operation sample where available. Persistence is reported only for the full-durability operation; omitted phases were not separately measurable without changing the workload."
+    )?;
+    writeln!(markdown)?;
+    writeln!(
+        markdown,
+        "| Workload | Baseline setup | Staging setup | Baseline verification | Staging verification | Baseline persistence | Staging persistence |"
+    )?;
+    writeln!(markdown, "|---|---:|---:|---:|---:|---:|---:|")?;
+    for base in &baseline.samples {
+        let current = staging_by_name
+            .get(base.name.as_str())
+            .ok_or_else(|| bench_error!("missing staging sample {}", base.name))?;
+        writeln!(
+            markdown,
+            "| `{}` | {} | {} | {} | {} | {} | {} |",
+            base.name,
+            format_phase(base.phases.setup.as_ref()),
+            format_phase(current.phases.setup.as_ref()),
+            format_phase(base.phases.verification.as_ref()),
+            format_phase(current.phases.verification.as_ref()),
+            format_phase(base.phases.persistence.as_ref()),
+            format_phase(current.phases.persistence.as_ref()),
         )?;
     }
     writeln!(markdown)?;
@@ -389,7 +480,7 @@ fn compare(config: Config) -> Result<()> {
         )?;
     }
     writeln!(markdown)?;
-    writeln!(markdown, "## Resource Counters")?;
+    writeln!(markdown, "## Resource Proxies")?;
     writeln!(markdown)?;
     writeln!(
         markdown,
@@ -443,51 +534,15 @@ fn compare(config: Config) -> Result<()> {
     writeln!(markdown)?;
     writeln!(
         markdown,
-        "- Transactions: staging changed small successful transactions by {:+.1}% and large successful transactions by {:+.1}%; failed transactions changed by {:+.1}% (small) and {:+.1}% (large). The large baseline also contains 22-51 ms outliers versus a 0.2-3.5 ms staging range, so the prior apparent transaction regression is not reproduced here.",
-        change_pct(
-            sample(&baseline, "transactions/local/success/small")?,
-            sample(&staging, "transactions/local/success/small")?
-        ),
-        change_pct(
-            sample(&baseline, "transactions/local/success/large")?,
-            sample(&staging, "transactions/local/success/large")?
-        ),
-        change_pct(
-            sample(&baseline, "transactions/local/failure/small")?,
-            sample(&staging, "transactions/local/failure/small")?
-        ),
-        change_pct(
-            sample(&baseline, "transactions/local/failure/large")?,
-            sample(&staging, "transactions/local/failure/large")?
-        )
+        "- The summary and phase tables are descriptive comparisons of the measured workloads; they do not attribute a change to a single production optimization."
     )?;
     writeln!(
         markdown,
-        "- Direct-index construction was {:.1}% slower for the 64-root graph and {:.1}% slower for the 256-root graph. This pass therefore finds no direct-index memoization speedup relative to the requested baseline; the result is descriptive and may reflect the cost mix of this synthetic shared-chain workload.",
-        change_pct(
-            sample(&baseline, "direct-index/build/roots-64-depth-8-fanout-2")?,
-            sample(&staging, "direct-index/build/roots-64-depth-8-fanout-2")?
-        ),
-        change_pct(
-            sample(&baseline, "direct-index/build/roots-256-depth-16-fanout-4")?,
-            sample(&staging, "direct-index/build/roots-256-depth-16-fanout-4")?
-        )
+        "- Interpret medians together with p95, min/max, raw samples, and the separately reported setup, verification, and persistence phases. Large spread or a phase dominated by setup/persistence weakens an operation-only conclusion."
     )?;
     writeln!(
         markdown,
-        "- BM25 collection search was slower for all-hit (+12.8%) and half-hit (+33.1%) limit-10 cases, faster for rare-hit limit-10 (-18.5%), and nearly unchanged for rare-hit limit-50 (+5.7%). The collection optimization is therefore workload-dependent rather than an across-the-board improvement; record-candidate search changed by -2.6% but had a wider staging p95."
-    )?;
-    writeln!(
-        markdown,
-        "- Full durability was {:.1}% slower (0.50 s to 0.73 s median) and remains the dominant cost. Large full scans were 44-49 ms, while indexed query projection/filter/order was 36-41 ms; small scans improved substantially but large scans did not. Persistence and scans remain dominant for their native workloads.",
-        change_pct(
-            sample(&baseline, "persistence/segment-writes/full-durability")?,
-            sample(&staging, "persistence/segment-writes/full-durability")?
-        )
-    )?;
-    writeln!(
-        markdown,
-        "- Statistical confidence: these are nine independent repetition medians per revision with no confidence intervals or hypothesis test. The conclusions are directional observations supported by median, p95, min/max, and raw samples; they should not be treated as statistically significant claims."
+        "- No confidence intervals or hypothesis tests are calculated. These nine-repetition results should not be treated as statistically significant claims or as evidence that unmeasured counters changed."
     )?;
     writeln!(markdown)?;
     writeln!(markdown, "## Limitations")?;
@@ -538,7 +593,7 @@ fn write_environment_rows(
         ("Affinity", &base.affinity, &current.affinity),
         ("Filesystem", &base.filesystem, &current.filesystem),
         (
-            "Counters",
+            "Measured resource proxies",
             &base.resource_counters,
             &current.resource_counters,
         ),
@@ -561,6 +616,13 @@ fn format_resource_delta(before: &Option<u64>, after: &Option<u64>, suffix: &str
     }
 }
 
+fn format_phase(phase: Option<&PhaseSummary>) -> String {
+    phase.map_or_else(
+        || "not separately measured".to_owned(),
+        |phase| format!("{} ns (raw: {})", phase.median_ns, join_u128(&phase.raw_ns)),
+    )
+}
+
 fn join_u128(values: &[u128]) -> String {
     values
         .iter()
@@ -569,16 +631,15 @@ fn join_u128(values: &[u128]) -> String {
         .join(", ")
 }
 
-fn sample<'a>(report: &'a RunReport, name: &str) -> Result<&'a Sample> {
-    report
-        .samples
-        .iter()
-        .find(|sample| sample.name == name)
-        .ok_or_else(|| bench_error!("missing sample {name}"))
+fn required<'a>(value: Option<&'a str>, name: &str) -> Result<String> {
+    required_nonempty(value.unwrap_or_default(), name).map(str::to_owned)
 }
 
-fn change_pct(base: &Sample, current: &Sample) -> f64 {
-    (current.median_ns as f64 / base.median_ns as f64 - 1.0) * 100.0
+fn required_nonempty<'a>(value: &'a str, name: &str) -> Result<&'a str> {
+    if value.trim().is_empty() || value == "unknown" || value == "unprovided" {
+        bail!("{name} must be provided and non-empty");
+    }
+    Ok(value)
 }
 
 fn benchmark_transactions(
@@ -586,14 +647,20 @@ fn benchmark_transactions(
     state_size: usize,
     size_name: &str,
 ) -> Result<(Sample, Sample)> {
+    let setup_started = Instant::now();
     let db = Primadb::with_replica_id(format!("bench-tx-{size_name}"));
     populate_records(&db, "tx-state", state_size)?;
     db.root("tx").field("counter").put(0_u64)?;
+    let phases = PhaseTimings {
+        setup: phase_summary(&[setup_started.elapsed().as_nanos()]),
+        ..PhaseTimings::default()
+    };
     let success = timed(
         config,
         format!("transactions/local/success/{size_name}"),
         format!("in-memory state with {state_size} records"),
         None,
+        phases.clone(),
         |iteration| {
             let value = db.transaction(|tx| tx.root("tx").field("counter").increment(1.0))?;
             if value
@@ -612,6 +679,7 @@ fn benchmark_transactions(
         format!("transactions/local/failure/{size_name}"),
         format!("in-memory state with {state_size} records"),
         None,
+        phases,
         |_| {
             let result = db.transaction(|tx| tx.root("tx").field("never-created").assert_exists());
             if result.is_ok() {
@@ -631,6 +699,7 @@ fn benchmark_record_scans(
     count: usize,
     size_name: &str,
 ) -> Result<(Sample, Sample)> {
+    let setup_started = Instant::now();
     let root = unique_temp_dir(&format!("primadb-bench-scan-{size_name}"))?;
     let db = Primadb::with_replica_id(format!("bench-scan-{size_name}"));
     db.open_durable_storage(DurableStorageConfig::SegmentFiles {
@@ -640,11 +709,34 @@ fn benchmark_record_scans(
         lock_mode: SegmentLockMode::Exclusive,
     })?;
     populate_records(&db, "scan", count)?;
+    let setup_ns = setup_started.elapsed().as_nanos();
+    let verification_started = Instant::now();
+    let paginated_check = db.scan_records(RecordScan {
+        prefix: Some("scan/".to_owned()),
+        limit: Some(32),
+        ..RecordScan::default()
+    })?;
+    let full_check = db.scan_records(RecordScan {
+        prefix: Some("scan/".to_owned()),
+        ..RecordScan::default()
+    })?;
+    if paginated_check.entries.len() != 32
+        || paginated_check.next_cursor.is_none()
+        || full_check.entries.len() != count
+    {
+        bail!("record scan setup correctness assertion failed");
+    }
+    let phases = PhaseTimings {
+        setup: phase_summary(&[setup_ns]),
+        verification: phase_summary(&[verification_started.elapsed().as_nanos()]),
+        ..PhaseTimings::default()
+    };
     let paginated = timed(
         config,
         format!("records/scan/paginated/{size_name}"),
         format!("{count} native records, page 32"),
         Some(root.clone()),
+        phases.clone(),
         |_| {
             let result = db.scan_records(RecordScan {
                 prefix: Some("scan/".to_owned()),
@@ -662,6 +754,7 @@ fn benchmark_record_scans(
         format!("records/scan/full/{size_name}"),
         format!("{count} native records"),
         Some(root.clone()),
+        phases,
         |_| {
             let result = db.scan_records(RecordScan {
                 prefix: Some("scan/".to_owned()),
@@ -682,6 +775,7 @@ fn benchmark_record_scans(
 }
 
 fn benchmark_vectors(config: &Config, count: usize) -> Result<Sample> {
+    let setup_started = Instant::now();
     let db = Primadb::with_replica_id(format!("bench-vector-{count}"));
     db.create_vector_collection(
         "items",
@@ -718,15 +812,23 @@ fn benchmark_vectors(config: &Config, count: usize) -> Result<Sample> {
         exact: true,
         stale_policy: VectorStalePolicy::FallbackExact,
     };
+    let setup_ns = setup_started.elapsed().as_nanos();
+    let verification_started = Instant::now();
     let result = db.search_vectors("items", &query, spec.clone())?;
     if result.matches.len() != 10 || result.matches[0].id != "v-000000" {
         bail!("vector setup correctness assertion failed");
     }
+    let phases = PhaseTimings {
+        setup: phase_summary(&[setup_ns]),
+        verification: phase_summary(&[verification_started.elapsed().as_nanos()]),
+        ..PhaseTimings::default()
+    };
     timed(
         config,
         format!("vectors/exact/top-k/{count}"),
         format!("{count} vectors, dim 8, exact top-k 10"),
         None,
+        phases,
         |_| {
             let result = db.search_vectors("items", &query, spec.clone())?;
             if result.matches.len() != 10 || result.matches[0].id != "v-000000" {
@@ -744,6 +846,7 @@ fn benchmark_text_collection(
     query: &str,
     limit: usize,
 ) -> Result<Sample> {
+    let setup_started = Instant::now();
     let db = Primadb::with_replica_id(format!("bench-text-{hit_rate}-{limit}"));
     db.create_text_collection(
         "docs",
@@ -785,6 +888,8 @@ fn benchmark_text_collection(
         candidate_limit: None,
         candidate_policy: TextCandidatePolicy::RejectPaginatedQuery,
     };
+    let setup_ns = setup_started.elapsed().as_nanos();
+    let verification_started = Instant::now();
     let initial = db.text_search(TextSearchSource::collection("docs"), query, spec.clone())?;
     if initial.matches.is_empty()
         || initial.matches.len() > limit
@@ -792,11 +897,17 @@ fn benchmark_text_collection(
     {
         bail!("BM25 collection setup correctness assertion failed");
     }
+    let phases = PhaseTimings {
+        setup: phase_summary(&[setup_ns]),
+        verification: phase_summary(&[verification_started.elapsed().as_nanos()]),
+        ..PhaseTimings::default()
+    };
     timed(
         config,
         format!("text/bm25/collection/{hit_rate}/limit-{limit}"),
         format!("{count} documents, query hit class {hit_rate}, limit {limit}"),
         None,
+        phases,
         |_| {
             let result =
                 db.text_search(TextSearchSource::collection("docs"), query, spec.clone())?;
@@ -812,6 +923,7 @@ fn benchmark_text_collection(
 }
 
 fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sample> {
+    let setup_started = Instant::now();
     let db = Primadb::with_replica_id("bench-text-record-candidates");
     let mut mutations = Vec::with_capacity(count);
     for index in 0..count {
@@ -847,6 +959,8 @@ fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sa
         candidate_limit: None,
         candidate_policy: TextCandidatePolicy::RejectPaginatedQuery,
     };
+    let setup_ns = setup_started.elapsed().as_nanos();
+    let verification_started = Instant::now();
     let initial = db.text_search(source.clone(), "rare", spec.clone())?;
     if initial.matches.is_empty()
         || initial.matches.len() > 10
@@ -854,11 +968,17 @@ fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sa
     {
         bail!("record-candidate search setup correctness assertion failed");
     }
+    let phases = PhaseTimings {
+        setup: phase_summary(&[setup_ns]),
+        verification: phase_summary(&[verification_started.elapsed().as_nanos()]),
+        ..PhaseTimings::default()
+    };
     timed(
         config,
         "text/bm25/record-candidates/rare-limit-10".to_owned(),
         format!("{count} native record candidates, rare hit rate, limit 10"),
         None,
+        phases,
         |_| {
             let result = db.text_search(source.clone(), "rare", spec.clone())?;
             if result.matches.is_empty()
@@ -873,6 +993,7 @@ fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sa
 }
 
 fn benchmark_query(config: &Config, count: usize) -> Result<Sample> {
+    let setup_started = Instant::now();
     let root = unique_temp_dir("primadb-bench-query")?;
     let db = Primadb::with_replica_id("bench-query");
     db.open_durable_storage(DurableStorageConfig::SegmentFiles {
@@ -905,15 +1026,23 @@ fn benchmark_query(config: &Config, count: usize) -> Result<Sample> {
         limit: Some(20),
         offset: 10,
     };
+    let setup_ns = setup_started.elapsed().as_nanos();
+    let verification_started = Instant::now();
     let initial = db.query_path(&path, &spec)?;
     if initial.len() != 20 || initial[0].value["rank"] != json!(count - 11) {
         bail!("query projection/filter/order setup correctness assertion failed");
     }
+    let phases = PhaseTimings {
+        setup: phase_summary(&[setup_ns]),
+        verification: phase_summary(&[verification_started.elapsed().as_nanos()]),
+        ..PhaseTimings::default()
+    };
     let result = timed(
         config,
         "query/projection-filter-order/indexed".to_owned(),
         format!("{count} graph members, indexed rank filter/order, offset 10 limit 20"),
         Some(root.clone()),
+        phases,
         |_| {
             let result = db.query_path(&path, &spec)?;
             if result.len() != 20 || result[0].value["rank"] != json!(count - 11) {
@@ -928,22 +1057,30 @@ fn benchmark_query(config: &Config, count: usize) -> Result<Sample> {
 }
 
 fn benchmark_watchers(config: &Config, watcher_count: usize) -> Result<Sample> {
+    let setup_started = Instant::now();
     let db = Primadb::with_replica_id("bench-watchers");
     db.root("watch").field("value").put(0_u64)?;
     let watchers = (0..watcher_count)
         .map(|_| db.root("watch").subscribe())
         .collect::<primadb::Result<Vec<_>>>()?;
+    let verification_started = Instant::now();
     for watcher in &watchers {
         let initial = watcher.recv_blocking();
         if initial != Some(Some(json!({"$id": "watch", "value": 0}))) {
             bail!("watcher initial state assertion failed: {initial:?}");
         }
     }
+    let phases = PhaseTimings {
+        setup: phase_summary(&[setup_started.elapsed().as_nanos()]),
+        verification: phase_summary(&[verification_started.elapsed().as_nanos()]),
+        ..PhaseTimings::default()
+    };
     timed(
         config,
         format!("watchers/equivalent-update-coalescing/{watcher_count}"),
         format!("{watcher_count} equivalent local watchers on one path"),
         None,
+        phases,
         |iteration| {
             let value = iteration as u64 + 1;
             db.root("watch").field("value").put(value)?;
@@ -958,6 +1095,7 @@ fn benchmark_watchers(config: &Config, watcher_count: usize) -> Result<Sample> {
 }
 
 fn benchmark_durable_writes(config: &Config, batch_size: usize) -> Result<Sample> {
+    let setup_started = Instant::now();
     let root = unique_temp_dir("primadb-bench-durable")?;
     let db = Primadb::with_replica_id("bench-durable");
     db.open_durable_storage(DurableStorageConfig::SegmentFiles {
@@ -966,11 +1104,17 @@ fn benchmark_durable_writes(config: &Config, batch_size: usize) -> Result<Sample
         durability: SegmentDurability::Full,
         lock_mode: SegmentLockMode::Exclusive,
     })?;
-    let result = timed(
+    let setup_ns = setup_started.elapsed().as_nanos();
+    let mut persistence_ns = Vec::new();
+    let mut result = timed(
         config,
         "persistence/segment-writes/full-durability".to_owned(),
         format!("full-durability native segment write with {batch_size} record mutations"),
         Some(root.clone()),
+        PhaseTimings {
+            setup: phase_summary(&[setup_ns]),
+            ..PhaseTimings::default()
+        },
         |iteration| {
             let mut mutations = Vec::with_capacity(batch_size);
             for offset in 0..batch_size {
@@ -979,10 +1123,14 @@ fn benchmark_durable_writes(config: &Config, batch_size: usize) -> Result<Sample
                     value: RecordValue::Json(json!({"iteration": iteration, "offset": offset})),
                 });
             }
+            let persistence_started = Instant::now();
             let report = db.apply_record_batch(RecordBatch {
                 preconditions: Vec::new(),
                 mutations,
             })?;
+            if iteration >= config.warmups * config.iterations {
+                persistence_ns.push(persistence_started.elapsed().as_nanos());
+            }
             if report.puts != batch_size
                 || db
                     .get_record(&format!("durable/{:06}/0000", iteration))?
@@ -993,6 +1141,7 @@ fn benchmark_durable_writes(config: &Config, batch_size: usize) -> Result<Sample
             Ok(report.operation_count as u64)
         },
     )?;
+    result.phases.persistence = phase_summary(&persistence_ns);
     db.close_durable_storage();
     std::fs::remove_dir_all(root)?;
     Ok(result)
@@ -1004,13 +1153,19 @@ fn benchmark_direct_index(
     depth: usize,
     fanout: usize,
 ) -> Result<Sample> {
+    let setup_started = Instant::now();
     let nodes = make_shared_graph(roots, depth, fanout);
     let node_count = nodes.len();
+    let setup_ns = setup_started.elapsed().as_nanos();
     let result = timed(
         config,
         format!("direct-index/build/roots-{roots}-depth-{depth}-fanout-{fanout}"),
         format!("{node_count} nodes, {roots} roots, shared depth {depth}, fan-out {fanout}"),
         None,
+        PhaseTimings {
+            setup: phase_summary(&[setup_ns]),
+            ..PhaseTimings::default()
+        },
         |_| {
             let transaction = build_storage_transaction(
                 1,
@@ -1099,6 +1254,7 @@ fn timed<F>(
     name: String,
     workload: String,
     resource_dir: Option<PathBuf>,
+    phases: PhaseTimings,
     mut operation: F,
 ) -> Result<Sample>
 where
@@ -1124,11 +1280,7 @@ where
     black_box(sink);
     let after = proc_resource();
     let fs_after = resource_dir.as_deref().and_then(dir_size);
-    raw_ns_per_op.sort_unstable();
-    let median_ns = raw_ns_per_op[raw_ns_per_op.len() / 2];
-    let p95_ns = raw_ns_per_op[(raw_ns_per_op.len() * 95).div_ceil(100).saturating_sub(1)];
-    let min_ns = raw_ns_per_op[0];
-    let max_ns = *raw_ns_per_op.last().expect("non-empty samples");
+    let summary = phase_summary(&raw_ns_per_op).expect("non-empty samples");
     Ok(Sample {
         name,
         workload,
@@ -1136,11 +1288,12 @@ where
         repetitions: config.repetitions,
         iterations_per_repetition: config.iterations,
         raw_ns_per_op,
-        median_ns,
-        p95_ns,
-        min_ns,
-        max_ns,
-        throughput_per_sec: 1_000_000_000.0 / median_ns as f64,
+        median_ns: summary.median_ns,
+        p95_ns: summary.p95_ns,
+        min_ns: summary.raw_ns[0],
+        max_ns: *summary.raw_ns.last().expect("non-empty samples"),
+        throughput_per_sec: 1_000_000_000.0 / summary.median_ns as f64,
+        phases,
         resource: ResourceDelta {
             rss_before_kib: before.map(|value| value.rss_kib),
             rss_after_kib: after.map(|value| value.rss_kib),
@@ -1153,22 +1306,47 @@ where
     })
 }
 
-fn environment() -> Environment {
-    Environment {
+fn phase_summary(values: &[u128]) -> Option<PhaseSummary> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut raw_ns = values.to_vec();
+    raw_ns.sort_unstable();
+    Some(PhaseSummary {
+        median_ns: raw_ns[raw_ns.len() / 2],
+        p95_ns: raw_ns[(raw_ns.len() * 95).div_ceil(100).saturating_sub(1)],
+        raw_ns,
+    })
+}
+
+fn environment() -> Result<Environment> {
+    let compiler_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    if let Ok(declared_profile) = env::var("BENCH_PROFILE")
+        && declared_profile != compiler_profile
+    {
+        bail!(
+            "BENCH_PROFILE={declared_profile} does not match compiled profile {compiler_profile}"
+        );
+    }
+    Ok(Environment {
         os: env_or("BENCH_OS", std::env::consts::OS),
         kernel: env_or("BENCH_KERNEL", "unprovided"),
         cpu: env_or("BENCH_CPU", "unprovided"),
         rust: env_or("BENCH_RUST", "unprovided"),
         cargo: env_or("BENCH_CARGO", "unprovided"),
-        compiler_profile: env_or("BENCH_PROFILE", "release"),
-        features: env_or("BENCH_FEATURES", "default"),
+        compiler_profile: compiler_profile.to_owned(),
+        features: env_or("BENCH_FEATURES", "default (no optional features)"),
         governor: env_or("BENCH_GOVERNOR", "unprovided"),
         affinity: env_or("BENCH_AFFINITY", "unprovided"),
         filesystem: env_or("BENCH_FILESYSTEM", "unprovided"),
         resource_counters:
             "/proc/self/status VmRSS + /proc/self/stat utime+stime; no allocations/syscalls/locks"
                 .to_owned(),
-    }
+    })
 }
 
 fn env_or(name: &str, fallback: &str) -> String {

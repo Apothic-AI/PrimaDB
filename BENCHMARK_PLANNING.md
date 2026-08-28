@@ -2,10 +2,11 @@
 
 ## Goal
 
-Compare the committed pre-P2 baseline `1e00d93f` / `tqluxntq` with the
-`primadb-staging` tree using one reproducible native Rust harness. Keep setup
-and warmup outside timed sections, retain raw repetition samples, assert every
-workload result, and report unavailable counters instead of inventing them.
+Compare the actual committed P1 integration baseline `815b2194` with the
+current `primadb-staging` tree `b0f21bea` using one reproducible native Rust harness. Keep
+setup and warmup outside timed sections, retain raw repetition samples, assert
+every workload result, and report unavailable counters instead of inventing
+them. Do not use the empty staging child as the source identity.
 
 ## Scope
 
@@ -16,11 +17,16 @@ workload result, and report unavailable counters instead of inventing them.
 - [x] Query projection/filter/order and equivalent watcher updates.
 - [x] Full-durability segment writes.
 - [x] Direct-index construction over shared graphs with varied sizes/fan-outs.
-- [x] Baseline/staging raw JSON and generated comparison report.
+- [x] Baseline/staging raw JSON and generated comparison report with source
+  revisions, distinct source-tree fingerprints, and a shared runner revision.
+- [x] Setup, verification, and applicable persistence phases recorded separately
+  from timed operation samples.
 
 ## Protocol
 
-The committed `controlled-benchmark` binary uses a fixed seed, two warmups, nine
-repetitions, and ten timed iterations per repetition. Both revisions are run
-with `cargo run --release`, pinned to one CPU when available, with identical
-environment variables and workload arguments.
+The committed `controlled-benchmark` binary uses a fixed seed, two warmups,
+nine repetitions, and one timed iteration per repetition. Both revisions are run
+with the same runner source under `cargo run --release`, pinned to CPU 2, with
+identical environment variables and workload arguments. The raw run requires a
+role, full source revision, source-tree fingerprint, and runner revision; compare
+rejects same-tree or mismatched-protocol inputs.
