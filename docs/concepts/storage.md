@@ -53,9 +53,9 @@ are still incremental and coalesced, but they rely on browser durability semanti
 
 `SegmentFiles` is the strongest native local-durability backend. It defaults to:
 
-- `durability: "full"`: write temp file, flush data, fsync the file, atomically replace the target, and fsync the parent directory.
+- `durability: "full"`: atomically materialize the transaction, make its checksummed WAL commit record durable at one transaction boundary, and replay that WAL after a crash if materialized files were interrupted. Full-mode WAL records remain available until an explicit storage vacuum writes a checksummed full-state checkpoint and safely prunes them.
 - `lockMode: { kind: "exclusive" }`: fail fast if another process already owns the same segment directory.
-- startup recovery: validate pending/final journal commit records and roll forward materialized node/index/auth/record files when needed.
+- startup recovery: validate checkpoint and pending/final journal records, then roll forward materialized node/index/auth/record files in transaction order when needed.
 
 Callers can explicitly choose `durability: "data"` when they only need file-data sync without
 directory fsync, or `durability: "relaxed"` when the surrounding application owns durability.
