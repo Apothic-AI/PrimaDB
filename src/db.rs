@@ -11347,7 +11347,8 @@ mod tests {
         let first = crate::engine::segment_write_metrics_for_test(path.clone());
         assert!(first.direct_index_writes > 0);
         assert!(first.bytes_written > 0);
-        assert_eq!(first.file_syncs, first.file_writes);
+        assert_eq!(first.file_syncs, 1);
+        assert_eq!(first.durability_barriers, 1);
 
         crate::engine::reset_segment_write_metrics_for_test(path.clone());
         writer.root("checkpoints").field("current").put(value)?;
@@ -11363,7 +11364,9 @@ mod tests {
         }))?;
         let changed = crate::engine::segment_write_metrics_for_test(path.clone());
         assert_eq!(changed.direct_index_writes, 2);
-        assert!(changed.direct_index_directory_syncs > 0);
+        assert_eq!(changed.direct_index_directory_syncs, 0);
+        assert_eq!(changed.directory_syncs, 1);
+        assert_eq!(changed.durability_barriers, 1);
         drop(writer);
 
         let reader = Primadb::with_replica_id("write-metrics-reader");
@@ -11386,7 +11389,7 @@ mod tests {
     #[test]
     fn segment_files_keep_durability_mode_sync_policies() -> Result<()> {
         let modes = [
-            ("full", crate::SegmentDurability::Full, true, true),
+            ("full", crate::SegmentDurability::Full, true, false),
             ("data", crate::SegmentDurability::Data, true, false),
             ("relaxed", crate::SegmentDurability::Relaxed, false, false),
         ];
@@ -11419,7 +11422,39 @@ mod tests {
                 expect_directory_sync,
                 "{name} directory sync policy"
             );
+            if durability == crate::SegmentDurability::Full {
+                assert_eq!(metrics.file_syncs, 1, "{name} has one WAL sync");
+                assert_eq!(
+                    metrics.durability_barriers, 1,
+                    "{name} has one commit boundary"
+                );
+                assert_eq!(metrics.direct_index_directory_syncs, 0);
+            } else if durability == crate::SegmentDurability::Data {
+                assert_eq!(metrics.file_syncs, metrics.file_writes);
+                assert_eq!(metrics.durability_barriers, 0);
+            } else {
+                assert_eq!(metrics.file_syncs, 0);
+                assert_eq!(metrics.durability_barriers, 0);
+            }
+            assert_eq!(
+                db.root("durability").field("value").once_json()?,
+                Some(json!(1))
+            );
             drop(db);
+            let reopened = Primadb::with_replica_id(format!("durability-reopen-{name}"));
+            let binding =
+                reopened.open_durable_storage(crate::DurableStorageConfig::SegmentFiles {
+                    directory: path.display().to_string(),
+                    journal_retention: 8,
+                    durability,
+                    lock_mode: crate::SegmentLockMode::Exclusive,
+                })?;
+            assert!(binding.loaded_existing);
+            assert_eq!(
+                reopened.root("durability").field("value").once_json()?,
+                Some(json!(1))
+            );
+            drop(reopened);
             let _ = std::fs::remove_dir_all(path);
         }
         Ok(())
@@ -11474,7 +11509,7 @@ mod tests {
         let reader = Primadb::with_replica_id("recovery-reader");
         assert!(reader.use_segment_storage(path.clone(), 8)?);
         let report = reader.storage_recovery_report().unwrap_or_default();
-        assert_eq!(report.applied_transactions, 1);
+        assert_eq!(report.applied_transactions, 2);
         let restored = reader.root("docs").field("crash").once_json()?.unwrap();
         assert_eq!(restored["value"], "survived");
 

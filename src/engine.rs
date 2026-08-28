@@ -24,6 +24,8 @@ const STORAGE_SCHEMA_VERSION: u32 = 1;
 #[cfg(not(target_arch = "wasm32"))]
 const SEGMENT_COMMIT_SCHEMA_VERSION: u32 = 1;
 #[cfg(not(target_arch = "wasm32"))]
+const SEGMENT_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+#[cfg(not(target_arch = "wasm32"))]
 const DIRECT_INDEX_LITERAL_COMPONENT_LIMIT: usize = 120;
 #[cfg(not(target_arch = "wasm32"))]
 const DIRECT_INDEX_LITERAL_PREFIX: &str = "v_";
@@ -337,6 +339,24 @@ struct SegmentCommitRecord {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SegmentCheckpointRecord {
+    schema_version: u32,
+    checkpoint_tx_id: u64,
+    payload: SegmentCommitPayload,
+    checksum: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentWriteMode {
+    Configured,
+    Wal,
+    Commit,
+    Checkpoint,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SegmentFaultPoint {
     AfterJournalWrite,
@@ -344,6 +364,7 @@ pub(crate) enum SegmentFaultPoint {
     AfterIndexWrites,
     AfterManifestWrite,
     BeforeJournalFinalize,
+    BeforeDurabilityBoundary,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -359,6 +380,7 @@ pub(crate) struct SegmentWriteMetrics {
     pub file_syncs: usize,
     pub directory_syncs: usize,
     pub direct_index_directory_syncs: usize,
+    pub durability_barriers: usize,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -574,22 +596,24 @@ impl SegmentFileStore {
         &self,
         entry: &RecordEntry,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<()> {
         let path = self.record_entry_path(&entry.key);
-        self.write_json_file_batched(&path, entry, sync_dirs)
+        self.write_json_file_batched_with_mode(&path, entry, sync_dirs, mode)
     }
 
     fn remove_record_entry_batched(
         &self,
         key: &str,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<bool> {
         let path = self.record_entry_path(key);
-        if !self.remove_file_batched(&path, sync_dirs)? {
+        if !self.remove_file_batched(&path, sync_dirs, mode)? {
             return Ok(false);
         }
         if let Some(parent) = path.parent() {
-            self.prune_empty_record_dirs_batched(parent, sync_dirs)?;
+            self.prune_empty_record_dirs_batched(parent, sync_dirs, mode)?;
         }
         Ok(true)
     }
@@ -614,21 +638,23 @@ impl SegmentFileStore {
         path: &std::path::Path,
         bucket: &DirectIndexBucket,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<()> {
-        self.write_json_file_batched(path, bucket, sync_dirs)
+        self.write_json_file_batched_with_mode(path, bucket, sync_dirs, mode)
     }
 
     fn write_json_file<T: Serialize>(&self, path: &std::path::Path, value: &T) -> Result<()> {
         self.write_file(path, &serde_json::to_vec(value)?)
     }
 
-    fn write_json_file_batched<T: Serialize>(
+    fn write_json_file_batched_with_mode<T: Serialize>(
         &self,
         path: &std::path::Path,
         value: &T,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<()> {
-        self.write_file_batched(path, &serde_json::to_vec(value)?, sync_dirs)
+        self.write_file_batched_with_mode(path, &serde_json::to_vec(value)?, sync_dirs, mode)
     }
 
     fn write_file(&self, path: &std::path::Path, bytes: &[u8]) -> Result<()> {
@@ -646,12 +672,38 @@ impl SegmentFileStore {
         bytes: &[u8],
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
     ) -> Result<()> {
+        self.write_file_batched_with_mode(path, bytes, sync_dirs, SegmentWriteMode::Configured)
+    }
+
+    fn write_file_batched_with_mode(
+        &self,
+        path: &std::path::Path,
+        bytes: &[u8],
+        sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
+    ) -> Result<()> {
         let parent = path.parent().ok_or_else(|| {
             PrimadbError::Message(format!("path `{}` has no parent directory", path.display()))
         })?;
         let created_dir_parents = Self::ensure_parent_dirs(parent)?;
 
-        if matches!(self.durability, SegmentDurability::Relaxed) {
+        let (sync_file, sync_parent_dirs) = match mode {
+            SegmentWriteMode::Configured => (
+                !matches!(self.durability, SegmentDurability::Relaxed),
+                matches!(self.durability, SegmentDurability::Full),
+            ),
+            // Full commits use the durable WAL as their recovery source. A
+            // durable full-state checkpoint is written before its WAL records
+            // can be pruned.
+            SegmentWriteMode::Commit => (matches!(self.durability, SegmentDurability::Data), false),
+            SegmentWriteMode::Wal => (true, true),
+            SegmentWriteMode::Checkpoint => (
+                !matches!(self.durability, SegmentDurability::Relaxed),
+                matches!(self.durability, SegmentDurability::Full),
+            ),
+        };
+
+        if !sync_file && matches!(self.durability, SegmentDurability::Relaxed) {
             std::fs::write(path, bytes)?;
             #[cfg(test)]
             self.record_file_write_for_test(path, bytes.len());
@@ -667,24 +719,26 @@ impl SegmentFileStore {
                 .open(&temp_path)?;
             file.write_all(bytes)?;
             file.flush()?;
-            match self.durability {
-                SegmentDurability::Full => {
-                    #[cfg(test)]
-                    self.record_file_sync_for_test();
-                    file.sync_all()?
+            if sync_file {
+                match self.durability {
+                    SegmentDurability::Full => {
+                        #[cfg(test)]
+                        self.record_file_sync_for_test();
+                        file.sync_all()?
+                    }
+                    SegmentDurability::Data => {
+                        #[cfg(test)]
+                        self.record_file_sync_for_test();
+                        file.sync_data()?
+                    }
+                    SegmentDurability::Relaxed => {}
                 }
-                SegmentDurability::Data => {
-                    #[cfg(test)]
-                    self.record_file_sync_for_test();
-                    file.sync_data()?
-                }
-                SegmentDurability::Relaxed => {}
             }
         }
         replace_file(&temp_path, path)?;
         #[cfg(test)]
         self.record_file_write_for_test(path, bytes.len());
-        if matches!(self.durability, SegmentDurability::Full) {
+        if sync_parent_dirs {
             sync_dirs.extend(created_dir_parents);
             sync_dirs.insert(parent.to_path_buf());
         }
@@ -785,6 +839,16 @@ impl SegmentFileStore {
         if path.starts_with(self.root.join("indexes").join("direct")) {
             entry.direct_index_directory_syncs += 1;
         }
+    }
+
+    #[cfg(test)]
+    fn record_durability_barrier_for_test(&self) {
+        SEGMENT_WRITE_METRICS
+            .lock()
+            .unwrap()
+            .entry(self.root.clone())
+            .or_default()
+            .durability_barriers += 1;
     }
 
     #[cfg(test)]
@@ -967,6 +1031,7 @@ impl SegmentFileStore {
         &self,
         start: &std::path::Path,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<usize> {
         let root = self.record_entries_root();
         let mut current = start.to_path_buf();
@@ -978,7 +1043,7 @@ impl SegmentFileStore {
                     if entries.next().is_some() {
                         break;
                     }
-                    self.remove_dir_batched(&current, sync_dirs)?;
+                    self.remove_dir_batched(&current, sync_dirs, mode)?;
                     removed += 1;
                 }
                 _ => break,
@@ -1001,6 +1066,10 @@ impl SegmentFileStore {
         self.root
             .join("journal")
             .join(format!("tx-{tx_id:020}.json"))
+    }
+
+    fn checkpoint_path(&self) -> std::path::PathBuf {
+        self.root.join("checkpoint.json")
     }
 
     fn journal_file_key(path: &std::path::Path) -> Option<(u64, bool)> {
@@ -1071,46 +1140,142 @@ impl SegmentFileStore {
         Ok(record.payload)
     }
 
+    fn checkpoint_record_for_payload(
+        payload: SegmentCommitPayload,
+        checkpoint_tx_id: u64,
+    ) -> Result<SegmentCheckpointRecord> {
+        let schema_version = SEGMENT_CHECKPOINT_SCHEMA_VERSION;
+        let bytes = serde_json::to_vec(&(schema_version, checkpoint_tx_id, &payload))?;
+        Ok(SegmentCheckpointRecord {
+            schema_version,
+            checkpoint_tx_id,
+            payload,
+            checksum: blake3::hash(&bytes).to_hex().to_string(),
+        })
+    }
+
+    fn validate_checkpoint_record(
+        record: SegmentCheckpointRecord,
+    ) -> Result<(u64, SegmentCommitPayload)> {
+        if record.schema_version != SEGMENT_CHECKPOINT_SCHEMA_VERSION {
+            return Err(PrimadbError::Message(format!(
+                "segment checkpoint schema version {} is unsupported",
+                record.schema_version
+            )));
+        }
+        let bytes = serde_json::to_vec(&(
+            record.schema_version,
+            record.checkpoint_tx_id,
+            &record.payload,
+        ))?;
+        let expected = blake3::hash(&bytes).to_hex().to_string();
+        if expected != record.checksum {
+            return Err(PrimadbError::Message(
+                "segment checkpoint checksum mismatch".to_owned(),
+            ));
+        }
+        Ok((record.checkpoint_tx_id, record.payload))
+    }
+
     fn read_commit_record(path: &std::path::Path) -> Result<SegmentCommitPayload> {
         let record: SegmentCommitRecord = serde_json::from_str(&std::fs::read_to_string(path)?)?;
         Self::validate_commit_record(record)
     }
 
+    fn read_checkpoint(path: &std::path::Path) -> Result<(u64, SegmentCommitPayload)> {
+        let record: SegmentCheckpointRecord =
+            serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        Self::validate_checkpoint_record(record)
+    }
+
     fn write_pending_commit(&self, payload: SegmentCommitPayload) -> Result<std::path::PathBuf> {
         let record = Self::commit_record_for_payload(payload)?;
         let pending_path = self.journal_pending_path(record.payload.transaction.id);
-        self.write_json_file(&pending_path, &record)?;
+        let mode = if matches!(self.durability, SegmentDurability::Full) {
+            SegmentWriteMode::Wal
+        } else {
+            SegmentWriteMode::Configured
+        };
+        if matches!(self.durability, SegmentDurability::Full) {
+            self.maybe_fail(SegmentFaultPoint::BeforeDurabilityBoundary)?;
+        }
+        self.write_json_file_with_mode(&pending_path, &record, mode)?;
+        if matches!(self.durability, SegmentDurability::Full) {
+            #[cfg(test)]
+            self.record_durability_barrier_for_test();
+        }
         Ok(pending_path)
     }
 
-    fn materialize_commit_payload(&self, payload: &SegmentCommitPayload) -> Result<()> {
+    fn write_json_file_with_mode<T: Serialize>(
+        &self,
+        path: &std::path::Path,
+        value: &T,
+        mode: SegmentWriteMode,
+    ) -> Result<()> {
+        let mut sync_dirs = BTreeSet::new();
+        self.write_json_file_batched_with_mode(path, value, &mut sync_dirs, mode)?;
+        for path in sync_dirs {
+            self.sync_dir(&path)?;
+        }
+        Ok(())
+    }
+
+    fn write_checkpoint(&self, payload: SegmentCommitPayload, checkpoint_tx_id: u64) -> Result<()> {
+        let record = Self::checkpoint_record_for_payload(payload, checkpoint_tx_id)?;
+        self.write_json_file_with_mode(
+            &self.checkpoint_path(),
+            &record,
+            SegmentWriteMode::Checkpoint,
+        )?;
+        #[cfg(test)]
+        self.record_durability_barrier_for_test();
+        Ok(())
+    }
+
+    fn materialize_commit_payload_with_mode(
+        &self,
+        payload: &SegmentCommitPayload,
+        mode: SegmentWriteMode,
+    ) -> Result<()> {
         let transaction = &payload.transaction;
         let mut sync_dirs = BTreeSet::new();
 
         for (node_id, node_state) in &transaction.nodes {
-            self.write_json_file_batched(&self.node_path(node_id), node_state, &mut sync_dirs)?;
+            self.write_json_file_batched_with_mode(
+                &self.node_path(node_id),
+                node_state,
+                &mut sync_dirs,
+                mode,
+            )?;
         }
 
         self.maybe_fail(SegmentFaultPoint::AfterNodeWrites)?;
 
         for (node_id, auth_meta) in &transaction.auth_meta {
-            self.write_json_file_batched(&self.auth_meta_path(node_id), auth_meta, &mut sync_dirs)?;
+            self.write_json_file_batched_with_mode(
+                &self.auth_meta_path(node_id),
+                auth_meta,
+                &mut sync_dirs,
+                mode,
+            )?;
         }
 
-        self.materialize_direct_index_changes(payload, &mut sync_dirs)?;
+        self.materialize_direct_index_changes(payload, &mut sync_dirs, mode)?;
         for (node_id, manifest) in &transaction.node_indexes {
-            self.write_json_file_batched(
+            self.write_json_file_batched_with_mode(
                 &self.node_index_manifest_path(node_id),
                 manifest,
                 &mut sync_dirs,
+                mode,
             )?;
         }
 
         for key in &transaction.deleted_records {
-            let _ = self.remove_record_entry_batched(key, &mut sync_dirs)?;
+            let _ = self.remove_record_entry_batched(key, &mut sync_dirs, mode)?;
         }
         for entry in transaction.records.values() {
-            self.upsert_record_entry_batched(entry, &mut sync_dirs)?;
+            self.upsert_record_entry_batched(entry, &mut sync_dirs, mode)?;
         }
 
         for path in sync_dirs {
@@ -1119,7 +1284,7 @@ impl SegmentFileStore {
 
         self.maybe_fail(SegmentFaultPoint::AfterIndexWrites)?;
 
-        self.write_json_file(&self.manifest_path(), &transaction.metadata)?;
+        self.write_json_file_with_mode(&self.manifest_path(), &transaction.metadata, mode)?;
         self.maybe_fail(SegmentFaultPoint::AfterManifestWrite)?;
         Ok(())
     }
@@ -1128,6 +1293,7 @@ impl SegmentFileStore {
         &self,
         payload: &SegmentCommitPayload,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<()> {
         let transaction = &payload.transaction;
         let mut buckets: BTreeMap<std::path::PathBuf, (DirectIndexBucket, bool)> = BTreeMap::new();
@@ -1176,10 +1342,10 @@ impl SegmentFileStore {
             }
             if bucket.entries.is_empty() {
                 if path.exists() {
-                    self.remove_file_batched(&path, sync_dirs)?;
+                    self.remove_file_batched(&path, sync_dirs, mode)?;
                 }
             } else {
-                self.write_direct_index_bucket_path_batched(&path, &bucket, sync_dirs)?;
+                self.write_direct_index_bucket_path_batched(&path, &bucket, sync_dirs, mode)?;
             }
         }
         Ok(())
@@ -1189,12 +1355,16 @@ impl SegmentFileStore {
         &self,
         path: &std::path::Path,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<bool> {
         if !path.exists() {
             return Ok(false);
         }
         std::fs::remove_file(path)?;
-        if matches!(self.durability, SegmentDurability::Full)
+        if matches!(
+            mode,
+            SegmentWriteMode::Configured | SegmentWriteMode::Checkpoint
+        ) && matches!(self.durability, SegmentDurability::Full)
             && let Some(parent) = path.parent()
         {
             sync_dirs.insert(parent.to_path_buf());
@@ -1206,11 +1376,15 @@ impl SegmentFileStore {
         &self,
         path: &std::path::Path,
         sync_dirs: &mut BTreeSet<std::path::PathBuf>,
+        mode: SegmentWriteMode,
     ) -> Result<()> {
         let parent = path.parent().map(std::path::Path::to_path_buf);
         std::fs::remove_dir(path)?;
         sync_dirs.remove(path);
-        if matches!(self.durability, SegmentDurability::Full)
+        if matches!(
+            mode,
+            SegmentWriteMode::Configured | SegmentWriteMode::Checkpoint
+        ) && matches!(self.durability, SegmentDurability::Full)
             && let Some(parent) = parent
         {
             sync_dirs.insert(parent);
@@ -1218,13 +1392,36 @@ impl SegmentFileStore {
         Ok(())
     }
 
+    fn finalize_journal(
+        &self,
+        pending_path: &std::path::Path,
+        final_path: &std::path::Path,
+    ) -> Result<()> {
+        replace_file(pending_path, final_path)?;
+        Ok(())
+    }
+
     fn recover(&self) -> Result<StorageRecoveryReport> {
         self.ensure_layout()?;
         let mut report = StorageRecoveryReport::default();
-        let mut materialized_last = self
-            .read_manifest_unrecovered()?
-            .map(|metadata| metadata.last_materialized_tx_id)
-            .unwrap_or(0);
+        let mut materialized_last = 0;
+
+        if self.checkpoint_path().exists() {
+            match Self::read_checkpoint(&self.checkpoint_path()) {
+                Ok((checkpoint_tx_id, payload)) => {
+                    self.materialize_commit_payload_with_mode(
+                        &payload,
+                        SegmentWriteMode::Checkpoint,
+                    )?;
+                    materialized_last = checkpoint_tx_id;
+                }
+                Err(_) => {
+                    let quarantine = self.checkpoint_path().with_extension("corrupt");
+                    let _ = std::fs::rename(self.checkpoint_path(), quarantine);
+                    report.quarantined_files += 1;
+                }
+            }
+        }
 
         let mut journal_files = Vec::new();
         for entry in std::fs::read_dir(self.root.join("journal"))? {
@@ -1269,7 +1466,7 @@ impl SegmentFileStore {
                 report.skipped_transactions += 1;
                 continue;
             }
-            self.materialize_commit_payload(&payload)?;
+            self.materialize_commit_payload_with_mode(&payload, SegmentWriteMode::Commit)?;
             materialized_last = materialized_last.max(payload.transaction.id);
             report.applied_transactions += 1;
             if path
@@ -1281,10 +1478,7 @@ impl SegmentFileStore {
                 if final_path.exists() {
                     self.remove_file_durable(&path)?;
                 } else {
-                    replace_file(&path, &final_path)?;
-                    if matches!(self.durability, SegmentDurability::Full) {
-                        self.sync_dir(&self.root.join("journal"))?;
-                    }
+                    self.finalize_journal(&path, &final_path)?;
                 }
             }
         }
@@ -1317,6 +1511,11 @@ impl SegmentFileStore {
     }
 
     fn prune_journal(&self) -> Result<()> {
+        if matches!(self.durability, SegmentDurability::Full) {
+            // Full-mode commit records remain the durable recovery source until
+            // an explicit full-state checkpoint has been written by vacuum.
+            return Ok(());
+        }
         let _ = self.prune_journal_with_report()?;
         Ok(())
     }
@@ -1337,12 +1536,33 @@ impl SegmentFileStore {
         let remove_count = entries.len() - self.journal_retention;
         let mut sync_dirs = BTreeSet::new();
         for path in entries.into_iter().take(remove_count) {
-            let _ = self.remove_file_batched(&path, &mut sync_dirs);
+            let _ = self.remove_file_batched(&path, &mut sync_dirs, SegmentWriteMode::Configured);
         }
         for path in sync_dirs {
             self.sync_dir(&path)?;
         }
         Ok(remove_count)
+    }
+
+    fn prune_journal_through(&self, checkpoint_tx_id: u64) -> Result<usize> {
+        let mut sync_dirs = BTreeSet::new();
+        let mut removed = 0;
+        for entry in std::fs::read_dir(self.root.join("journal"))? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some((tx_id, _)) = Self::journal_file_key(&path) else {
+                continue;
+            };
+            if tx_id <= checkpoint_tx_id
+                && self.remove_file_batched(&path, &mut sync_dirs, SegmentWriteMode::Checkpoint)?
+            {
+                removed += 1;
+            }
+        }
+        for path in sync_dirs {
+            self.sync_dir(&path)?;
+        }
+        Ok(removed)
     }
 
     fn collect_live_index_paths(
@@ -1439,14 +1659,11 @@ impl IncrementalStore for SegmentFileStore {
         let pending_path = self.write_pending_commit(payload.clone())?;
         self.maybe_fail(SegmentFaultPoint::AfterJournalWrite)?;
 
-        self.materialize_commit_payload(&payload)?;
+        self.materialize_commit_payload_with_mode(&payload, SegmentWriteMode::Commit)?;
 
         let final_path = self.journal_final_path(transaction.id);
         self.maybe_fail(SegmentFaultPoint::BeforeJournalFinalize)?;
-        replace_file(&pending_path, &final_path)?;
-        if matches!(self.durability, SegmentDurability::Full) {
-            self.sync_dir(&self.root.join("journal"))?;
-        }
+        self.finalize_journal(&pending_path, &final_path)?;
         self.prune_journal()?;
         Ok(())
     }
@@ -1589,6 +1806,12 @@ impl IncrementalStore for SegmentFileStore {
 
     fn vacuum(&self, transaction: &StorageTransaction) -> Result<StorageVacuumReport> {
         self.ensure_layout()?;
+        let checkpoint_tx_id = transaction.id.saturating_sub(1);
+        if matches!(self.durability, SegmentDurability::Full) {
+            let payload = self.build_commit_payload(transaction)?;
+            self.materialize_commit_payload_with_mode(&payload, SegmentWriteMode::Checkpoint)?;
+            self.write_checkpoint(payload, checkpoint_tx_id)?;
+        }
         let (live_nodes, live_auth, live_manifests, live_direct) =
             Self::collect_live_index_paths(transaction);
 
@@ -1618,7 +1841,11 @@ impl IncrementalStore for SegmentFileStore {
             report.removed_empty_index_dirs = self.prune_empty_index_dirs(&direct_root)?;
         }
 
-        report.pruned_journal_files = self.prune_journal_with_report()?;
+        report.pruned_journal_files = if matches!(self.durability, SegmentDurability::Full) {
+            self.prune_journal_through(checkpoint_tx_id)?
+        } else {
+            self.prune_journal_with_report()?
+        };
         Ok(report)
     }
 }
@@ -2122,7 +2349,7 @@ mod tests {
         };
 
         reset_segment_write_metrics_for_test(root.clone());
-        store.materialize_commit_payload(&payload)?;
+        store.materialize_commit_payload_with_mode(&payload, SegmentWriteMode::Configured)?;
         let metrics = segment_write_metrics_for_test(root.clone());
         assert_eq!(metrics.direct_index_writes, 1);
         assert!(metrics.direct_index_directory_syncs > 0);
@@ -2137,6 +2364,205 @@ mod tests {
         );
         let bucket = SegmentFileStore::read_direct_index_bucket_path(&bucket_path)?;
         assert_eq!(bucket.entries.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn full_commit_recovery_replays_every_partial_artifact_phase() -> Result<()> {
+        let fault_points = [
+            SegmentFaultPoint::AfterJournalWrite,
+            SegmentFaultPoint::AfterNodeWrites,
+            SegmentFaultPoint::AfterIndexWrites,
+            SegmentFaultPoint::AfterManifestWrite,
+            SegmentFaultPoint::BeforeJournalFinalize,
+        ];
+
+        for (index, fault_point) in fault_points.into_iter().enumerate() {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "primadb-engine-partial-{}-{unique}-{index}",
+                std::process::id()
+            ));
+            let transaction = build_storage_transaction(
+                1,
+                StorageMetadata::new(HybridClock::with_actor("fault-test"), Vec::new(), 2),
+                BTreeMap::from([(
+                    "docs".to_owned(),
+                    node("docs", [("value", FieldValue::Scalar(json!("survived")))]),
+                )]),
+            );
+            let store = SegmentFileStore::new(&root, 8)?;
+            set_segment_fault_point_for_test(root.clone(), fault_point);
+            assert!(store.apply_transaction(&transaction).is_err());
+            drop(store);
+
+            let reopened = SegmentFileStore::new(&root, 8)?;
+            let metadata = reopened.load_metadata()?.expect("recovered metadata");
+            assert_eq!(metadata.last_materialized_tx_id, 1);
+            assert_eq!(
+                reopened
+                    .get_node("docs")?
+                    .and_then(|node| { node.fields.get("value").map(|field| field.value.clone()) }),
+                Some(FieldValue::Scalar(json!("survived")))
+            );
+            assert_eq!(
+                reopened.recovery_report().unwrap().applied_transactions,
+                1,
+                "fault point {fault_point:?}"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn full_commit_before_wal_boundary_is_not_recovered() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("primadb-engine-before-wal-{unique}"));
+        let transaction = build_storage_transaction(
+            1,
+            StorageMetadata::new(HybridClock::with_actor("before-wal-test"), Vec::new(), 2),
+            BTreeMap::from([(
+                "docs".to_owned(),
+                node(
+                    "docs",
+                    [("value", FieldValue::Scalar(json!("not-committed")))],
+                ),
+            )]),
+        );
+        let store = SegmentFileStore::new(&root, 8)?;
+        set_segment_fault_point_for_test(root.clone(), SegmentFaultPoint::BeforeDurabilityBoundary);
+        assert!(store.apply_transaction(&transaction).is_err());
+        drop(store);
+
+        let reopened = SegmentFileStore::new(&root, 8)?;
+        assert!(reopened.load_metadata()?.is_none());
+        assert!(reopened.get_node("docs")?.is_none());
+        assert_eq!(reopened.recovery_report().unwrap().applied_transactions, 0);
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn full_recovery_does_not_trust_manifest_materialization_hint() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("primadb-engine-manifest-hint-{unique}"));
+        let transaction = build_storage_transaction(
+            1,
+            StorageMetadata::new(HybridClock::with_actor("manifest-test"), Vec::new(), 2),
+            BTreeMap::from([(
+                "docs".to_owned(),
+                node("docs", [("value", FieldValue::Scalar(json!("original")))]),
+            )]),
+        );
+
+        let store = SegmentFileStore::new(&root, 8)?;
+        store.apply_transaction(&transaction)?;
+        let mut damaged = NodeState::new("docs");
+        damaged.fields.insert(
+            "value".to_owned(),
+            field(FieldValue::Scalar(json!("damaged"))),
+        );
+        std::fs::write(store.node_path("docs"), serde_json::to_vec(&damaged)?)?;
+        let mut manifest: StorageMetadata =
+            serde_json::from_str(&std::fs::read_to_string(store.manifest_path())?)?;
+        manifest.last_materialized_tx_id = 99;
+        std::fs::write(store.manifest_path(), serde_json::to_vec(&manifest)?)?;
+        drop(store);
+
+        let reopened = SegmentFileStore::new(&root, 8)?;
+        reopened.load_metadata()?.expect("recovered metadata");
+        assert_eq!(
+            reopened
+                .get_node("docs")?
+                .unwrap()
+                .fields
+                .get("value")
+                .unwrap()
+                .value,
+            FieldValue::Scalar(json!("original"))
+        );
+        assert_eq!(reopened.recovery_report().unwrap().applied_transactions, 1);
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn full_checkpoint_is_checksum_valid_and_replayable_after_journal_prune() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("primadb-engine-checkpoint-{unique}"));
+        let nodes = BTreeMap::from([(
+            "docs".to_owned(),
+            node(
+                "docs",
+                [("value", FieldValue::Scalar(json!("checkpointed")))],
+            ),
+        )]);
+        let transaction = build_storage_transaction(
+            1,
+            StorageMetadata::new(HybridClock::with_actor("checkpoint-test"), Vec::new(), 2),
+            nodes.clone(),
+        );
+
+        let store = SegmentFileStore::new(&root, 1)?;
+        store.apply_transaction(&transaction)?;
+        reset_segment_write_metrics_for_test(root.clone());
+        let checkpoint_transaction = build_storage_transaction(
+            2,
+            StorageMetadata::new(HybridClock::with_actor("checkpoint-test"), Vec::new(), 3),
+            nodes,
+        );
+        let report = store.vacuum(&checkpoint_transaction)?;
+        assert_eq!(report.pruned_journal_files, 1);
+        assert!(store.checkpoint_path().is_file());
+        assert_eq!(
+            segment_write_metrics_for_test(root.clone()).durability_barriers,
+            1
+        );
+        let checkpoint: SegmentCheckpointRecord =
+            serde_json::from_str(&std::fs::read_to_string(store.checkpoint_path())?)?;
+        let (_, payload) = SegmentFileStore::validate_checkpoint_record(checkpoint)?;
+        assert_eq!(payload.transaction.id, 2);
+        assert!(
+            !root
+                .join("journal")
+                .join("tx-00000000000000000001.json")
+                .exists()
+        );
+        drop(store);
+
+        let reopened = SegmentFileStore::new(&root, 1)?;
+        reopened.load_metadata()?.expect("checkpoint metadata");
+        assert_eq!(
+            reopened
+                .get_node("docs")?
+                .unwrap()
+                .fields
+                .get("value")
+                .unwrap()
+                .value,
+            FieldValue::Scalar(json!("checkpointed"))
+        );
+        assert_eq!(reopened.recovery_report().unwrap().applied_transactions, 0);
 
         let _ = std::fs::remove_dir_all(root);
         Ok(())
