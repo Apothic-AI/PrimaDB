@@ -1,0 +1,504 @@
+{
+  "schema": 1,
+  "revision": "unprovided",
+  "label": "tranche4",
+  "seed": 22567760790700872,
+  "warmups": 1,
+  "repetitions": 3,
+  "iterations": 1,
+  "environment": {
+    "os": "linux",
+    "kernel": "unprovided",
+    "cpu": "unprovided",
+    "rust": "unprovided",
+    "cargo": "unprovided",
+    "compiler_profile": "release",
+    "features": "default",
+    "governor": "unprovided",
+    "affinity": "unprovided",
+    "filesystem": "unprovided",
+    "resource_counters": "/proc/self/status VmRSS + /proc/self/stat utime+stime; no allocations/syscalls/locks"
+  },
+  "samples": [
+    {
+      "name": "transactions/local/success/small",
+      "workload": "in-memory state with 16 records",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        58847,
+        60550,
+        64744
+      ],
+      "median_ns": 60550,
+      "p95_ns": 64744,
+      "min_ns": 58847,
+      "max_ns": 64744,
+      "throughput_per_sec": 16515.276630883567,
+      "resource": {
+        "rss_before_kib": 8144,
+        "rss_after_kib": 8208,
+        "cpu_ticks_before": 11,
+        "cpu_ticks_after": 11,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "transactions/local/failure/small",
+      "workload": "in-memory state with 16 records",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        22719,
+        22842,
+        24442
+      ],
+      "median_ns": 22842,
+      "p95_ns": 24442,
+      "min_ns": 22719,
+      "max_ns": 24442,
+      "throughput_per_sec": 43779.003589878295,
+      "resource": {
+        "rss_before_kib": 8208,
+        "rss_after_kib": 8208,
+        "cpu_ticks_before": 11,
+        "cpu_ticks_after": 11,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "transactions/local/success/large",
+      "workload": "in-memory state with 1024 records",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        3444626,
+        3864910,
+        4289962
+      ],
+      "median_ns": 3864910,
+      "p95_ns": 4289962,
+      "min_ns": 3444626,
+      "max_ns": 4289962,
+      "throughput_per_sec": 258.73823711289526,
+      "resource": {
+        "rss_before_kib": 20116,
+        "rss_after_kib": 20116,
+        "cpu_ticks_before": 16,
+        "cpu_ticks_after": 17,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "transactions/local/failure/large",
+      "workload": "in-memory state with 1024 records",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        1212456,
+        1228594,
+        1379144
+      ],
+      "median_ns": 1228594,
+      "p95_ns": 1379144,
+      "min_ns": 1212456,
+      "max_ns": 1379144,
+      "throughput_per_sec": 813.9385346176198,
+      "resource": {
+        "rss_before_kib": 18180,
+        "rss_after_kib": 18180,
+        "cpu_ticks_before": 17,
+        "cpu_ticks_after": 17,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "records/scan/paginated/small",
+      "workload": "256 native records, page 32",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        1079705,
+        1245411,
+        2332927
+      ],
+      "median_ns": 1245411,
+      "p95_ns": 2332927,
+      "min_ns": 1079705,
+      "max_ns": 2332927,
+      "throughput_per_sec": 802.9477818968999,
+      "resource": {
+        "rss_before_kib": 19476,
+        "rss_after_kib": 19476,
+        "cpu_ticks_before": 29,
+        "cpu_ticks_after": 30,
+        "filesystem_footprint_delta_bytes": 0
+      }
+    },
+    {
+      "name": "records/scan/full/small",
+      "workload": "256 native records",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        4198538,
+        4239838,
+        4298356
+      ],
+      "median_ns": 4239838,
+      "p95_ns": 4298356,
+      "min_ns": 4198538,
+      "max_ns": 4298356,
+      "throughput_per_sec": 235.85806816203828,
+      "resource": {
+        "rss_before_kib": 19476,
+        "rss_after_kib": 19476,
+        "cpu_ticks_before": 31,
+        "cpu_ticks_after": 33,
+        "filesystem_footprint_delta_bytes": 0
+      }
+    },
+    {
+      "name": "records/scan/paginated/large",
+      "workload": "4096 native records, page 32",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        18033436,
+        18896057,
+        18972553
+      ],
+      "median_ns": 18896057,
+      "p95_ns": 18972553,
+      "min_ns": 18033436,
+      "max_ns": 18972553,
+      "throughput_per_sec": 52.92109353819159,
+      "resource": {
+        "rss_before_kib": 173104,
+        "rss_after_kib": 173104,
+        "cpu_ticks_before": 256,
+        "cpu_ticks_after": 267,
+        "filesystem_footprint_delta_bytes": 0
+      }
+    },
+    {
+      "name": "records/scan/full/large",
+      "workload": "4096 native records",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        73977628,
+        75638310,
+        77404164
+      ],
+      "median_ns": 75638310,
+      "p95_ns": 77404164,
+      "min_ns": 73977628,
+      "max_ns": 77404164,
+      "throughput_per_sec": 13.220813632668419,
+      "resource": {
+        "rss_before_kib": 173104,
+        "rss_after_kib": 173104,
+        "cpu_ticks_before": 281,
+        "cpu_ticks_after": 310,
+        "filesystem_footprint_delta_bytes": 0
+      }
+    },
+    {
+      "name": "vectors/exact/top-k/1024",
+      "workload": "1024 vectors, dim 8, exact top-k 10",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        205753,
+        214483,
+        233440
+      ],
+      "median_ns": 214483,
+      "p95_ns": 233440,
+      "min_ns": 205753,
+      "max_ns": 233440,
+      "throughput_per_sec": 4662.3741741769745,
+      "resource": {
+        "rss_before_kib": 167488,
+        "rss_after_kib": 167488,
+        "cpu_ticks_before": 1047,
+        "cpu_ticks_after": 1047,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "vectors/exact/top-k/4096",
+      "workload": "4096 vectors, dim 8, exact top-k 10",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        877463,
+        896691,
+        930593
+      ],
+      "median_ns": 896691,
+      "p95_ns": 930593,
+      "min_ns": 877463,
+      "max_ns": 930593,
+      "throughput_per_sec": 1115.2113715873138,
+      "resource": {
+        "rss_before_kib": 167488,
+        "rss_after_kib": 167488,
+        "cpu_ticks_before": 13246,
+        "cpu_ticks_after": 13247,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "text/bm25/collection/all/limit-10",
+      "workload": "1024 documents, query hit class all, limit 10",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        1968927,
+        2166754,
+        2393850
+      ],
+      "median_ns": 2166754,
+      "p95_ns": 2393850,
+      "min_ns": 1968927,
+      "max_ns": 2393850,
+      "throughput_per_sec": 461.51985873800163,
+      "resource": {
+        "rss_before_kib": 167680,
+        "rss_after_kib": 167680,
+        "cpu_ticks_before": 13476,
+        "cpu_ticks_after": 13476,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "text/bm25/collection/half/limit-10",
+      "workload": "1024 documents, query hit class half, limit 10",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        927837,
+        934504,
+        980850
+      ],
+      "median_ns": 934504,
+      "p95_ns": 980850,
+      "min_ns": 927837,
+      "max_ns": 980850,
+      "throughput_per_sec": 1070.0863773723815,
+      "resource": {
+        "rss_before_kib": 167680,
+        "rss_after_kib": 167680,
+        "cpu_ticks_before": 13696,
+        "cpu_ticks_after": 13696,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "text/bm25/collection/rare/limit-10",
+      "workload": "1024 documents, query hit class rare, limit 10",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        258615,
+        291035,
+        327605
+      ],
+      "median_ns": 291035,
+      "p95_ns": 327605,
+      "min_ns": 258615,
+      "max_ns": 327605,
+      "throughput_per_sec": 3436.0128506880615,
+      "resource": {
+        "rss_before_kib": 167680,
+        "rss_after_kib": 167680,
+        "cpu_ticks_before": 13924,
+        "cpu_ticks_after": 13924,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "text/bm25/collection/rare/limit-50",
+      "workload": "1024 documents, query hit class rare, limit 50",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        211937,
+        457391,
+        722930
+      ],
+      "median_ns": 457391,
+      "p95_ns": 722930,
+      "min_ns": 211937,
+      "max_ns": 722930,
+      "throughput_per_sec": 2186.313241843412,
+      "resource": {
+        "rss_before_kib": 167680,
+        "rss_after_kib": 167680,
+        "cpu_ticks_before": 14177,
+        "cpu_ticks_after": 14178,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "text/bm25/record-candidates/rare-limit-10",
+      "workload": "1024 native record candidates, rare hit rate, limit 10",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        5151717,
+        5291739,
+        5489010
+      ],
+      "median_ns": 5291739,
+      "p95_ns": 5489010,
+      "min_ns": 5151717,
+      "max_ns": 5489010,
+      "throughput_per_sec": 188.97379481489924,
+      "resource": {
+        "rss_before_kib": 167680,
+        "rss_after_kib": 167680,
+        "cpu_ticks_before": 14183,
+        "cpu_ticks_after": 14185,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "query/projection-filter-order/indexed",
+      "workload": "2048 graph members, indexed rank filter/order, offset 10 limit 20",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        32544375,
+        32578312,
+        33394240
+      ],
+      "median_ns": 32578312,
+      "p95_ns": 33394240,
+      "min_ns": 32544375,
+      "max_ns": 33394240,
+      "throughput_per_sec": 30.69526745277656,
+      "resource": {
+        "rss_before_kib": 179316,
+        "rss_after_kib": 179316,
+        "cpu_ticks_before": 15243,
+        "cpu_ticks_after": 15259,
+        "filesystem_footprint_delta_bytes": 0
+      }
+    },
+    {
+      "name": "watchers/equivalent-update-coalescing/8",
+      "workload": "8 equivalent local watchers on one path",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        216238,
+        218609,
+        235069
+      ],
+      "median_ns": 218609,
+      "p95_ns": 235069,
+      "min_ns": 216238,
+      "max_ns": 235069,
+      "throughput_per_sec": 4574.377084200559,
+      "resource": {
+        "rss_before_kib": 179316,
+        "rss_after_kib": 179316,
+        "cpu_ticks_before": 15353,
+        "cpu_ticks_after": 15353,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "persistence/segment-writes/full-durability",
+      "workload": "full-durability native segment write with 64 record mutations",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        410450497,
+        415322680,
+        424285286
+      ],
+      "median_ns": 415322680,
+      "p95_ns": 424285286,
+      "min_ns": 410450497,
+      "max_ns": 424285286,
+      "throughput_per_sec": 2.4077664142974324,
+      "resource": {
+        "rss_before_kib": 179316,
+        "rss_after_kib": 179316,
+        "cpu_ticks_before": 15366,
+        "cpu_ticks_after": 15411,
+        "filesystem_footprint_delta_bytes": 1209547
+      }
+    },
+    {
+      "name": "direct-index/build/roots-64-depth-8-fanout-2",
+      "workload": "72 nodes, 64 roots, shared depth 8, fan-out 2",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        949721,
+        974396,
+        1035958
+      ],
+      "median_ns": 974396,
+      "p95_ns": 1035958,
+      "min_ns": 949721,
+      "max_ns": 1035958,
+      "throughput_per_sec": 1026.2767909556278,
+      "resource": {
+        "rss_before_kib": 179316,
+        "rss_after_kib": 179316,
+        "cpu_ticks_before": 15419,
+        "cpu_ticks_after": 15419,
+        "filesystem_footprint_delta_bytes": null
+      }
+    },
+    {
+      "name": "direct-index/build/roots-256-depth-16-fanout-4",
+      "workload": "272 nodes, 256 roots, shared depth 16, fan-out 4",
+      "unit": "ns/op",
+      "repetitions": 3,
+      "iterations_per_repetition": 1,
+      "raw_ns_per_op": [
+        8574812,
+        9793159,
+        9823542
+      ],
+      "median_ns": 9793159,
+      "p95_ns": 9823542,
+      "min_ns": 8574812,
+      "max_ns": 9823542,
+      "throughput_per_sec": 102.11209682187331,
+      "resource": {
+        "rss_before_kib": 179316,
+        "rss_after_kib": 179316,
+        "cpu_ticks_before": 15420,
+        "cpu_ticks_after": 15423,
+        "filesystem_footprint_delta_bytes": null
+      }
+    }
+  ]
+}
