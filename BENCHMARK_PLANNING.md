@@ -30,3 +30,14 @@ with the same runner source under `cargo run --release`, pinned to CPU 2, with
 identical environment variables and workload arguments. The raw run requires a
 role, full source revision, source-tree fingerprint, and runner revision; compare
 rejects same-tree or mismatched-protocol inputs.
+
+## Tranche 5 Follow-up
+
+The tranche-5 run retained the established collection workloads and added
+1,024-record native candidate workloads at all-, half-, and rare-hit rates.
+The clean source parent `cd81a2e9` was used only for the established rare
+candidate comparison; the added candidate cases are reported as absolute
+measurements because the untouched source benchmark did not contain those
+sample names. The first dense-allocation implementation was rejected after its
+rare collection result regressed; the final sparse-posting implementation was
+benchmarked again before recording results.

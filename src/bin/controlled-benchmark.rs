@@ -299,7 +299,15 @@ fn run(config: Config) -> Result<()> {
     add(benchmark_text_collection(
         &config, 1024, "rare", "rare", 50,
     )?)?;
-    add(benchmark_text_records_candidates(&config, 1024)?)?;
+    add(benchmark_text_records_candidates(
+        &config, 1024, "all", "common", 10,
+    )?)?;
+    add(benchmark_text_records_candidates(
+        &config, 1024, "half", "half", 10,
+    )?)?;
+    add(benchmark_text_records_candidates(
+        &config, 1024, "rare", "rare", 10,
+    )?)?;
     add(benchmark_query(&config, 2048)?)?;
     add(benchmark_watchers(&config, 8)?)?;
     add(benchmark_durable_writes(&config, 64)?)?;
@@ -922,15 +930,22 @@ fn benchmark_text_collection(
     )
 }
 
-fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sample> {
+fn benchmark_text_records_candidates(
+    config: &Config,
+    count: usize,
+    hit_rate: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Sample> {
     let setup_started = Instant::now();
-    let db = Primadb::with_replica_id("bench-text-record-candidates");
+    let db = Primadb::with_replica_id(format!("bench-text-record-candidates-{hit_rate}-{limit}"));
     let mut mutations = Vec::with_capacity(count);
     for index in 0..count {
-        let body = if index % 20 == 0 {
-            format!("rare candidate body {index}")
-        } else {
-            format!("ordinary candidate body {index}")
+        let body = match hit_rate {
+            "all" => format!("common candidate body {index}"),
+            "half" if index % 2 == 0 => format!("half candidate body {index}"),
+            "rare" if index % 20 == 0 => format!("rare candidate body {index}"),
+            _ => format!("ordinary candidate body {index}"),
         };
         mutations.push(RecordMutation::Put {
             key: format!("candidate/{index:06}"),
@@ -948,7 +963,7 @@ fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sa
         },
     };
     let spec = TextSearchSpec {
-        limit: Some(10),
+        limit: Some(limit),
         offset: None,
         fields: Some(vec!["body".to_owned()]),
         include_metadata: false,
@@ -961,9 +976,9 @@ fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sa
     };
     let setup_ns = setup_started.elapsed().as_nanos();
     let verification_started = Instant::now();
-    let initial = db.text_search(source.clone(), "rare", spec.clone())?;
+    let initial = db.text_search(source.clone(), query, spec.clone())?;
     if initial.matches.is_empty()
-        || initial.matches.len() > 10
+        || initial.matches.len() > limit
         || initial.score_scope != primadb::TextScoreScope::CandidateSet
     {
         bail!("record-candidate search setup correctness assertion failed");
@@ -973,16 +988,21 @@ fn benchmark_text_records_candidates(config: &Config, count: usize) -> Result<Sa
         verification: phase_summary(&[verification_started.elapsed().as_nanos()]),
         ..PhaseTimings::default()
     };
+    let sample_name = if hit_rate == "rare" && limit == 10 {
+        "text/bm25/record-candidates/rare-limit-10".to_owned()
+    } else {
+        format!("text/bm25/record-candidates/{hit_rate}/limit-{limit}")
+    };
     timed(
         config,
-        "text/bm25/record-candidates/rare-limit-10".to_owned(),
-        format!("{count} native record candidates, rare hit rate, limit 10"),
+        sample_name,
+        format!("{count} native record candidates, {hit_rate} hit rate, limit {limit}"),
         None,
         phases,
         |_| {
-            let result = db.text_search(source.clone(), "rare", spec.clone())?;
+            let result = db.text_search(source.clone(), query, spec.clone())?;
             if result.matches.is_empty()
-                || result.matches.len() > 10
+                || result.matches.len() > limit
                 || result.score_scope != primadb::TextScoreScope::CandidateSet
             {
                 bail!("record-candidate search correctness assertion failed");

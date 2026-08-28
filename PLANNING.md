@@ -32,3 +32,27 @@ while preserving behavior, focused regression coverage, and task documentation.
 - [x] Run the complete native default/all-feature and installed WASM verification
   matrix.
 - [x] Record final graph, conflict, status, and test evidence.
+
+## Tranche 5 BM25 Optimization
+
+### Goal
+
+Optimize exact BM25 candidate and collection scoring without changing public
+types, score semantics, result detail behavior, stale handling, or ordering.
+
+### Design
+
+- [x] Fuse candidate tokenization, document statistics, query-term statistics,
+  and matching postings construction into one pass over the selected candidates.
+- [x] Score candidate postings directly, avoiding cloned `TextDocument` maps and
+  the old query-term-by-document rescan.
+- [x] Add runtime-only dense document/field IDs and compact postings for
+  collection scoring while retaining the existing serialized cache format.
+- [x] Keep score state sparse by dense document ID so rare-hit searches do not
+  allocate or scan the whole collection.
+- [x] Preserve duplicate-candidate last-write behavior, exact f32 accumulation
+  order, top-k tie ordering, pagination, metadata, snippets, and explanations.
+- [x] Add an independent pre-optimization correctness oracle covering candidate
+  and collection result equivalence.
+- [x] Extend the controlled native benchmark with all-, half-, and rare-hit
+  candidate workloads.
