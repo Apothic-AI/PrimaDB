@@ -15,7 +15,7 @@
 - Ran both revisions successfully with runtime correctness assertions: P1
   baseline `815b2194013cf419c6134060fd57e13bb4ed4af9` and staging
   `b0f21beaec75de0bafff944dde1e9d0838540644`; the shared corrected runner is
-  `5d63ab031a910775f5e262d1aad7c9ef08bdb692`. All 20 samples and raw samples
+  `19e5efe6f23e4b78a000a901d119262239a77184`. All 20 samples and raw samples
   are retained in `/tmp/primadb-tranche1-{baseline,staging}.json` during the
   pass; the committed report is
   `benchmarks/controlled-tranche1-report-20260828.md`.
