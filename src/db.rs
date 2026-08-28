@@ -280,6 +280,8 @@ struct Inner {
     query_candidate_projections: usize,
     #[cfg(test)]
     watch_recomputations: usize,
+    #[cfg(test)]
+    relationship_index_reindexes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -657,6 +659,8 @@ struct TransactionJournal {
     unflushed_ops: OperationQueueUndo,
     missing_nodes: BTreeMap<NodeId, bool>,
     scheduled_node_fetches: BTreeMap<NodeId, bool>,
+    relationship_index_sources: BTreeSet<NodeId>,
+    relationship_index_pending: BTreeSet<NodeId>,
 }
 
 impl TransactionJournal {
@@ -668,6 +672,8 @@ impl TransactionJournal {
             unflushed_ops: OperationQueueUndo::new(inner.unflushed_ops.len()),
             missing_nodes: BTreeMap::new(),
             scheduled_node_fetches: BTreeMap::new(),
+            relationship_index_sources: BTreeSet::new(),
+            relationship_index_pending: BTreeSet::new(),
         }
     }
 
@@ -676,7 +682,6 @@ impl TransactionJournal {
         self.pending_ops.restore(&mut inner.pending_ops);
         self.unflushed_ops.restore(&mut inner.unflushed_ops);
 
-        let touched_nodes = self.nodes.keys().cloned().collect::<Vec<_>>();
         for (node, previous) in self.nodes {
             match previous {
                 Some(state) => {
@@ -693,7 +698,9 @@ impl TransactionJournal {
         for (node, was_scheduled) in self.scheduled_node_fetches {
             restore_set_membership(&mut inner.scheduled_node_fetches, node, was_scheduled);
         }
-        for node in touched_nodes {
+        // A transaction may have exposed its relationship index to a read before
+        // failing. Rebuild every affected source from the restored node state.
+        for node in self.relationship_index_sources {
             inner.reindex_node_relationships(&node);
         }
     }
@@ -835,6 +842,8 @@ impl Primadb {
                 query_candidate_projections: 0,
                 #[cfg(test)]
                 watch_recomputations: 0,
+                #[cfg(test)]
+                relationship_index_reindexes: 0,
             })),
         }
     }
@@ -870,6 +879,16 @@ impl Primadb {
         F: FnOnce(&mut Transaction<'_>) -> Result<T>,
     {
         self.run_local_transaction(f).map(|(value, _, _)| value)
+    }
+
+    #[cfg(test)]
+    fn reset_relationship_index_reindex_count(&self) {
+        self.inner.lock().unwrap().relationship_index_reindexes = 0;
+    }
+
+    #[cfg(test)]
+    fn relationship_index_reindex_count(&self) -> usize {
+        self.inner.lock().unwrap().relationship_index_reindexes
     }
 
     pub fn apply_transaction_steps(
@@ -1583,6 +1602,7 @@ impl Primadb {
                 Ok(value) => {
                     let ops = inner.unflushed_ops.as_slice()[start_unflushed_len..].to_vec();
                     let operation_count = ops.len();
+                    inner.flush_pending_relationship_index();
                     inner.transaction_journal.take();
                     (
                         Ok(value),
@@ -5296,6 +5316,11 @@ impl<'a> Transaction<'a> {
         &self.member_ids
     }
 
+    #[cfg(test)]
+    fn relationship_index_reindex_count(&self) -> usize {
+        self.inner.relationship_index_reindexes
+    }
+
     pub fn get_record(&mut self, key: &str) -> Result<Option<RecordEntry>> {
         record_entry_from_inner(self.inner, key)
     }
@@ -5377,6 +5402,12 @@ impl<'tx, 'inner> TransactionChain<'tx, 'inner> {
 
     pub fn remove_json(&mut self, value: JsonValue) -> Result<String> {
         remove_json_inner(self.tx.inner, &self.anchor, &self.segments, value)
+    }
+
+    pub fn traverse(&mut self, spec: TraversalSpec) -> Result<TraversalResult> {
+        self.tx
+            .inner
+            .traverse_at(&self.anchor, &self.segments, &spec)
     }
 
     pub fn once_json(&mut self) -> Result<Option<JsonValue>> {
@@ -6176,6 +6207,7 @@ impl Inner {
         edge_fields: Option<&BTreeSet<String>>,
     ) -> Result<Vec<TraversalEdge>> {
         let _ = self.maybe_load_node(node)?;
+        self.flush_pending_relationship_index();
         let mut edges = Vec::new();
         if matches!(
             spec.direction,
@@ -6328,7 +6360,31 @@ impl Inner {
         }
     }
 
+    fn request_reindex_node_relationships(&mut self, node: &str) {
+        let Some(journal) = self.transaction_journal.as_mut() else {
+            self.reindex_node_relationships(node);
+            return;
+        };
+        journal.relationship_index_sources.insert(node.to_owned());
+        journal.relationship_index_pending.insert(node.to_owned());
+    }
+
+    fn flush_pending_relationship_index(&mut self) {
+        let pending = self
+            .transaction_journal
+            .as_mut()
+            .map(|journal| std::mem::take(&mut journal.relationship_index_pending))
+            .unwrap_or_default();
+        for node in pending {
+            self.reindex_node_relationships(&node);
+        }
+    }
+
     fn reindex_node_relationships(&mut self, node: &str) {
+        #[cfg(test)]
+        {
+            self.relationship_index_reindexes = self.relationship_index_reindexes.saturating_add(1);
+        }
         self.journal_node(node);
         self.relationship_index.remove_source(node);
         let Some(state) = self.nodes.get(node) else {
@@ -6377,7 +6433,7 @@ impl Inner {
                 merge_node_state(&mut self.nodes, node_state);
                 self.journal_missing_node(node);
                 self.missing_nodes.remove(node);
-                self.reindex_node_relationships(node);
+                self.request_reindex_node_relationships(node);
                 Ok(true)
             }
             None => {
@@ -7123,7 +7179,7 @@ impl Inner {
 
         if accepted {
             let source = operation_source_node(&op).to_owned();
-            self.reindex_node_relationships(&source);
+            self.request_reindex_node_relationships(&source);
             self.journal_operation_queue(OperationQueue::Unflushed, &op);
             self.unflushed_ops.push(op.clone());
         }
@@ -8771,7 +8827,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier};
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     fn vector_search_spec() -> VectorSearchSpec {
         VectorSearchSpec {
@@ -9932,6 +9988,217 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["people/alice"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_relationship_index_reindex_is_deferred_and_deduplicated() -> Result<()> {
+        let db = Primadb::with_replica_id("relationship-batch-one-source");
+        db.reset_relationship_index_reindex_count();
+
+        db.transaction(|tx| {
+            assert_eq!(tx.relationship_index_reindex_count(), 0);
+            tx.root("docs").field("first").put(1)?;
+            tx.root("docs").field("second").put(2)?;
+            tx.root("docs").field("third").put(3)?;
+            assert_eq!(tx.relationship_index_reindex_count(), 0);
+            Ok(())
+        })?;
+
+        assert_eq!(db.relationship_index_reindex_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_relationship_index_reindexes_multiple_sources_once_each() -> Result<()> {
+        let db = Primadb::with_replica_id("relationship-batch-sources");
+        db.reset_relationship_index_reindex_count();
+
+        db.transaction(|tx| {
+            tx.root("source-a").field("first").put(1)?;
+            tx.root("source-b").field("first").put(2)?;
+            tx.root("source-a").field("second").put(3)?;
+            tx.root("source-b").field("second").put(4)?;
+            Ok(())
+        })?;
+
+        assert_eq!(db.relationship_index_reindex_count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_relationship_index_preserves_link_set_traversal_before_and_after_commit()
+    -> Result<()> {
+        let db = Primadb::with_replica_id("relationship-batch-traversal");
+        db.root("graph-a").field("name").put("A")?;
+        db.root("graph-b").field("name").put("B")?;
+        db.root("graph-c").field("name").put("C")?;
+        db.reset_relationship_index_reindex_count();
+
+        db.transaction(|tx| {
+            tx.root("graph-a")
+                .field("next")
+                .put(json!({"$link": "graph-b"}))?;
+            tx.root("graph-a")
+                .field("next")
+                .put(json!({"$link": "graph-c"}))?;
+            tx.root("graph-hub").field("members").put(json!({
+                "$set": [{"$link": "graph-a"}, {"$link": "graph-c"}]
+            }))?;
+
+            let before_commit = tx.root("graph-a").traverse(TraversalSpec {
+                max_depth: 1,
+                ..TraversalSpec::default()
+            })?;
+            assert_eq!(
+                before_commit
+                    .entries
+                    .iter()
+                    .map(|entry| entry.node_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["graph-c"]
+            );
+            Ok(())
+        })?;
+
+        assert_eq!(db.relationship_index_reindex_count(), 2);
+        let after_commit = db.root("graph-hub").traverse(TraversalSpec {
+            max_depth: 1,
+            ..TraversalSpec::default()
+        })?;
+        assert_eq!(after_commit.entries.len(), 2);
+        assert_eq!(after_commit.entries[0].node_id, "graph-a");
+        assert_eq!(after_commit.entries[1].node_id, "graph-c");
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_relationship_index_rollback_restores_link_traversal_and_journal_state()
+    -> Result<()> {
+        let db = Primadb::with_replica_id("relationship-batch-rollback");
+        db.root("source")
+            .field("next")
+            .put(json!({"$link": "old"}))?;
+        db.root("old").put(json!({}))?;
+        db.reset_relationship_index_reindex_count();
+        let pending_before = db.pending_operations();
+
+        let result = db.transaction(|tx| {
+            tx.root("source")
+                .field("next")
+                .put(json!({"$link": "new"}))?;
+            tx.root("source").assert_absent()
+        });
+
+        assert!(matches!(
+            result,
+            Err(PrimadbError::TransactionConflict { .. })
+        ));
+        assert_eq!(db.pending_operations(), pending_before);
+        assert_eq!(db.relationship_index_reindex_count(), 1);
+        let traversal = db.root("source").traverse(TraversalSpec {
+            max_depth: 1,
+            ..TraversalSpec::default()
+        })?;
+        assert_eq!(traversal.entries[0].node_id, "old");
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_relationship_index_batches_watchers_remote_apply_and_persistence() -> Result<()>
+    {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-relationship-batch-{unique}.json"));
+        let source = Primadb::with_replica_id("relationship-batch-source");
+        source
+            .root("source")
+            .field("next")
+            .put(json!({"$link": "old"}))?;
+        source.root("old").field("name").put("old")?;
+        source.root("new").field("name").put("new")?;
+        let watch = source.root("source").watch_traverse(TraversalSpec {
+            max_depth: 1,
+            include_values: true,
+            ..TraversalSpec::default()
+        })?;
+        assert_eq!(watch.recv_blocking().unwrap().entries[0].node_id, "old");
+
+        source.reset_relationship_index_reindex_count();
+        source.transaction(|tx| {
+            tx.root("source")
+                .field("next")
+                .put(json!({"$link": "new"}))?;
+            tx.root("source").field("other").put(1)?;
+            Ok(())
+        })?;
+        assert_eq!(source.relationship_index_reindex_count(), 1);
+        assert_eq!(watch.recv_blocking().unwrap().entries[0].node_id, "new");
+        assert!(watch.try_recv().is_none());
+
+        assert!(!source.use_file_persistence(path.clone())?);
+        let remote_source = Primadb::with_replica_id("relationship-batch-remote-source");
+        remote_source.transaction(|tx| {
+            tx.root("remote-source").field("first").put(json!({
+                "$link": "remote-a"
+            }))?;
+            tx.root("remote-source").field("second").put(json!({
+                "$link": "remote-b"
+            }))?;
+            Ok(())
+        })?;
+        let remote_ops = remote_source.drain_pending_operations()?;
+        let remote = Primadb::with_replica_id("relationship-batch-remote");
+        remote.reset_relationship_index_reindex_count();
+        assert_eq!(remote.apply_operations(remote_ops)?, 2);
+        assert_eq!(remote.relationship_index_reindex_count(), 2);
+        let reopened = Primadb::with_replica_id("relationship-batch-reopened");
+        assert!(reopened.use_file_persistence(path.clone())?);
+        let traversal = reopened.root("source").traverse(TraversalSpec {
+            max_depth: 1,
+            ..TraversalSpec::default()
+        })?;
+        assert_eq!(traversal.entries[0].node_id, "new");
+
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_relationship_index_instrumentation_scales_with_operations_and_sources()
+    -> Result<()> {
+        for (operation_count, touched_sources) in [(16, 1), (64, 1), (64, 4), (256, 4)] {
+            let db = Primadb::with_replica_id(format!(
+                "relationship-batch-bench-{operation_count}-{touched_sources}"
+            ));
+            for source in 0..touched_sources {
+                db.root(format!("source-{source}"))
+                    .field("ready")
+                    .put(true)?;
+            }
+            db.reset_relationship_index_reindex_count();
+
+            let started = Instant::now();
+            db.transaction(|tx| {
+                for operation in 0..operation_count {
+                    let source = operation % touched_sources;
+                    tx.root(format!("source-{source}"))
+                        .field(format!("field-{operation}"))
+                        .put(operation)?;
+                }
+                Ok(())
+            })?;
+            let elapsed = started.elapsed();
+
+            assert_eq!(db.relationship_index_reindex_count(), touched_sources);
+            println!(
+                "transaction_batch operation_count={operation_count} touched_sources={touched_sources} reindexes={} timed_ns={}",
+                db.relationship_index_reindex_count(),
+                elapsed.as_nanos()
+            );
+        }
         Ok(())
     }
 
