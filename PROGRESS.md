@@ -43,3 +43,37 @@
   --all-features` (0 errors, one pre-existing dead-code warning); and `cargo
   check --target wasm32-unknown-unknown --lib` (pass).
 - Final `jj resolve -l` and `jj log -r '::@ & conflicts()'` report no conflicts.
+
+## 2026-08-28
+
+### Tranche 5 BM25
+
+- Created isolated workspace `primadb-tranche5-bm25-20260828-055044` from clean
+  source parent `cd81a2e9`.
+- Candidate scoring now consumes owned candidates once, deduplicates with the
+  prior last-write behavior, tokenizes each indexed field once, accumulates
+  query-term statistics, and scores only generated matching postings.
+- Collection caches retain their existing serialized postings and document
+  format, with runtime-only dense document/field IDs and compact postings used
+  for sparse score accumulation and bounded top-k selection.
+- Added correctness-oracle regressions for single/multi-term queries, all/half/
+  rare hit rates, candidate limits, pagination, selected fields, weighted fields,
+  deterministic ties, metadata, snippets, explanations, and exact match values.
+- Controlled release benchmark used seed `0x502d42454e4348`, two warmups, nine
+  repetitions, and ten iterations. Against the clean source parent, collection
+  medians changed by -38.6% (all, limit 10), -35.6% (half, limit 10), -34.1%
+  (rare, limit 10), and -35.4% (rare, limit 50). The established rare candidate
+  workload changed by -0.1% median with a lower p95; new candidate workload
+  medians were 2.179 ms (all), 1.899 ms (half), and 1.751 ms (rare).
+- An initial dense score-slot experiment regressed sparse collection queries and
+  was discarded; the committed implementation uses sparse score state.
+
+### Verification
+
+- `cargo fmt --all -- --check` passed.
+- `cargo test --lib text_search` passed (16 tests); `cargo test --lib` passed
+  (129 tests); `cargo test --all-targets` passed (129 tests); and
+  `cargo test --all-targets --all-features` passed (158 tests).
+- `cargo check --all-targets --all-features` passed with zero errors and the
+  existing `full_storage_transaction_without_pending_ops` dead-code warning.
+- `cargo check --target wasm32-unknown-unknown --lib` passed.

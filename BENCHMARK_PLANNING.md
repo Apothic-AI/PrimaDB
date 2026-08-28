@@ -24,3 +24,14 @@ The committed `controlled-benchmark` binary uses a fixed seed, two warmups, nine
 repetitions, and ten timed iterations per repetition. Both revisions are run
 with `cargo run --release`, pinned to one CPU when available, with identical
 environment variables and workload arguments.
+
+## Tranche 5 Follow-up
+
+The tranche-5 run retained the established collection workloads and added
+1,024-record native candidate workloads at all-, half-, and rare-hit rates.
+The clean source parent `cd81a2e9` was used only for the established rare
+candidate comparison; the added candidate cases are reported as absolute
+measurements because the untouched source benchmark did not contain those
+sample names. The first dense-allocation implementation was rejected after its
+rare collection result regressed; the final sparse-posting implementation was
+benchmarked again before recording results.
