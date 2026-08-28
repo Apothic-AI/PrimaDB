@@ -9,16 +9,16 @@ use crate::record::{RecordEntry, RecordScan, RecordValue};
 use crate::snapshot::DatabaseSnapshot;
 use crate::value::{FieldValue, NodeId, NodeState};
 use serde::{Deserialize, Serialize};
-use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex};
 
 const STORAGE_SCHEMA_VERSION: u32 = 1;
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,6 +47,7 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 std::thread_local! {
     static STORAGE_MATERIALIZATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STORAGE_DIRECT_INDEX_BUCKET_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -57,6 +58,16 @@ pub(crate) fn reset_storage_materialization_visit_count() {
 #[cfg(test)]
 pub(crate) fn storage_materialization_visit_count() -> usize {
     STORAGE_MATERIALIZATION_VISITS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_storage_direct_index_bucket_read_count() {
+    STORAGE_DIRECT_INDEX_BUCKET_READS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn storage_direct_index_bucket_read_count() -> usize {
+    STORAGE_DIRECT_INDEX_BUCKET_READS.with(std::cell::Cell::get)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -102,6 +113,13 @@ pub struct DirectScalarIndexEntry {
     pub sortable_key: String,
 }
 
+#[derive(Debug, Clone)]
+struct DirectScalarIndexFragment {
+    path: String,
+    value: Arc<JsonValue>,
+    sortable_key: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DirectIndexScan {
     #[serde(default)]
@@ -118,6 +136,10 @@ pub struct DirectIndexScan {
     pub end_before: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ids: Option<BTreeSet<NodeId>>,
 }
 
 impl DirectIndexScan {
@@ -152,6 +174,13 @@ impl DirectIndexScan {
             return false;
         }
         true
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn matches_candidate(&self, node_id: &str) -> bool {
+        self.candidate_ids
+            .as_ref()
+            .is_none_or(|candidate_ids| candidate_ids.contains(node_id))
     }
 }
 
@@ -872,10 +901,14 @@ impl SegmentFileStore {
         &self,
         root: &std::path::Path,
         scan: &DirectIndexScan,
-    ) -> Result<Vec<std::path::PathBuf>> {
+    ) -> Result<Vec<(std::path::PathBuf, Option<String>)>> {
         if let Some(exact) = &scan.exact_sortable_key {
             let dir = root.join(safe_direct_index_component(exact));
-            return Ok(dir.is_dir().then_some(dir).into_iter().collect());
+            return Ok(dir
+                .is_dir()
+                .then_some((dir, Some(exact.clone())))
+                .into_iter()
+                .collect());
         }
 
         let mut dirs = Vec::new();
@@ -891,9 +924,20 @@ impl SegmentFileStore {
             {
                 continue;
             }
-            dirs.push(path);
+            dirs.push((
+                path,
+                literal_direct_index_component(&name).map(ToOwned::to_owned),
+            ));
         }
-        dirs.sort();
+        // Literal directory names retain sortable-key order. Hashed names are
+        // kept after them and handled by the correctness fallback below.
+        dirs.sort_by(|(left_path, left_key), (right_path, right_key)| {
+            left_key
+                .is_none()
+                .cmp(&right_key.is_none())
+                .then_with(|| left_key.cmp(right_key))
+                .then_with(|| left_path.cmp(right_path))
+        });
         Ok(dirs)
     }
 
@@ -901,12 +945,29 @@ impl SegmentFileStore {
         file: &std::path::Path,
         path: &str,
         scan: &DirectIndexScan,
+        remaining_offset: &mut usize,
         entries: &mut Vec<DirectScalarIndexEntry>,
     ) -> Result<()> {
         let bucket = Self::read_direct_index_bucket_path(file)?;
-        for entry in bucket.entries.values() {
-            if entry.path == path && scan.matches_sortable_key(&entry.sortable_key) {
-                entries.push(entry.clone());
+        #[cfg(test)]
+        STORAGE_DIRECT_INDEX_BUCKET_READS.with(|count| count.set(count.get() + 1));
+        let bucket_entries = bucket
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.path == path
+                    && scan.matches_sortable_key(&entry.sortable_key)
+                    && scan.matches_candidate(&entry.node_id)
+            })
+            .collect::<Vec<_>>();
+        for entry in bucket_entries {
+            if *remaining_offset > 0 {
+                *remaining_offset -= 1;
+                continue;
+            }
+            entries.push(entry.clone());
+            if scan.limit.is_some_and(|limit| entries.len() >= limit) {
+                break;
             }
         }
         Ok(())
@@ -1732,28 +1793,65 @@ impl IncrementalStore for SegmentFileStore {
             return Ok(Vec::new());
         }
 
+        if scan.limit == Some(0) {
+            return Ok(Vec::new());
+        }
+
+        let dirs = self.direct_index_scan_sortable_dirs(&root, scan)?;
+        let has_hashed_dirs = dirs.iter().any(|(_, key)| key.is_none());
         let mut entries = Vec::new();
-        for dir in self.direct_index_scan_sortable_dirs(&root, scan)? {
+        let mut remaining_offset = scan.offset;
+        if has_hashed_dirs {
+            // Hashed physical names do not encode logical order. Read these
+            // uncommon long-key buckets through the exact same predicate,
+            // then sort the combined result to retain deterministic semantics.
+            let mut uncapped_scan = scan.clone();
+            uncapped_scan.offset = 0;
+            uncapped_scan.limit = None;
+            let mut ignored_offset = 0;
+            for (dir, _) in &dirs {
+                let mut files = Vec::new();
+                collect_files(dir, &mut files)?;
+                files.sort();
+                for file in files {
+                    Self::collect_direct_index_entries_from_bucket(
+                        &file,
+                        path,
+                        &uncapped_scan,
+                        &mut ignored_offset,
+                        &mut entries,
+                    )?;
+                }
+            }
+            sort_direct_index_entries(&mut entries, direction);
+            apply_direct_index_window(&mut entries, scan.offset, scan.limit);
+            return Ok(entries);
+        }
+
+        let dirs = if matches!(direction, QueryDirection::Desc) {
+            dirs.into_iter().rev().collect::<Vec<_>>()
+        } else {
+            dirs
+        };
+        for (dir, _) in dirs {
             let mut files = Vec::new();
             collect_files(&dir, &mut files)?;
             files.sort();
-            for file in files {
-                Self::collect_direct_index_entries_from_bucket(&file, path, scan, &mut entries)?;
+            if matches!(direction, QueryDirection::Desc) {
+                files.reverse();
             }
-        }
-        entries.sort_by(|left, right| {
-            left.sortable_key
-                .cmp(&right.sortable_key)
-                .then_with(|| left.node_id.cmp(&right.node_id))
-                .then_with(|| left.path.cmp(&right.path))
-        });
-        if matches!(direction, QueryDirection::Desc) {
-            entries.reverse();
-        }
-        if let Some(limit) = scan.limit
-            && entries.len() > limit
-        {
-            entries.truncate(limit);
+            for file in files {
+                Self::collect_direct_index_entries_from_bucket(
+                    &file,
+                    path,
+                    scan,
+                    &mut remaining_offset,
+                    &mut entries,
+                )?;
+                if scan.limit.is_some_and(|limit| entries.len() >= limit) {
+                    return Ok(entries);
+                }
+            }
         }
         Ok(entries)
     }
@@ -1868,7 +1966,7 @@ pub fn build_storage_transaction(
 ) -> StorageTransaction {
     let mut node_indexes = BTreeMap::new();
     let mut direct_indexes = BTreeMap::new();
-    let mut materialization_cache = BTreeMap::new();
+    let mut materialization_cache: BTreeMap<_, Arc<[_]>> = BTreeMap::new();
     let mut records = BTreeMap::new();
     let mut deleted_records = BTreeSet::new();
     let mut auth_meta = BTreeMap::new();
@@ -1996,6 +2094,39 @@ fn direct_index_key_parts(key: &str) -> Option<(&str, &str, &str)> {
             Some((path, sortable_key, node_id))
         }
         _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sort_direct_index_entries(entries: &mut [DirectScalarIndexEntry], direction: QueryDirection) {
+    entries.sort_by(|left, right| {
+        let sortable_order = left.sortable_key.cmp(&right.sortable_key);
+        let sortable_order = if matches!(direction, QueryDirection::Desc) {
+            sortable_order.reverse()
+        } else {
+            sortable_order
+        };
+        sortable_order
+            .then_with(|| left.node_id.cmp(&right.node_id))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_direct_index_window(
+    entries: &mut Vec<DirectScalarIndexEntry>,
+    offset: usize,
+    limit: Option<usize>,
+) {
+    if offset >= entries.len() {
+        entries.clear();
+        return;
+    }
+    if offset > 0 {
+        entries.drain(..offset);
+    }
+    if let Some(limit) = limit {
+        entries.truncate(limit);
     }
 }
 
@@ -2139,98 +2270,92 @@ pub fn record_entry_from_node_state(node_state: &NodeState) -> Option<RecordEntr
 fn direct_scalar_indexes(
     node_id: &str,
     nodes: &BTreeMap<NodeId, NodeState>,
-    materialization_cache: &mut BTreeMap<NodeId, JsonValue>,
+    materialization_cache: &mut BTreeMap<NodeId, Arc<[DirectScalarIndexFragment]>>,
 ) -> BTreeMap<String, DirectScalarIndexEntry> {
     let mut indexes = BTreeMap::new();
-    let (materialized, _) =
-        storage_materialize_node(node_id, nodes, &mut BTreeSet::new(), materialization_cache);
-    collect_direct_scalar_indexes(node_id, "", &materialized, &mut indexes);
+    let (fragments, _) = storage_collect_scalar_fragments(
+        node_id,
+        nodes,
+        &mut BTreeSet::new(),
+        materialization_cache,
+    );
+    for fragment in fragments.iter() {
+        let key = direct_index_key(&fragment.path, &fragment.sortable_key, node_id);
+        indexes.insert(
+            key,
+            DirectScalarIndexEntry {
+                node_id: node_id.to_owned(),
+                path: fragment.path.clone(),
+                value: (*fragment.value).clone(),
+                sortable_key: fragment.sortable_key.clone(),
+            },
+        );
+    }
     indexes
 }
 
-fn storage_materialize_node(
+fn storage_collect_scalar_fragments(
     node_id: &str,
     nodes: &BTreeMap<NodeId, NodeState>,
     visited: &mut BTreeSet<NodeId>,
-    materialization_cache: &mut BTreeMap<NodeId, JsonValue>,
-) -> (JsonValue, bool) {
-    if let Some(value) = materialization_cache.get(node_id) {
-        return (value.clone(), false);
+    materialization_cache: &mut BTreeMap<NodeId, Arc<[DirectScalarIndexFragment]>>,
+) -> (Arc<[DirectScalarIndexFragment]>, bool) {
+    if let Some(fragments) = materialization_cache.get(node_id) {
+        return (Arc::clone(fragments), false);
     }
     if !visited.insert(node_id.to_owned()) {
-        return (JsonValue::Null, true);
+        return (Arc::from([]), true);
     }
     #[cfg(test)]
     STORAGE_MATERIALIZATION_VISITS.with(|count| count.set(count.get() + 1));
-    let value = nodes
-        .get(node_id)
-        .map(|node_state| {
-            let mut object = JsonMap::new();
-            let mut contains_cycle = false;
-            for (field, state) in &node_state.fields {
-                match &state.value {
-                    FieldValue::Scalar(value) => {
-                        if let Some(value) = storage_materialized_scalar(node_id, field, value) {
-                            object.insert(field.clone(), value);
-                        }
+    let mut fragments = Vec::new();
+    let mut contains_cycle = false;
+    if let Some(node_state) = nodes.get(node_id) {
+        for (field, state) in &node_state.fields {
+            match &state.value {
+                FieldValue::Scalar(value) => {
+                    if let Some(value) = storage_materialized_scalar(node_id, field, value)
+                        && let Some(sortable_key) = sortable_scalar_key(&value)
+                    {
+                        fragments.push(DirectScalarIndexFragment {
+                            path: field.clone(),
+                            value: Arc::new(value),
+                            sortable_key,
+                        });
                     }
-                    FieldValue::Link(target) => {
-                        let (value, child_contains_cycle) =
-                            storage_materialize_node(target, nodes, visited, materialization_cache);
-                        contains_cycle |= child_contains_cycle;
-                        if !value.is_null() {
-                            object.insert(field.clone(), value);
-                        }
-                    }
-                    FieldValue::Set(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
                 }
+                FieldValue::Link(target) => {
+                    let (child_fragments, child_contains_cycle) = storage_collect_scalar_fragments(
+                        target,
+                        nodes,
+                        visited,
+                        materialization_cache,
+                    );
+                    contains_cycle |= child_contains_cycle;
+                    for fragment in child_fragments.iter() {
+                        fragments.push(DirectScalarIndexFragment {
+                            path: if fragment.path.is_empty() {
+                                field.clone()
+                            } else {
+                                format!("{field}.{}", fragment.path)
+                            },
+                            value: Arc::clone(&fragment.value),
+                            sortable_key: fragment.sortable_key.clone(),
+                        });
+                    }
+                }
+                FieldValue::Set(_) | FieldValue::Bytes(_) | FieldValue::Blob(_) => {}
             }
-            (JsonValue::Object(object), contains_cycle)
-        })
-        .unwrap_or((JsonValue::Null, false));
+        }
+    }
     visited.remove(node_id);
     // Cyclic materialization depends on the root's active path, so only completed
     // acyclic subgraphs are safe to reuse across direct-index roots.
-    if !value.1 {
-        materialization_cache.insert(node_id.to_owned(), value.0.clone());
+    let fragments: Arc<[DirectScalarIndexFragment]> = fragments.into();
+    if !contains_cycle {
+        materialization_cache.insert(node_id.to_owned(), Arc::clone(&fragments));
     }
-    value
-}
-
-fn collect_direct_scalar_indexes(
-    node_id: &str,
-    path: &str,
-    value: &JsonValue,
-    indexes: &mut BTreeMap<String, DirectScalarIndexEntry>,
-) {
-    match value {
-        JsonValue::Object(object) => {
-            for (field, value) in object {
-                let next_path = if path.is_empty() {
-                    field.clone()
-                } else {
-                    format!("{path}.{field}")
-                };
-                collect_direct_scalar_indexes(node_id, &next_path, value, indexes);
-            }
-        }
-        JsonValue::String(_) | JsonValue::Number(_) | JsonValue::Bool(_) | JsonValue::Null => {
-            let Some(sortable_key) = sortable_scalar_key(value) else {
-                return;
-            };
-            let key = direct_index_key(path, &sortable_key, node_id);
-            indexes.insert(
-                key,
-                DirectScalarIndexEntry {
-                    node_id: node_id.to_owned(),
-                    path: path.to_owned(),
-                    value: value.clone(),
-                    sortable_key,
-                },
-            );
-        }
-        JsonValue::Array(_) => {}
-    }
+    (fragments, contains_cycle)
 }
 
 fn auth_node_meta(node_id: &str, node_state: &NodeState) -> AuthNodeMeta {
@@ -2629,6 +2754,137 @@ mod tests {
                 .expect("shared child should be indexed for every root");
             assert_eq!(entry.value, json!(42));
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn direct_index_scan_is_ordered_bounded_and_candidate_aware() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("primadb-engine-range-scan-{unique}"));
+        let store = SegmentFileStore::new(&root, 8)?;
+        let nodes = (0..64)
+            .map(|index| {
+                let node_id = format!("node-{index:03}");
+                (
+                    node_id.clone(),
+                    node(&node_id, [("rank", FieldValue::Scalar(json!(index)))]),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let transaction = build_storage_transaction(
+            1,
+            build_storage_metadata(crate::clock::HybridClock::with_actor("test"), vec![], 2),
+            nodes,
+        );
+        store.apply_transaction(&transaction)?;
+
+        reset_storage_direct_index_bucket_read_count();
+        let scan = DirectIndexScan {
+            offset: 7,
+            limit: Some(4),
+            candidate_ids: Some(
+                (10..40)
+                    .filter(|index| index % 2 == 0)
+                    .map(|index| format!("node-{index:03}"))
+                    .collect(),
+            ),
+            ..DirectIndexScan::default()
+        };
+        let entries = store.scan_direct_index_entries("rank", QueryDirection::Asc, &scan)?;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.value.as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![24, 26, 28, 30]
+        );
+        assert!(storage_direct_index_bucket_read_count() < 64);
+
+        let range = DirectIndexScan {
+            start_at: Some(sortable_scalar_key(&json!(20)).unwrap()),
+            end_before: Some(sortable_scalar_key(&json!(24)).unwrap()),
+            ..DirectIndexScan::default()
+        };
+        let entries = store.scan_direct_index_entries("rank", QueryDirection::Asc, &range)?;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.value.as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![20, 21, 22, 23]
+        );
+
+        let descending = DirectIndexScan {
+            offset: 2,
+            limit: Some(3),
+            ..DirectIndexScan::default()
+        };
+        let entries = store.scan_direct_index_entries("rank", QueryDirection::Desc, &descending)?;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.value.as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![61, 60, 59]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn direct_index_scan_keeps_long_key_collisions_and_ties_ordered() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("primadb-engine-range-collision-{unique}"));
+        let store = SegmentFileStore::new(&root, 8)?;
+        let shared_prefix = "x".repeat(120);
+        let low = format!("{shared_prefix}a");
+        let high = format!("{shared_prefix}b");
+        let nodes = BTreeMap::from([
+            (
+                "node-a".to_owned(),
+                node("node-a", [("value", FieldValue::Scalar(json!(low)))]),
+            ),
+            (
+                "node-b".to_owned(),
+                node("node-b", [("value", FieldValue::Scalar(json!(low)))]),
+            ),
+            (
+                "node-c".to_owned(),
+                node("node-c", [("value", FieldValue::Scalar(json!(high)))]),
+            ),
+        ]);
+        let transaction = build_storage_transaction(
+            1,
+            build_storage_metadata(crate::clock::HybridClock::with_actor("test"), vec![], 2),
+            nodes,
+        );
+        store.apply_transaction(&transaction)?;
+        let entries = store.scan_direct_index_entries(
+            "value",
+            QueryDirection::Desc,
+            &DirectIndexScan {
+                limit: Some(3),
+                ..DirectIndexScan::default()
+            },
+        )?;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["node-c", "node-a", "node-b"]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[test]

@@ -3241,12 +3241,10 @@ impl Primadb {
         let candidate_ids: BTreeSet<_> = set.members.keys().cloned().collect();
         let mut eligible_ids = candidate_ids.clone();
         for (path, filters) in &indexed_filter_groups {
-            let scan = build_direct_index_scan(filters, None);
+            let mut scan = build_direct_index_scan(filters, None);
+            scan.candidate_ids = Some(candidate_ids.clone());
             let mut matched = BTreeSet::new();
             for entry in engine.scan_direct_index_entries(path, QueryDirection::Asc, &scan)? {
-                if !candidate_ids.contains(&entry.node_id) {
-                    continue;
-                }
                 if filters
                     .iter()
                     .all(|filter| filter_matches_index_entry(filter, &entry.value))
@@ -3274,14 +3272,15 @@ impl Primadb {
                 .get(&order_path)
                 .map(|filters| filters.as_slice())
                 .unwrap_or(&[]);
-            let scan = build_direct_index_scan(filters, None);
             let target_count = spec
                 .limit
                 .map(|limit| spec.offset.saturating_add(limit))
                 .filter(|_| can_early_stop_index_query(spec));
+            let mut scan = build_direct_index_scan(filters, target_count);
+            scan.candidate_ids = Some(eligible_ids.clone());
             let mut seen = BTreeSet::new();
             for entry in engine.scan_direct_index_entries(&order_path, direction, &scan)? {
-                if !eligible_ids.contains(&entry.node_id) || !seen.insert(entry.node_id.clone()) {
+                if !seen.insert(entry.node_id.clone()) {
                     continue;
                 }
                 candidates.push(QueryCandidate {
@@ -11279,6 +11278,61 @@ mod tests {
         assert_eq!(ranked[1].value["title"], "Task 22");
         assert_eq!(ranked[2].value["title"], "Task 21");
         assert!(reader.stats().nodes < 24);
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn indexed_query_uses_bounded_ordered_scan_with_offset() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-segment-index-window-{unique}"));
+        let writer = Primadb::with_replica_id("window-writer");
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
+        for index in 0..96 {
+            writer
+                .root("lists")
+                .field("main")
+                .field("items")
+                .set(json!({
+                    "label": format!("Task {index}"),
+                    "rank": index,
+                    "active": index % 3 != 0,
+                }))?;
+        }
+        drop(writer);
+
+        let reader = Primadb::with_replica_id("window-reader");
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
+        crate::engine::reset_storage_direct_index_bucket_read_count();
+        let result = reader
+            .root("lists")
+            .field("main")
+            .field("items")
+            .query(QuerySpec {
+                filters: vec![QueryFilter::Eq {
+                    path: "active".to_owned(),
+                    value: json!(true),
+                }],
+                order: Some(crate::query::QueryOrder {
+                    path: "rank".to_owned(),
+                    direction: QueryDirection::Desc,
+                }),
+                limit: Some(5),
+                offset: 8,
+            })?;
+        assert_eq!(
+            result
+                .iter()
+                .map(|entry| entry.value["rank"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![83, 82, 80, 79, 77]
+        );
+        assert!(crate::engine::storage_direct_index_bucket_read_count() < 96);
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())
