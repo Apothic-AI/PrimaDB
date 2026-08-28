@@ -233,6 +233,10 @@ struct TextWatchSubscriptionInner {
 struct Inner {
     clock: HybridClock,
     nodes: std::collections::BTreeMap<NodeId, NodeState>,
+    // Record scans use storage as the base and consult only locally materialized
+    // record changes. This avoids walking unrelated lazy-loaded graph nodes.
+    record_overlay: BTreeMap<String, Option<RecordEntry>>,
+    record_overlay_node_keys: BTreeMap<NodeId, String>,
     pending_ops: CompactedOperations,
     unflushed_ops: CompactedOperations,
     subscriptions: std::collections::BTreeMap<u64, Watcher>,
@@ -280,6 +284,8 @@ struct Inner {
     query_candidate_projections: usize,
     #[cfg(test)]
     watch_recomputations: usize,
+    #[cfg(test)]
+    record_overlay_candidates_examined: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -653,6 +659,8 @@ impl ChangeImpact {
 struct TransactionJournal {
     clock: HybridClock,
     nodes: BTreeMap<NodeId, Option<NodeState>>,
+    record_overlay: BTreeMap<String, Option<RecordEntry>>,
+    record_overlay_node_keys: BTreeMap<NodeId, String>,
     pending_ops: OperationQueueUndo,
     unflushed_ops: OperationQueueUndo,
     missing_nodes: BTreeMap<NodeId, bool>,
@@ -664,6 +672,8 @@ impl TransactionJournal {
         Self {
             clock: inner.clock.clone(),
             nodes: BTreeMap::new(),
+            record_overlay: inner.record_overlay.clone(),
+            record_overlay_node_keys: inner.record_overlay_node_keys.clone(),
             pending_ops: OperationQueueUndo::new(inner.pending_ops.len()),
             unflushed_ops: OperationQueueUndo::new(inner.unflushed_ops.len()),
             missing_nodes: BTreeMap::new(),
@@ -696,6 +706,8 @@ impl TransactionJournal {
         for node in touched_nodes {
             inner.reindex_node_relationships(&node);
         }
+        inner.record_overlay = self.record_overlay;
+        inner.record_overlay_node_keys = self.record_overlay_node_keys;
     }
 }
 
@@ -788,6 +800,8 @@ impl Primadb {
             inner: Arc::new(Mutex::new(Inner {
                 clock: HybridClock::with_actor(replica_id),
                 nodes: Default::default(),
+                record_overlay: Default::default(),
+                record_overlay_node_keys: Default::default(),
                 pending_ops: CompactedOperations::default(),
                 unflushed_ops: CompactedOperations::default(),
                 subscriptions: Default::default(),
@@ -835,6 +849,8 @@ impl Primadb {
                 query_candidate_projections: 0,
                 #[cfg(test)]
                 watch_recomputations: 0,
+                #[cfg(test)]
+                record_overlay_candidates_examined: 0,
             })),
         }
     }
@@ -1753,6 +1769,7 @@ impl Primadb {
         inner.next_storage_tx_id = inner
             .next_storage_tx_id
             .max(transaction.id.saturating_add(1));
+        inner.clear_flushed_record_overlay(transaction);
         Ok(())
     }
 
@@ -1841,6 +1858,7 @@ impl Primadb {
             let mut inner = self.inner.lock().unwrap();
             inner.clock = snapshot.clock;
             inner.nodes = snapshot.nodes;
+            inner.rebuild_record_overlay();
             inner.pending_ops = CompactedOperations::from_operations(snapshot.pending_ops);
             inner.scope_policies = snapshot.scope_policies;
             inner.provisional_transactions = snapshot.provisional_transactions;
@@ -1868,6 +1886,7 @@ impl Primadb {
             let mut inner = self.inner.lock().unwrap();
             inner.clock = snapshot.clock.rebased_with_actor(local_actor);
             inner.nodes = snapshot.nodes;
+            inner.rebuild_record_overlay();
             inner.pending_ops = if keep_pending {
                 CompactedOperations::from_operations(snapshot.pending_ops)
             } else {
@@ -2145,6 +2164,7 @@ impl Primadb {
             let before = inner.nodes.get(&node_id).cloned();
             observe_node_state(&mut inner.clock, &node);
             merge_node_state(&mut inner.nodes, node);
+            inner.refresh_record_overlay(&node_id);
             inner.missing_nodes.remove(&node_id);
             inner.scheduled_node_fetches.remove(&node_id);
             inner.reindex_node_relationships(&node_id);
@@ -2790,6 +2810,8 @@ impl Primadb {
                 inner.next_provisional_transaction_id = metadata.next_provisional_transaction_id;
                 inner.unflushed_ops.clear();
                 inner.nodes.clear();
+                inner.record_overlay.clear();
+                inner.record_overlay_node_keys.clear();
                 inner.missing_nodes.clear();
                 inner.scheduled_node_fetches.clear();
                 inner.relationship_index = RelationshipIndex::default();
@@ -2808,6 +2830,7 @@ impl Primadb {
 
     pub fn close_durable_storage(&self) {
         let mut inner = self.inner.lock().unwrap();
+        inner.rebuild_record_overlay();
         inner.persistence = None;
         inner.storage_adapter = None;
         inner.storage_engine = None;
@@ -4354,21 +4377,23 @@ fn collect_record_entries_for_scan_page(
         }
     }
 
-    for (node_id, node_state) in &inner.nodes {
-        if !crate::is_record_node_id(node_id) {
+    #[cfg(test)]
+    let overlay_candidates_examined = inner.record_overlay.len();
+    for (key, overlay_entry) in &inner.record_overlay {
+        if !scan.matches_key(key) {
             continue;
         }
-        let Some(key) = crate::record_key_from_node_state(node_state) else {
-            continue;
-        };
-        if !scan.matches_key(&key) {
-            continue;
-        }
-        if let Some(entry) = crate::record_entry_from_node_state(node_state) {
-            entries.insert(entry.key.clone(), entry);
+        if let Some(entry) = overlay_entry {
+            entries.insert(entry.key.clone(), entry.clone());
         } else {
-            entries.remove(&key);
+            entries.remove(key);
         }
+    }
+    #[cfg(test)]
+    {
+        inner.record_overlay_candidates_examined = inner
+            .record_overlay_candidates_examined
+            .saturating_add(overlay_candidates_examined);
     }
 
     Ok(entries.into_values().collect())
@@ -5988,6 +6013,55 @@ impl Drop for TextWatchSubscriptionInner {
 }
 
 impl Inner {
+    fn refresh_record_overlay(&mut self, node_id: &str) {
+        if !crate::is_record_node_id(node_id) {
+            return;
+        }
+
+        if let Some(previous_key) = self.record_overlay_node_keys.remove(node_id) {
+            self.record_overlay.remove(&previous_key);
+        }
+
+        let Some(node_state) = self.nodes.get(node_id) else {
+            return;
+        };
+        let Some(key) = crate::record_key_from_node_state(node_state) else {
+            return;
+        };
+        self.record_overlay_node_keys
+            .insert(node_id.to_owned(), key.clone());
+        self.record_overlay
+            .insert(key, crate::record_entry_from_node_state(node_state));
+    }
+
+    fn rebuild_record_overlay(&mut self) {
+        self.record_overlay.clear();
+        self.record_overlay_node_keys.clear();
+        let record_nodes = self
+            .nodes
+            .keys()
+            .filter(|node_id| crate::is_record_node_id(node_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for node_id in record_nodes {
+            self.refresh_record_overlay(&node_id);
+        }
+    }
+
+    fn clear_flushed_record_overlay(&mut self, transaction: &StorageTransaction) {
+        for (node_id, transaction_state) in &transaction.nodes {
+            if !crate::is_record_node_id(node_id)
+                || self.nodes.get(node_id) != Some(transaction_state)
+            {
+                continue;
+            }
+            let Some(key) = self.record_overlay_node_keys.remove(node_id) else {
+                continue;
+            };
+            self.record_overlay.remove(&key);
+        }
+    }
+
     fn journal_node(&mut self, node: &str) {
         let Some(journal) = self.transaction_journal.as_mut() else {
             return;
@@ -7124,6 +7198,7 @@ impl Inner {
         if accepted {
             let source = operation_source_node(&op).to_owned();
             self.reindex_node_relationships(&source);
+            self.refresh_record_overlay(&source);
             self.journal_operation_queue(OperationQueue::Unflushed, &op);
             self.unflushed_ops.push(op.clone());
         }
@@ -7909,6 +7984,7 @@ fn merge_snapshot_into_inner(inner: &mut Inner, snapshot: DatabaseSnapshot) {
     inner.missing_nodes.clear();
     inner.scheduled_node_fetches.clear();
     inner.rebuild_relationship_index();
+    inner.rebuild_record_overlay();
 }
 
 fn observe_node_state(clock: &mut HybridClock, node: &NodeState) {
@@ -8756,15 +8832,15 @@ mod tests {
         build_pull_responses,
     };
     use crate::{
-        ConnectHookContext, HookDecision, HookTransport, NetworkHooks, PeerPresence, PrimadbError,
-        PrimadbLimits, PullRequest, PullRequestKind, PullResponseBody, QueryDirection, QueryFilter,
-        QuerySpec, RecordBatch, RecordEntry, RecordMutation, RecordPrecondition, RecordScan,
-        RecordScanResult, RecordValue, RemotePath, Result, Revision, RoomHookContext,
-        ScopeAuthority, ScopeConsistency, ScopeOfflineWrites, ScopePolicy, ServeRequestContext,
-        ServeResultContext, TextCandidatePolicy, TextCollectionConfig, TextDocument,
-        TextScoreScope, TextSearchSource, TextSearchSpec, TransactionOptions, TransactionStatus,
-        TransactionStep, TraversalDirection, TraversalSpec, VectorCollectionConfig, VectorFilter,
-        VectorMetric, VectorSearchSpec,
+        ConnectHookContext, HookDecision, HookTransport, NetworkHooks, NodeState, PeerPresence,
+        PrimadbError, PrimadbLimits, PullRequest, PullRequestKind, PullResponseBody,
+        QueryDirection, QueryFilter, QuerySpec, RecordBatch, RecordEntry, RecordMutation,
+        RecordPrecondition, RecordScan, RecordScanResult, RecordValue, RemotePath, Result,
+        Revision, RoomHookContext, ScopeAuthority, ScopeConsistency, ScopeOfflineWrites,
+        ScopePolicy, ServeRequestContext, ServeResultContext, TextCandidatePolicy,
+        TextCollectionConfig, TextDocument, TextScoreScope, TextSearchSource, TextSearchSpec,
+        TransactionOptions, TransactionStatus, TransactionStep, TraversalDirection, TraversalSpec,
+        VectorCollectionConfig, VectorFilter, VectorMetric, VectorSearchSpec,
     };
     use crate::{Operation, OperationAction, OperationValue};
     use serde_json::json;
@@ -11680,7 +11756,11 @@ mod tests {
         overlay.delete_record("records/002")?;
         overlay.put_record_json("records/000.5", json!({"overlay": true}))?;
         let overlay_nodes = overlay.inner.lock().unwrap().nodes.clone();
-        reader.inner.lock().unwrap().nodes.extend(overlay_nodes);
+        {
+            let mut inner = reader.inner.lock().unwrap();
+            inner.nodes.extend(overlay_nodes);
+            inner.rebuild_record_overlay();
+        }
 
         let overlay_page = reader.scan_records(RecordScan {
             prefix: Some("records/".to_owned()),
@@ -11690,7 +11770,11 @@ mod tests {
         assert_eq!(overlay_page.entries[0].key, "records/000");
         assert_eq!(overlay_page.entries[1].key, "records/000.5");
         assert_eq!(overlay_page.next_cursor.as_deref(), Some("records/000.5"));
-        reader.inner.lock().unwrap().nodes.clear();
+        {
+            let mut inner = reader.inner.lock().unwrap();
+            inner.nodes.clear();
+            inner.rebuild_record_overlay();
+        }
 
         let forward = reader.scan_records(RecordScan {
             prefix: Some("records/".to_owned()),
@@ -11748,6 +11832,63 @@ mod tests {
             ["records/051", "records/052"]
         );
         assert_eq!(range.next_cursor.as_deref(), Some("records/052"));
+
+        let _ = std::fs::remove_dir_all(path);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn storage_record_page_does_not_scan_unrelated_loaded_nodes() -> Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("primadb-record-overlay-index-{unique}"));
+
+        let writer = Primadb::with_replica_id("record-overlay-index-writer");
+        assert!(!writer.use_segment_storage(path.clone(), 8)?);
+        for index in 0..256 {
+            writer.put_record_json(&format!("page/{index:04}"), json!({"index": index}))?;
+        }
+        drop(writer);
+
+        let reader = Primadb::with_replica_id("record-overlay-index-reader");
+        assert!(reader.use_segment_storage(path.clone(), 8)?);
+        {
+            let mut inner = reader.inner.lock().unwrap();
+            for index in 0..10_000 {
+                let node_id = format!("loaded-graph-node/{index:05}");
+                inner.nodes.insert(node_id.clone(), NodeState::new(node_id));
+            }
+            inner.record_overlay_candidates_examined = 0;
+        }
+        for index in 0..256 {
+            assert!(reader.get_record(&format!("page/{index:04}"))?.is_some());
+        }
+        reader
+            .inner
+            .lock()
+            .unwrap()
+            .record_overlay_candidates_examined = 0;
+
+        let page = reader.scan_records(RecordScan {
+            prefix: Some("page/".to_owned()),
+            limit: Some(4),
+            ..RecordScan::default()
+        })?;
+        assert_eq!(page.entries.len(), 4);
+        assert_eq!(page.entries[0].key, "page/0000");
+        assert_eq!(page.entries[3].key, "page/0003");
+        assert_eq!(page.next_cursor.as_deref(), Some("page/0003"));
+        assert_eq!(
+            reader
+                .inner
+                .lock()
+                .unwrap()
+                .record_overlay_candidates_examined,
+            0
+        );
 
         let _ = std::fs::remove_dir_all(path);
         Ok(())

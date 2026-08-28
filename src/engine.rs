@@ -883,18 +883,26 @@ impl SegmentFileStore {
             return Ok(false);
         }
 
-        let mut children = std::fs::read_dir(dir)?
-            .map(|entry| entry.map_err(Into::into))
-            .collect::<Result<Vec<_>>>()?;
-        children.sort_by_key(|entry| entry.file_name());
-        let record_file = children
-            .iter()
-            .find(|entry| entry.file_name() == RECORD_ENTRY_FILE)
-            .map(|entry| entry.path());
-        let mut directories = children
-            .into_iter()
-            .filter(|entry| entry.path().is_dir())
-            .collect::<Vec<_>>();
+        let mut record_file = None;
+        let mut directories = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name == RECORD_ENTRY_FILE {
+                record_file = Some(entry.path());
+                continue;
+            }
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if partial_component_prefix
+                .is_some_and(|partial| !name.to_string_lossy().starts_with(partial))
+            {
+                continue;
+            }
+            directories.push(entry);
+        }
+        directories.sort_by_key(|entry| entry.file_name());
 
         if !scan.reverse
             && let Some(path) = record_file.as_deref()
@@ -909,11 +917,6 @@ impl SegmentFileStore {
         for entry in directories {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(partial) = partial_component_prefix
-                && !name.starts_with(partial)
-            {
-                continue;
-            }
 
             let next_encoded_key = if encoded_key.is_empty() {
                 name
