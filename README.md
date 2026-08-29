@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/Apothic-AI/primadb/blob/master/primadb-logo.png?raw=true" alt="PrimaDB logo" width="320">
+</p>
+
 # primadb
 
 `primadb` is a Rust-native, local-first graph database inspired by Gun, but built around explicit versioned operations instead of Gun's implicit event mesh. The current codebase focuses on deterministic merge behavior, browser compatibility, and a clean replication boundary that can be driven by WebSockets, WebRTC, service workers, or any other transport you want to layer on top.
